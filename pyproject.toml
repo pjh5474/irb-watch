@@ -1,0 +1,30 @@
+[project]
+name = "irb-watch"
+version = "0.1.0"
+description = "Server that scans hospital IRB pages and reports document changes."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "beautifulsoup4",
+    "playwright",
+    "supabase",
+    "pyjwt",
+    "apscheduler",
+    "openai-agents",
+    "pdfplumber",
+    "pydantic-settings",
+]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_default_fixture_loop_scope = "function"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
