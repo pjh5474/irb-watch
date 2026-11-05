@@ -30,14 +30,28 @@ Recorded 2026-11-04. Each entry is a question asked before planning, the answer 
 | Limits | Max file size, max docs per URL, per-domain delay, cap on LLM calls per run | Bounds OpenAI cost and load on hospital sites |
 | Summary language | Same language as the source document | Avoids mistranslating regulatory wording |
 | Notifications | Dashboard only for the MVP. No email | Email can be added later |
+| Python version | Pinned to 3.12 (`>=3.12,<3.13`) | Libraries are best tested on 3.12; matches the Dockerfile. 3.14 worked but offered nothing here |
+| Server layout | One FastAPI server plus Supabase. No separate BE service | A second service adds deployments, duplicate auth and failure modes. Extract later if needed |
+| Schema tool | Supabase CLI SQL migrations, not SQLAlchemy/Alembic/Drizzle | Most schema work is RLS, triggers and Storage policies that Alembic cannot autogenerate |
+| Profiles | `public.profiles(id uuid PK -> auth.users on delete cascade, email, display_name, role user/admin)`, created by an `auth.users` trigger | Role is never read from user-editable metadata. Users may update only `display_name` (column-level grant) |
+| DB tables (MVP) | `profiles`, `sources`, `documents`, `document_versions`, `subscriptions`, `audit_logs` | Dropped `changes` and `scan_runs`: the feed comes from versions and the audit log; latest scan result lives on `sources` |
+| Document model | One `documents` row per post; attachments are a JSON list inside each `document_versions` row | Avoids a files table. `change_type` is `baseline` (silent first scan) or `updated` |
+| Audit log | Append-only `audit_logs`; categories document, scan, admin, user. No foreign keys, so entries outlive the rows they describe. Triggers log subscription and role changes | Feeds dashboard news cards. Users see document entries for subscribed sources; admins see all |
+| Access model | Users read via supabase-js under RLS; all writes go through the server's service role; Storage objects readable only by the server, which issues signed URLs | Keeps the access checks in one place |
+| JWT verification | Verify against the project's public ES256 key list; no JWT secret in `.env` | Confirmed from the project's JWKS endpoint |
+| OpenAI endpoint | Empty `OPENAI_BASE_URL` means OpenAI direct; set means gateway. Gateway set without a model fails at startup; disable tracing in gateway mode | Model name is read from `.env`, never hardcoded |
+| Sign-up | Public sign-up disabled (`enable_signup = false`) | Accounts are admin-created |
 
 ## Open items
 - Which API gateway. This affects how the Agents SDK client is configured (Responses API vs chat-completions mode).
-- First real hospital URL plus one sample file, to confirm parseability. HWP is the main risk.
+- HWP/DOCX samples to confirm parseability. HWP is the main risk.
+- The hosted project's own sign-up switch must be turned off by hand in the dashboard.
 - Check each target site's robots.txt and terms of service.
 - Success test set for detection: define known changes, and measure false positives and parse failures too.
 
 ## Process notes
 - The user does not want files edited through shell commands. Use the Edit and Write tools only, so rewind works. Also saved in memory.
 - `pyproject.toml` was overwritten once without being read first. Check it if anything seems missing.
-- `irb_watch/notify/` is out of the MVP and should be deleted manually.
+- `irb_watch/notify/` and the root `snuh-crawler.py` should be deleted manually.
+- Verification of the first audit-log migration found `service_role` could still update/delete rows because of the project's default privileges. Fixed by a follow-up migration. Lesson: revoke first, then grant.
+- `.env.dev` was briefly not git-ignored; `.gitignore` now ignores `.env.*` except `.env.example`.

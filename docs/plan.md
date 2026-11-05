@@ -14,8 +14,9 @@ irb-watch/
   docs/                     decisions.md, plan.md
   supabase/
     config.toml
-    migrations/             sources, documents, document_versions, changes,
-                            subscriptions, scan_runs, profiles(role) + RLS
+    migrations/             profiles (+ signup trigger), sources, documents,
+                            document_versions, subscriptions, audit_logs,
+                            private `documents` bucket, RLS (3 applied so far)
   irb_watch/
     main.py                 FastAPI app + scheduler startup
     config.py               pydantic-settings (env)
@@ -35,9 +36,9 @@ irb-watch/
 
 ## Implementation steps
 1. [done] `pyproject.toml` for uv, `.env.example`, `Dockerfile`.
-2. [done] `config.py`, `main.py`, `/health`, `tests/test_health.py`. Not yet run.
-3. Supabase migrations + RLS; document tables in `supabase/migrations/`; private Storage bucket for originals. (Waiting on Supabase project.)
-4. `auth/` JWT verify + `require_admin`; admin user-creation endpoint via Supabase Admin API.
+2. [done] `config.py`, `main.py`, `/health`, `tests/test_health.py`. Python pinned to 3.12.
+3. [done] Supabase migrations applied to project `jlkkoaugtovvaxrqxoyx` and verified with read-only queries: `profiles` + signup trigger, domain tables + audit log + private bucket, audit-log append-only fix. **Not yet exercised with real users:** RLS policies and the three triggers.
+4. `auth/` JWT verify + `require_admin`; admin user-creation endpoint via Supabase Admin API. Project signs JWTs with ES256 keys, so verify against the public key list at `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`; no JWT secret needed. `config.py` still lists `supabase_jwt_secret` and does not read `.env.dev`: update both.
 5. [done] `security/url_guard` + `limits` + tests.
 6. [partly done] SNUH adapter (`crawlers/snuh.py`, `crawlers/fetcher.py`, `core/models.py`, `core/hashing.py`) verified live on board 2605277029, 52 tests pass. **Remaining:** PDF text parser in `parsers/`, diff/removal logic in `core/` against an in-memory store, second board live check, HWP/DOCX samples. `snuh-crawler.py` in the repo root is superseded and should be deleted.
 7. `ai/` summary agent behind the gateway-configurable client.
@@ -46,8 +47,18 @@ irb-watch/
 ## Verification
 - `uv run pytest` (fixtures cover: new, updated, removed after 2 misses, baseline, parse failure => needs_review, SSRF blocks).
 - `uv run uvicorn irb_watch.main:app` then GET `/health`; admin-JWT call to trigger a scan against one real hospital URL.
-- Check a scan_runs row and changes rows in Supabase; confirm failures show `needs_review`.
+- Check `sources.last_scan_status`, `documents`, `document_versions` and `audit_logs` rows in Supabase; confirm failures show `needs_review`.
+- Create a user through the admin endpoint: a `profiles` row appears with role `user`. Subscribe and change a role: matching `audit_logs` rows appear.
+
+## Supabase workflow (CLI v3)
+- Commands target the **local** stack by default; hosted projects need `--remote`. No Docker on this machine, so there is no local stack.
+- Create a migration: `npx supabase migration new <name>`, then fill the file. Never edit an applied migration; add a new one.
+- Preview: `npx supabase db push --remote --dry-run`. Apply: `npx supabase db push --remote --yes`.
+- Verify: `npx supabase db query --remote --read-only "<sql>"`. `information_schema` grant views are empty for the login role; use `has_table_privilege()` instead.
+- The project's default privileges give `service_role` every privilege on new tables. Always `revoke all` then grant exactly what is needed.
+- The CLI labels this project "production". It is the only project and has no real data yet.
 
 ## Open items
 - Which API gateway (affects Agents SDK client setup).
-- First real hospital URL and sample file, to confirm parseability (HWP especially).
+- Second board `2605277034` fully scanned live; HWP/DOCX samples.
+- Dashboard setting to check by hand: Authentication → disable "Allow new users to sign up" on the hosted project (`enable_signup = false` is set only in local `config.toml`).
