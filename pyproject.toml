@@ -10,7 +10,8 @@ dependencies = [
     "beautifulsoup4",
     "playwright",
     "supabase",
-    "pyjwt",
+    "pyjwt[crypto]",
+    "email-validator",
     "apscheduler",
     "openai-agents",
     "pdfplumber",
@@ -25,6 +26,18 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_default_fixture_loop_scope = "function"
 asyncio_mode = "auto"
+markers = ["live: talks to the real Supabase project; runs only when RUN_LIVE=1"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom puts Depends()/Query() in argument defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
+[tool.ruff.lint.isort]
+# The repo has a top-level supabase/ folder (CLI files); it is not our Python package.
+known-third-party = ["supabase", "supabase_auth"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF059"]

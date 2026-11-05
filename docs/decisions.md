@@ -41,6 +41,15 @@ Recorded 2026-11-04. Each entry is a question asked before planning, the answer 
 | JWT verification | Verify against the project's public ES256 key list; no JWT secret in `.env` | Confirmed from the project's JWKS endpoint |
 | OpenAI endpoint | Empty `OPENAI_BASE_URL` means OpenAI direct; set means gateway. Gateway set without a model fails at startup; disable tracing in gateway mode | Model name is read from `.env`, never hardcoded |
 | Sign-up | Public sign-up disabled (`enable_signup = false`) | Accounts are admin-created |
+| Admin API scope (step 4) | Create user, list users, change role, soft delete, restore | Soft delete = `profiles.deleted_at` plus an auth ban; email stays reserved, restore undoes it |
+| New user credentials | Admin sets a temporary password (min 8 chars); email auto-confirmed | No email service needed yet |
+| Admin check | Role read from the database on every admin request | Demotions and deletions apply immediately; a stale token cannot keep admin rights |
+| Lock-out guards | Refuse demoting or deleting yourself, and removing the last active admin | Count-then-write, so a simultaneous race is possible but unlikely at this scale |
+| First admin | One-off script `irb_watch.scripts.create_first_admin`, reusable for the production project | Steps in `docs/runbook.md` |
+| Role-change audit | Database trigger only, so role changes have no actor | User chose this over a server-written entry |
+| Settings loading | `APP_ENV` selects `.env.<APP_ENV>`, default dev; real env vars override | Switching to production needs no code change |
+| CORS | `FRONTEND_ORIGINS`, default `http://localhost:3000` | |
+| Tests touching Supabase | Offline tests by default; live test only with `RUN_LIVE=1` | User said the project is a test account, so the live test runs against it; it leaves append-only audit rows |
 
 ## Open items
 - Which API gateway. This affects how the Agents SDK client is configured (Responses API vs chat-completions mode).
