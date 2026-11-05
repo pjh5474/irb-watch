@@ -27,6 +27,20 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = ""
+    openai_timeout_seconds: float = 60.0
+
+    # Jev (TypeSafe) classifies changes; leave the key empty to switch it off.
+    typesafe_api_key: str = ""
+    typesafe_model: str = "jev-latest"
+    typesafe_timeout_seconds: float = 30.0
+
+    # A change is "cosmetic" when Jev's probability that it is substantive is below this
+    # and Jev is confident it is low priority.
+    ai_skip_below: float = 0.15
+    # Jev answers with less confidence than this count as "unsure" (priority medium).
+    ai_min_confidence: float = 0.6
+    # New summaries one user may request per day (cached ones are free).
+    summary_requests_per_day: int = 20
 
     scan_cron: str = "0 6 * * *"
     max_file_bytes: int = 20_000_000

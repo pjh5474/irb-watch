@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
+from irb_watch.ai.enrich import Enricher, Enrichment
 from irb_watch.core.detect import (
     ChangeEvent,
     DocumentStore,
@@ -87,12 +88,14 @@ class ScanService:
         reader_factory,
         audit: AuditSink,
         clock=lambda: datetime.now(UTC),
+        enricher: Enricher | None = None,
     ) -> None:
         self._repo = repo
         self._storage = storage
         self._reader_factory = reader_factory
         self._audit = audit
         self._clock = clock
+        self._enricher = enricher
 
     # -- two-phase API: claim in the request, run in the background ------------------
 
@@ -176,11 +179,14 @@ class ScanService:
                 unreadable_ids=frozenset(reading.unreadable_ids),
             ),
         )
+        # Summaries, priority and category are decided before saving, so a version and its
+        # news card are written together (the audit log cannot be edited afterwards).
+        enrichments = self._enricher.enrich(result.events, loaded.store) if self._enricher else {}
         seen = {o.external_id for o in reading.observations}
         doc_ids = self._repo.persist(source.id, loaded, seen, now)
 
         for event in result.events:
-            self._log_event(source, event, doc_ids, actor_id)
+            self._log_event(source, event, doc_ids, actor_id, enrichments.get(event.external_id))
 
         titles = {o.external_id: o.content.title for o in reading.observations}
         for external_id, reason in result.needs_review.items():
@@ -231,7 +237,12 @@ class ScanService:
         return summary
 
     def _log_event(
-        self, source: Source, event: ChangeEvent, doc_ids: dict[str, int], actor_id: str | None
+        self,
+        source: Source,
+        event: ChangeEvent,
+        doc_ids: dict[str, int],
+        actor_id: str | None,
+        enrichment: Enrichment | None,
     ) -> None:
         detail = event.detail
         payload: dict = {"version_no": event.version_no}
@@ -239,15 +250,25 @@ class ScanService:
             payload["title_changed"] = detail.title_change is not None
             payload["text_changed"] = detail.body_diff is not None
             payload["files"] = {f.filename: f.kind for f in detail.meaningful_file_changes}
+        priority = detail.suggested_priority if detail else None
+        summary = None
+        if enrichment is not None:
+            priority = enrichment.priority
+            summary = enrichment.summary
+            payload["category"] = enrichment.category
+            payload["summary_source"] = enrichment.source
+            if enrichment.note:
+                payload["ai_note"] = enrichment.note
         self._audit.record(
             "document",
             f"document.{event.kind}",
             actor_id,
             title=event.title,
+            summary=summary,
             payload=payload,
             source_id=source.id,
             document_id=doc_ids.get(event.external_id),
-            priority=detail.suggested_priority if detail else None,
+            priority=priority,
         )
 
 

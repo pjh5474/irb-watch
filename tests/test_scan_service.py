@@ -13,7 +13,7 @@ T0 = datetime(2026, 11, 5, tzinfo=UTC)
 
 
 class Harness:
-    def __init__(self):
+    def __init__(self, enricher=None):
         self.repo = FakeScanRepo()
         self.repo.add_source(make_source(1))
         self.storage = FakeFileStorage()
@@ -26,6 +26,7 @@ class Harness:
             lambda source: self.reader,
             self.audit,
             clock=lambda: T0 + timedelta(days=self.day),
+            enricher=enricher,
         )
 
     def scan(self, *observations, failures=None, unreadable=(), day=None, **reader_kw):
@@ -241,6 +242,66 @@ def test_failure_of_a_post_never_seen_before_still_gets_a_notice(h):
     h.scan(make_obs("1"), failures={"9": "download failed"}, day=1)
     [entry] = review_entries(h)
     assert entry["title"] == "Post 9" and entry["document_id"] is None
+
+
+# ---- AI summaries on the news card ----------------------------------------------------------
+
+
+def ai_harness(classifier=None, summarizer=None):
+    from irb_watch.ai.enrich import Enricher
+    from tests.fakes_ai import FakeClassifier, FakeSummarizer
+
+    return Harness(Enricher(classifier or FakeClassifier(), summarizer or FakeSummarizer("Sum.")))
+
+
+def cards(h):
+    return {e["event_type"]: e for e in h.audit.entries if e["category"] == "document"}
+
+
+def test_card_and_saved_version_carry_the_summary_priority_and_category():
+    h = ai_harness()
+    h.scan(make_obs("1", body="old"))
+    h.scan(make_obs("1", body="new"), make_obs("2", title="Fresh"), day=1)
+
+    updated, new = cards(h)["document.updated"], cards(h)["document.new"]
+    assert (updated["summary"], updated["priority"]) == ("Sum.", "high")
+    assert updated["payload"]["category"] == "sop" and updated["payload"]["summary_source"] == "ai"
+    assert new["summary"] == "Sum."
+
+    saved = h.repo.history[1]["1"].versions[-1]
+    assert (saved.summary, saved.priority, saved.category, saved.summary_source) == (
+        "Sum.", "high", "sop", "ai",
+    )
+
+
+def test_baseline_scan_makes_no_ai_calls():
+    from tests.fakes_ai import FakeClassifier, FakeSummarizer
+
+    jev, ai = FakeClassifier(), FakeSummarizer()
+    h = ai_harness(jev, ai)
+    h.scan(make_obs("1"), make_obs("2"))
+    assert jev.calls == [] and ai.calls == []
+
+
+def test_ai_failures_never_fail_the_scan():
+    from tests.fakes_ai import FakeClassifier, FakeSummarizer
+
+    h = ai_harness(FakeClassifier(RuntimeError("jev down")), FakeSummarizer(RuntimeError("openai down")))
+    h.scan(make_obs("1", body="old"))
+    summary = h.scan(make_obs("1", body="new"), day=1)
+    assert summary.status == "ok" and summary.updated == 1
+    card = cards(h)["document.updated"]
+    assert card["priority"] is None and card["summary"]  # template text
+    assert card["payload"]["summary_source"] == "template" and "ai_note" in card["payload"]
+    assert h.repo.history[1]["1"].versions[-1].summary_source == "template"
+
+
+def test_scan_without_an_enricher_still_writes_cards():
+    h = Harness()
+    h.scan(make_obs("1", body="old"))
+    h.scan(make_obs("1", body="new"), day=1)
+    card = cards(h)["document.updated"]
+    assert card["summary"] is None and card["priority"] is None
 
 
 # ---- originals are uploaded only when the hash is new ------------------------------------

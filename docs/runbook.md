@@ -70,6 +70,13 @@ Role changes are logged by a database trigger without an actor (the server uses 
 - Files with no text are not errors by themselves: `document_version_files.hash_only_reason` says why (`no_text_layer` scanned PDF, `distribution_protected` HWP, `unsupported_format`), and `extract_note` gives the words. Only `unreadable` raises a flag.
 - A stuck `scan_in_progress` clears itself after 30 minutes.
 
+## AI summaries
+- Keys live in `.env.<APP_ENV>`: `OPENAI_API_KEY` + `OPENAI_MODEL` (summaries) and `TYPESAFE_API_KEY` (Jev). Leave one out to switch that part off; scans keep working. The server logs a warning at start-up for whichever is off.
+- During a scan each new or updated post is classified (priority, category) and summarized; the result is saved on the version and shown on its news card (`audit_logs.summary`, `priority`, payload `category`, `summary_source`, `ai_note`). `summary_source` is `ai`, `template` (plain description without AI) or `none`.
+- Change the categories or the priority wording in `irb_watch/ai/categories.py`; change when AI is skipped with `AI_SKIP_BELOW` and `AI_MIN_CONFIDENCE`.
+- Users ask for a whole-document summary with `POST /documents/{id}/summary` (Authorization: Bearer <login token>). 404 if they are not subscribed, 429 after `SUMMARY_REQUESTS_PER_DAY` new summaries in 24 hours, 503 if AI is off.
+- Only the changes (or, for on-demand, the document text) are sent to OpenAI and Jev; nothing is stored on OpenAI's side (`store=False`).
+
 ## Tests
 - `uv run pytest` runs offline (nothing touches Supabase).
 - Live test against the real project (creates and removes two throwaway users; leaves audit rows because the log is append-only):

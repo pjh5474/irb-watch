@@ -57,6 +57,12 @@ class StoredVersion:
     created_at: datetime
     change_type: str
     content: VersionContent
+    # Filled by the AI step (see irb_watch/ai/enrich.py); all optional.
+    summary: str | None = None
+    priority: str | None = None  # low | medium | high
+    category: str | None = None
+    summary_source: str | None = None  # ai | template | none
+    classification: dict | None = None  # Jev's answers and notes, for audit; never document text
 
 
 @dataclass

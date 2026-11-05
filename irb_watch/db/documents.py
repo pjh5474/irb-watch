@@ -10,6 +10,7 @@ from irb_watch.core.hashing import sha256_hex
 from irb_watch.core.state import FileContent, StoredDocument, StoredVersion, VersionContent
 from irb_watch.services.scan import LoadedStore
 from irb_watch.services.sources import DuplicateSourceError, Source
+from irb_watch.services.summaries import DocumentForSummary
 
 BUCKET = "documents"
 UNIQUE_VIOLATION = "23505"
@@ -188,6 +189,11 @@ class SupabaseScanRepo:
                     _dt(v["created_at"]),
                     v["change_type"],
                     VersionContent(v["title"], v["body_text"], files),
+                    summary=v.get("summary"),
+                    priority=v.get("priority"),
+                    category=v.get("category"),
+                    summary_source=v.get("summary_source"),
+                    classification=v.get("classification"),
                 )
             )
             loaded.store[doc.external_id] = doc
@@ -248,6 +254,11 @@ class SupabaseScanRepo:
                 "body_hash": sha256_hex(c.body_text.encode("utf-8")),
                 "body_text": c.body_text,
                 "created_at": version.created_at.isoformat(),
+                "summary": version.summary,
+                "priority": version.priority,
+                "category": version.category,
+                "summary_source": version.summary_source,
+                "classification": version.classification,
             }
         ).execute().data[0]
         if c.files:
@@ -268,6 +279,94 @@ class SupabaseScanRepo:
                 ]
             ).execute()
         return row["id"]
+
+
+class SupabaseSummaryRepo:
+    """Reads and writes for summaries requested by users."""
+
+    def __init__(self, client: Client) -> None:
+        self._c = client
+
+    def get_latest(self, document_id: int) -> DocumentForSummary | None:
+        docs = (
+            self._c.table("documents")
+            .select("id, source_id, latest_version_id")
+            .eq("id", document_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not docs or not docs[0]["latest_version_id"]:
+            return None
+        doc = docs[0]
+        version = (
+            self._c.table("document_versions")
+            .select("id, version_no, title, body_text, document_summary")
+            .eq("id", doc["latest_version_id"])
+            .limit(1)
+            .execute()
+            .data[0]
+        )
+        rows = (
+            self._c.table("document_version_files")
+            .select("filename, size_label, sha256, text_content, hash_only_reason, extract_note")
+            .eq("version_id", version["id"])
+            .order("id")
+            .execute()
+            .data
+        )
+        files = tuple(
+            FileContent(
+                filename=f["filename"],
+                size_label=f["size_label"] or "",
+                sha256=f["sha256"],
+                text=f["text_content"],
+                hash_only_reason=f["hash_only_reason"],
+                note=f["extract_note"],
+            )
+            for f in rows
+        )
+        return DocumentForSummary(
+            document_id=doc["id"],
+            source_id=doc["source_id"],
+            version_id=version["id"],
+            version_no=version["version_no"],
+            content=VersionContent(version["title"], version["body_text"], files),
+            document_summary=version["document_summary"],
+        )
+
+    def is_subscribed(self, user_id: str, source_id: int) -> bool:
+        rows = (
+            self._c.table("subscriptions")
+            .select("user_id")
+            .eq("user_id", user_id)
+            .eq("source_id", source_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return bool(rows)
+
+    def count_requests_since(self, user_id: str, since: datetime) -> int:
+        result = (
+            self._c.table("summary_requests")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .gte("created_at", since.isoformat())
+            .limit(1)
+            .execute()
+        )
+        return result.count or 0
+
+    def save_summary(self, version_id: int, text: str, now: datetime) -> None:
+        self._c.table("document_versions").update(
+            {"document_summary": text, "document_summary_at": now.isoformat()}
+        ).eq("id", version_id).execute()
+
+    def record_request(self, user_id: str, version_id: int, now: datetime) -> None:
+        self._c.table("summary_requests").insert(
+            {"user_id": user_id, "version_id": version_id, "created_at": now.isoformat()}
+        ).execute()
 
 
 def _document_values(doc: StoredDocument) -> dict:

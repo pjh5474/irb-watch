@@ -5,17 +5,24 @@ from functools import lru_cache
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from irb_watch.ai.factory import build_enricher, build_summarizer
 from irb_watch.auth.jwt import AuthUnavailableError, AuthUser, InvalidTokenError, TokenVerifier
 from irb_watch.config import get_settings
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
 from irb_watch.db.client import get_supabase_client
-from irb_watch.db.documents import SupabaseFileStorage, SupabaseScanRepo, SupabaseSourceStore
+from irb_watch.db.documents import (
+    SupabaseFileStorage,
+    SupabaseScanRepo,
+    SupabaseSourceStore,
+    SupabaseSummaryRepo,
+)
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.scan import ScanService, SourceReader
 from irb_watch.services.sources import Source, SourceService
+from irb_watch.services.summaries import SummaryService
 from irb_watch.services.users import UserService, UserStore
 
 _bearer = HTTPBearer(auto_error=False)
@@ -74,6 +81,18 @@ def get_scan_service() -> ScanService:
         SupabaseFileStorage(client),
         build_reader,
         SupabaseAuditSink(client),
+        enricher=build_enricher(),
+    )
+
+
+def get_summary_service() -> SummaryService:
+    client = get_supabase_client()
+    return SummaryService(
+        SupabaseUserStore(client),
+        SupabaseSummaryRepo(client),
+        build_summarizer(),
+        SupabaseAuditSink(client),
+        get_settings().summary_requests_per_day,
     )
 
 

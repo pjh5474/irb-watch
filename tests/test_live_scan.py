@@ -12,17 +12,22 @@ import uuid
 
 import pytest
 
+from irb_watch.ai.factory import build_enricher, build_summarizer
 from irb_watch.api.deps import build_reader
+from irb_watch.config import get_settings
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.documents import (
     BUCKET,
     SupabaseFileStorage,
     SupabaseScanRepo,
     SupabaseSourceStore,
+    SupabaseSummaryRepo,
 )
-from irb_watch.db.supabase_users import SupabaseAuditSink
+from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.services.scan import ScanService
 from irb_watch.services.sources import SourceService
+from irb_watch.services.summaries import SummaryService
+from irb_watch.services.users import UserService
 
 pytestmark = [
     pytest.mark.live,
@@ -46,10 +51,14 @@ def test_scan_real_board_end_to_end():
     client = get_supabase_client()
     audit = SupabaseAuditSink(client)
     storage = CountingStorage(SupabaseFileStorage(client))
-    scans = ScanService(SupabaseScanRepo(client), storage, build_reader, audit)
+    enricher = build_enricher()
+    assert enricher.active, "set OPENAI_API_KEY, OPENAI_MODEL and TYPESAFE_API_KEY for this test"
+    scans = ScanService(SupabaseScanRepo(client), storage, build_reader, audit, enricher=enricher)
     sources = SourceService(SupabaseSourceStore(client), audit)
+    auth = SupabaseAuthAdmin(client)
 
     source = sources.create(None, f"live test {uuid.uuid4().hex[:8]}", URL)
+    user_id = None
     try:
         # 1. First scan: silent baseline, everything stored.
         first = scans.scan_source(source.id, None)
@@ -105,6 +114,23 @@ def test_scan_real_board_end_to_end():
             .data
         )
         assert [(v["version_no"], v["change_type"]) for v in history] == [(1, "baseline"), (2, "updated")]
+
+        # The baseline made no AI calls; the update got a summary and a Jev priority.
+        baseline_row, updated_row = (
+            client.table("document_versions")
+            .select("summary, summary_source, priority, category, classification")
+            .eq("document_id", target["id"])
+            .order("version_no")
+            .execute()
+            .data
+        )
+        assert baseline_row["summary"] is None and baseline_row["summary_source"] is None
+        assert updated_row["summary"] and updated_row["summary_source"] in ("ai", "template")
+        assert updated_row["priority"] in ("low", "medium", "high")
+        assert updated_row["category"] and updated_row["classification"]["priority"]["choice"]
+        print("\nlive summary:", updated_row["summary_source"], "|", updated_row["summary"][:200])
+        print("live Jev:", updated_row["priority"], updated_row["category"],
+              updated_row["classification"].get("model"))
         logged = (
             client.table("audit_logs")
             .select("event_type")
@@ -117,7 +143,32 @@ def test_scan_real_board_end_to_end():
 
         status = client.table("sources").select("*").eq("id", source.id).execute().data[0]
         assert status["last_scan_status"] == "ok" and status["scan_started_at"] is None
+
+        # 4. A subscribed user asks for a summary of the whole document: generated once,
+        #    then served from the cache; the request is counted once.
+        users = UserService(SupabaseUserStore(client), auth, audit)
+        user = users.create_user(None, f"irbwatch-live-{uuid.uuid4().hex[:8]}@example.com", "temporary-pass-1")
+        user_id = user.id
+        client.table("subscriptions").insert({"user_id": user_id, "source_id": source.id}).execute()
+        summaries = SummaryService(
+            SupabaseUserStore(client),
+            SupabaseSummaryRepo(client),
+            build_summarizer(),
+            audit,
+            get_settings().summary_requests_per_day,
+        )
+        first_summary = summaries.summarize_document(user_id, target["id"])
+        assert first_summary.cached is False and first_summary.summary
+        again = summaries.summarize_document(user_id, target["id"])
+        assert again.cached is True and again.summary == first_summary.summary
+        counted = (
+            client.table("summary_requests").select("id").eq("user_id", user_id).execute().data
+        )
+        assert len(counted) == 1
+        print("live document summary:", first_summary.summary[:200])
     finally:
+        if user_id:
+            auth.hard_delete(user_id)
         client.table("sources").delete().eq("id", source.id).execute()
         uploaded = sorted(set(storage.puts))
         if uploaded:

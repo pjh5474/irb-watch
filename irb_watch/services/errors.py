@@ -9,6 +9,10 @@ class ServiceError(Exception):
         self.message = message
 
 
+class ForbiddenError(ServiceError):
+    status_code = 403
+
+
 class NotFoundError(ServiceError):
     status_code = 404
 
@@ -21,5 +25,13 @@ class ValidationError(ServiceError):
     status_code = 422
 
 
+class TooManyRequestsError(ServiceError):
+    status_code = 429
+
+
 class UpstreamError(ServiceError):
     status_code = 502
+
+
+class UnavailableError(ServiceError):
+    status_code = 503
