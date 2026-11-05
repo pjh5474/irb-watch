@@ -49,6 +49,7 @@ Recorded 2026-11-04. Each entry is a question asked before planning, the answer 
 | Role-change audit | Database trigger only, so role changes have no actor | User chose this over a server-written entry |
 | Settings loading | `APP_ENV` selects `.env.<APP_ENV>`, default dev; real env vars override | Switching to production needs no code change |
 | CORS | `FRONTEND_ORIGINS`, default `http://localhost:3000` | |
+| Unreadable files | Two outcomes. **Hash-only** (expected, stable): scanned PDF, HWP/HWPX/DOCX with no extractor yet; tracked by file SHA-256, labelled "text not available", no alert on every scan. **Failure** (`needs_review`): corrupt, password-protected, over 500 pages, download error, or bytes that do not match a document extension (e.g. an HTML login page named .pdf) | A permanent, harmless "cannot read" must not look like a fault on every scan. Known limits: a hash changes on any byte difference, so a re-saved image PDF can look updated; hash-only files get no AI summary. OCR deferred |
 | Tests touching Supabase | Offline tests by default; live test only with `RUN_LIVE=1` | User said the project is a test account, so the live test runs against it; it leaves append-only audit rows |
 
 ## Open items

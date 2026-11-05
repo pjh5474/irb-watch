@@ -2,6 +2,22 @@
 
 Commands you will repeat. Decisions and reasons are in `docs/decisions.md`.
 
+## Quick reference: create the first admin
+Run this yourself in a normal terminal, from the project folder (it asks for a hidden password, so it cannot run through Claude):
+
+```powershell
+uv run python -m irb_watch.scripts.create_first_admin --email you@example.com --display-name "Your Name"
+```
+
+Production project: set `APP_ENV` first, so it reads `.env.prod` instead of `.env.dev`:
+
+```powershell
+$env:APP_ENV = "prod"
+uv run python -m irb_watch.scripts.create_first_admin --email you@example.com --display-name "Your Name"
+```
+
+Check that the printed project URL is the one you mean before typing the password. Full notes below.
+
 ## Settings files
 `APP_ENV` picks the file: `APP_ENV=dev` (default) reads `.env.dev`, `APP_ENV=prod` reads `.env.prod`. Real environment variables override the file. Never commit these files (`.gitignore` blocks `.env.*` except `.env.example`).
 
