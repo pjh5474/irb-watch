@@ -15,7 +15,8 @@ import sys
 from irb_watch.config import get_settings
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
-from irb_watch.services.users import UserService, UserServiceError
+from irb_watch.services.errors import ServiceError
+from irb_watch.services.users import UserService
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = service.create_user(
             None, args.email, password, args.display_name, role="admin"
         )
-    except UserServiceError as exc:
+    except ServiceError as exc:
         print(f"Failed: {exc.message}")
         return 1
 

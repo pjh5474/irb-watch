@@ -28,6 +28,7 @@ class FileContent:
     sha256: str  # hash of the file bytes
     text: str | None  # normalized extracted text; None when tracked by file hash only
     hash_only_reason: str | None = None  # e.g. 'no_text_layer', 'unsupported_format'
+    storage_path: str | None = None  # object name of the original in the private bucket
 
     @property
     def text_hash(self) -> str | None:

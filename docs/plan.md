@@ -15,8 +15,9 @@ irb-watch/
   supabase/
     config.toml
     migrations/             profiles (+ signup trigger), sources, documents,
-                            document_versions, subscriptions, audit_logs,
-                            private `documents` bucket, RLS (3 applied so far)
+                            document_versions, document_version_files,
+                            subscriptions, audit_logs, private `documents`
+                            bucket, soft delete, scan lock, RLS (5 applied)
   irb_watch/
     main.py                 FastAPI app + scheduler startup
     config.py               pydantic-settings (env)
@@ -32,7 +33,7 @@ irb-watch/
   tests/
     fixtures/               saved pages/files with known changes
 ```
-`notify/` is out of the MVP and should be deleted.
+`notify/` was out of the MVP and has been deleted.
 
 ## Implementation steps
 1. [done] `pyproject.toml` for uv, `.env.example`, `Dockerfile`.
@@ -40,9 +41,16 @@ irb-watch/
 3. [done] Supabase migrations applied to project `jlkkoaugtovvaxrqxoyx` and verified with read-only queries: `profiles` + signup trigger, domain tables + audit log + private bucket, audit-log append-only fix. **Not yet exercised with real users:** RLS policies and the three triggers.
 4. [done] JWT verification (`auth/jwt.py`, ES256/RS256 via the public key list, no secret), `require_admin` (role looked up in the DB on every call), admin API `/admin/users` (create, list, change role, soft delete, restore) with lock-out guards, `profiles.deleted_at` migration, first-admin script, `APP_ENV` settings loader, CORS. 108 offline tests plus a live lifecycle test (`RUN_LIVE=1`) that passed against the real project. Commands in `docs/runbook.md`. **Not yet verified:** RLS from a real user's token, refresh-token behaviour after a ban, a real login token against the verifier. **No admin exists yet:** run the first-admin script.
 5. [done] `security/url_guard` + `limits` + tests.
-6. [partly done] SNUH adapter (`crawlers/snuh.py`, `crawlers/fetcher.py`, `core/models.py`, `core/hashing.py`) verified live on board 2605277029, 52 tests pass. PDF text parser done (`parsers/pdf.py`, `parsers/formats.py`; `extract_text()` returns text or a hash-only marker, real failures raise `ParseError`); verified on real SNUH files. Diff and change-detection logic done and tested against an in-memory store (`core/state.py`, `core/diff.py`, `core/detect.py`): baseline, new, updated, resaved, removed after 2 misses, reappeared, needs_review, version lookup by number or date. **Remaining:** a migration for what the logic needs (a per-version files table holding each file's hash and extracted text, `change_type` values `new` and `resaved`, audit event types `document.reappeared`), the glue that turns a `BoardSnapshot` into `Observation`s (download, `extract_text`, upload originals), the Supabase-backed store, second board live check, HWP/DOCX extractors (currently hash-only). `snuh-crawler.py` in the repo root is superseded and should be deleted.
-7. `ai/` summary agent behind the gateway-configurable client.
-8. Scheduler + scan endpoint with run lock and caps.
+6. [done] Scan pipeline, verified end to end by a live test (`tests/test_live_scan.py`, board 2605277029, about 10 minutes for 3 scans):
+   - SNUH adapter (`crawlers/snuh.py`, `crawlers/fetcher.py`) and reader (`crawlers/snuh_reader.py`: one `Observation` per post, originals handed to a file sink, one broken post only fails itself).
+   - PDF text parser (`parsers/`): text, hash-only (scanned, HWP, DOCX) or `ParseError`.
+   - Change detection and diffs (`core/detect.py`, `core/diff.py`, `core/state.py`): baseline, new, updated, resaved, removed after 2 misses, reappeared, needs_review; versions picked by number or date.
+   - `services/scan.py` (claim lock, whole-scan failure statuses, audit events) and `db/documents.py` (Supabase repository, bucket upload only for new hashes).
+   - Migration `document_files_and_scan_lock` (files table with text, `new` and `resaved` change types, `documents.latest_version_id`, `sources.scan_started_at`).
+   - Admin source API: `POST/GET /admin/sources`, `PATCH /admin/sources/{id}`, `POST /admin/sources/{id}/scan` (202, runs in the background).
+   - **Not yet verified:** second board `2605277034`; the new endpoints over real HTTP with an admin login; a real layout-change or network failure (covered offline only); HWP/DOCX extractors (currently hash-only).
+7. `ai/` summary agent behind the gateway-configurable client. Fills `document_versions.summary` and `priority`; today only the rule-based `low` for title-only changes is set.
+8. Scheduler (APScheduler, daily cron `SCAN_CRON`) calling `ScanService.scan_source` for every active source. The manual endpoint exists; the schedule does not. Scans are sequential and slow (about 3 minutes per board), so run them one source at a time.
 
 ## Verification
 - `uv run pytest` (fixtures cover: new, updated, removed after 2 misses, baseline, parse failure => needs_review, SSRF blocks).
@@ -61,4 +69,6 @@ irb-watch/
 ## Open items
 - Which API gateway (affects Agents SDK client setup).
 - Second board `2605277034` fully scanned live; HWP/DOCX samples.
-- Dashboard setting to check by hand: Authentication → disable "Allow new users to sign up" on the hosted project (`enable_signup = false` is set only in local `config.toml`).
+- RLS from a real user's token (users see only subscribed sources); refresh-token behaviour after a ban; a real login token against the verifier. Needs the project's publishable key.
+- Audit rows from live tests cannot be deleted (append-only log).
+- Sign-up is turned off in the dashboard (done by the project owner).

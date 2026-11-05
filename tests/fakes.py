@@ -87,7 +87,19 @@ class FakeAudit:
     def __init__(self) -> None:
         self.entries: list[dict] = []
 
-    def record(self, category, event_type, actor_id, title=None, payload=None):
+    def record(
+        self,
+        category,
+        event_type,
+        actor_id,
+        title=None,
+        payload=None,
+        *,
+        source_id=None,
+        document_id=None,
+        summary=None,
+        priority=None,
+    ):
         self.entries.append(
             {
                 "category": category,
@@ -95,5 +107,9 @@ class FakeAudit:
                 "actor_id": actor_id,
                 "title": title,
                 "payload": payload or {},
+                "source_id": source_id,
+                "document_id": document_id,
+                "summary": summary,
+                "priority": priority,
             }
         )

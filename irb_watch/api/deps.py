@@ -7,8 +7,15 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from irb_watch.auth.jwt import AuthUnavailableError, AuthUser, InvalidTokenError, TokenVerifier
 from irb_watch.config import get_settings
+from irb_watch.crawlers.fetcher import SafeFetcher
+from irb_watch.crawlers.snuh import SnuhAdapter
+from irb_watch.crawlers.snuh_reader import SnuhSourceReader
 from irb_watch.db.client import get_supabase_client
+from irb_watch.db.documents import SupabaseFileStorage, SupabaseScanRepo, SupabaseSourceStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
+from irb_watch.services.errors import ValidationError
+from irb_watch.services.scan import ScanService, SourceReader
+from irb_watch.services.sources import Source, SourceService
 from irb_watch.services.users import UserService, UserStore
 
 _bearer = HTTPBearer(auto_error=False)
@@ -34,6 +41,39 @@ def get_user_service() -> UserService:
         SupabaseAuthAdmin(client),
         SupabaseAuditSink(client),
         get_settings().min_password_length,
+    )
+
+
+def build_reader(source: Source) -> SourceReader:
+    """One reader per site type; a new site gets a new adapter and one more branch here."""
+    settings = get_settings()
+    if source.adapter != "snuh_hrpp":
+        raise ValidationError(f"no adapter named {source.adapter}")
+    fetcher = SafeFetcher(
+        max_bytes=settings.max_file_bytes,
+        timeout=settings.request_timeout_seconds,
+        delay=settings.per_domain_delay_seconds,
+    )
+    return SnuhSourceReader(
+        SnuhAdapter(fetcher),
+        source.config["board_key"],
+        settings.max_docs_per_url,
+        settings.max_file_bytes,
+    )
+
+
+def get_source_service() -> SourceService:
+    client = get_supabase_client()
+    return SourceService(SupabaseSourceStore(client), SupabaseAuditSink(client))
+
+
+def get_scan_service() -> ScanService:
+    client = get_supabase_client()
+    return ScanService(
+        SupabaseScanRepo(client),
+        SupabaseFileStorage(client),
+        build_reader,
+        SupabaseAuditSink(client),
     )
 
 

@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
+from irb_watch.services.errors import (
+    ConflictError,
+    NotFoundError,
+    UpstreamError,
+    ValidationError,
+)
+
 Role = Literal["user", "admin"]
 
 
@@ -22,30 +29,6 @@ class Profile:
     role: str
     created_at: str
     deleted_at: str | None
-
-
-class UserServiceError(Exception):
-    status_code = 400
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-class NotFoundError(UserServiceError):
-    status_code = 404
-
-
-class ConflictError(UserServiceError):
-    status_code = 409
-
-
-class ValidationError(UserServiceError):
-    status_code = 422
-
-
-class UpstreamError(UserServiceError):
-    status_code = 502
 
 
 class EmailTakenError(Exception):
@@ -77,6 +60,11 @@ class AuditSink(Protocol):
         actor_id: str | None,
         title: str | None = None,
         payload: dict | None = None,
+        *,
+        source_id: int | None = None,
+        document_id: int | None = None,
+        summary: str | None = None,
+        priority: str | None = None,
     ) -> None: ...
 
 

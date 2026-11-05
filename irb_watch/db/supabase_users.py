@@ -108,6 +108,11 @@ class SupabaseAuditSink:
         actor_id: str | None,
         title: str | None = None,
         payload: dict | None = None,
+        *,
+        source_id: int | None = None,
+        document_id: int | None = None,
+        summary: str | None = None,
+        priority: str | None = None,
     ) -> None:
         try:
             self._c.table("audit_logs").insert(
@@ -115,7 +120,11 @@ class SupabaseAuditSink:
                     "category": category,
                     "event_type": event_type,
                     "actor_id": actor_id,
+                    "source_id": source_id,
+                    "document_id": document_id,
                     "title": title,
+                    "summary": summary,
+                    "priority": priority,
                     "payload": payload or {},
                 }
             ).execute()

@@ -113,6 +113,9 @@ class SnuhAdapter:
         self._fetcher = fetcher
         self._base = base_url
 
+    def close(self) -> None:
+        self._fetcher.close()
+
     def list_board(self, board_key: str, max_posts: int = 200) -> tuple[int, list[PostSummary]]:
         """Read every list page. Raises IncompleteScanError if fewer posts than declared."""
         seen: dict[str, PostSummary] = {}

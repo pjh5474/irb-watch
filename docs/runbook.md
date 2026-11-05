@@ -55,10 +55,25 @@ Refused with 409: demoting or deleting yourself, removing the last active admin,
 
 Role changes are logged by a database trigger without an actor (the server uses the service role). Create, delete and restore are logged by the server with the acting admin.
 
+## Sources and scans (admin only)
+| Method and path | Purpose |
+|---|---|
+| `POST /admin/sources` | `{"name": "...", "url": "https://hrpp.snuh.org/hrpp/bbs/list.do?key=<number>"}`. The URL is checked, rewritten to a clean form and matched to an adapter. 409 if already registered, 422 for unsupported sites |
+| `GET /admin/sources` | All sources with last scan time, status (`ok`, `needs_review`, `failed`), error text and `scan_in_progress` |
+| `PATCH /admin/sources/{id}` | Rename or set `is_active` (inactive sources cannot be scanned) |
+| `POST /admin/sources/{id}/scan` | Starts a scan in the background and returns 202. 409 if one is already running. Poll `GET /admin/sources` for the result |
+
+- A scan takes about 3 minutes per board (2-second delay between requests, plus file downloads).
+- First scan of a source is a silent baseline: documents are stored, no "new" events.
+- `needs_review` on a source means the site changed shape or the list was incomplete: read `last_scan_error`, fix the adapter, scan again. Nothing was changed by that scan.
+- A stuck `scan_in_progress` clears itself after 30 minutes.
+
 ## Tests
 - `uv run pytest` runs offline (nothing touches Supabase).
 - Live test against the real project (creates and removes two throwaway users; leaves audit rows because the log is append-only):
   `$env:RUN_LIVE=1; uv run pytest -m live`
+- Live scan test (scans a real SNUH board into the real project, about 10 minutes, cleans up after itself except audit rows):
+  `$env:RUN_LIVE=1; uv run pytest -m live -k scan`
 - `uv run ruff check irb_watch tests`
 
 ## Supabase CLI (v3: commands are local by default, hosted needs `--remote`)
