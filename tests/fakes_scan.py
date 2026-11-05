@@ -25,12 +25,13 @@ def make_source(source_id=1, **overrides) -> Source:
     return Source(**values)
 
 
-def make_obs(external_id="1", title="Title", body="body", files=()):
+def make_obs(external_id="1", title="Title", body="body", files=(), warnings=()):
     return Observation(
         external_id,
         f"http://site/{external_id}",
         "2026-09-03",
         VersionContent(title, body, tuple(files)),
+        tuple(warnings),
     )
 
 
@@ -115,6 +116,7 @@ class FakeScanRepo:
             kept.versions.extend(v for v in doc.versions if v.version_no > have)
             kept.status, kept.miss_count, kept.removed_at = doc.status, doc.miss_count, doc.removed_at
             kept.source_url, kept.posted_on = doc.source_url, doc.posted_on
+            kept.review_reason = doc.review_reason
         return {e: self.doc_ids[(source_id, e)] for e in docs}
 
 

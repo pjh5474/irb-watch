@@ -165,6 +165,7 @@ class SupabaseScanRepo:
                 status=d["status"],
                 miss_count=d["miss_count"],
                 removed_at=_dt(d["removed_at"]),
+                review_reason=d.get("review_reason"),
             )
             v = versions.get(d["latest_version_id"])
             if v is None:
@@ -177,6 +178,7 @@ class SupabaseScanRepo:
                     text=f["text_content"],
                     hash_only_reason=f["hash_only_reason"],
                     storage_path=f["storage_path"],
+                    note=f["extract_note"],
                 )
                 for f in files_by_version.get(v["id"], [])
             )
@@ -260,6 +262,7 @@ class SupabaseScanRepo:
                         "storage_path": f.storage_path,
                         "text_content": f.text,
                         "hash_only_reason": f.hash_only_reason,
+                        "extract_note": f.note,
                     }
                     for f in c.files
                 ]
@@ -275,6 +278,7 @@ def _document_values(doc: StoredDocument) -> dict:
         "status": doc.status,
         "miss_count": doc.miss_count,
         "removed_at": doc.removed_at.isoformat() if doc.removed_at else None,
+        "review_reason": doc.review_reason,
     }
 
 
@@ -286,4 +290,5 @@ def _snapshot(doc: StoredDocument) -> tuple:
         doc.status,
         doc.miss_count,
         doc.removed_at,
+        doc.review_reason,
     )

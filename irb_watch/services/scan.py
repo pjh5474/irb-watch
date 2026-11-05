@@ -163,6 +163,9 @@ class ScanService:
 
         loaded = self._repo.load_store(source.id)
         is_first_scan = source.last_scan_at is None and not loaded.store
+        # Remember how each post looked before this scan, so a persistent problem is
+        # announced once instead of on every scan.
+        before = {ext: (d.status, d.review_reason) for ext, d in loaded.store.items()}
         result = detect_changes(
             loaded.store,
             ScanInput(
@@ -178,6 +181,25 @@ class ScanService:
 
         for event in result.events:
             self._log_event(source, event, doc_ids, actor_id)
+
+        titles = {o.external_id: o.content.title for o in reading.observations}
+        for external_id, reason in result.needs_review.items():
+            if before.get(external_id) == (NEEDS_REVIEW, reason):
+                continue  # already announced with this very reason
+            doc = loaded.store.get(external_id)
+            title = titles.get(external_id) or (
+                doc.latest.content.title if doc else f"Post {external_id}"
+            )
+            self._audit.record(
+                "document",
+                "document.needs_review",
+                actor_id,
+                title=title,
+                summary=reason,
+                payload={"external_id": external_id, "reason": reason},
+                source_id=source.id,
+                document_id=doc_ids.get(external_id),
+            )
 
         counts = {k: sum(1 for e in result.events if e.kind == k) for k in
                   ("new", "updated", "removed", "reappeared")}

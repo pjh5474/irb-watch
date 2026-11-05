@@ -48,7 +48,8 @@ irb-watch/
    - `services/scan.py` (claim lock, whole-scan failure statuses, audit events) and `db/documents.py` (Supabase repository, bucket upload only for new hashes).
    - Migration `document_files_and_scan_lock` (files table with text, `new` and `resaved` change types, `documents.latest_version_id`, `sources.scan_started_at`).
    - Admin source API: `POST/GET /admin/sources`, `PATCH /admin/sources/{id}`, `POST /admin/sources/{id}/scan` (202, runs in the background).
-   - **Not yet verified:** second board `2605277034`; the new endpoints over real HTTP with an admin login; a real layout-change or network failure (covered offline only); HWP/DOCX extractors (currently hash-only).
+   - Text readers for HWP, HWPX and DOCX (`parsers/hwp.py`, `hwpx.py`, `docx.py`, shared `common.py`, `_zip.py`, `_xmltext.py`); two real SNUH HWP forms saved as fixtures and cross-checked against the preview text stored inside each file; the live scan test now asserts HWP files come back with text. Failure reasons are stored and announced to subscribers (`review_reason`, `extract_note`, `document.needs_review`).
+   - **Not yet verified:** second board `2605277034`; the new endpoints over real HTTP with an admin login; a real layout-change or network failure (covered offline only); real DOCX, HWPX, password-protected and distribution HWP files (covered by synthetic files and edited headers only); legacy `.doc` stays hash-only.
 7. `ai/` summary agent behind the gateway-configurable client. Fills `document_versions.summary` and `priority`; today only the rule-based `low` for title-only changes is set.
 8. Scheduler (APScheduler, daily cron `SCAN_CRON`) calling `ScanService.scan_source` for every active source. The manual endpoint exists; the schedule does not. Scans are sequential and slow (about 3 minutes per board), so run them one source at a time.
 

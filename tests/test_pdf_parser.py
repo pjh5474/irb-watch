@@ -6,9 +6,11 @@ from irb_watch.core.hashing import normalize_text
 from irb_watch.parsers import pdf as pdf_module
 from irb_watch.parsers.errors import (
     NO_TEXT_LAYER,
+    UNREADABLE,
     UNSUPPORTED_FORMAT,
     ParseError,
     TextUnavailableError,
+    UnreadableFileError,
     UnsupportedFormatError,
 )
 from irb_watch.parsers.formats import detect_format, extract_text, parse_document
@@ -98,8 +100,8 @@ def test_not_a_pdf():
         parse_pdf(b"<html>login required</html>")
 
 
-def test_corrupt_pdf():
-    with pytest.raises(ParseError, match="could not read PDF"):
+def test_corrupt_pdf_is_unreadable_not_a_mismatch():
+    with pytest.raises(UnreadableFileError, match="could not be read"):
         parse_pdf(b"%PDF-1.4\nthis is not really a pdf at all")
 
 
@@ -109,7 +111,7 @@ def test_empty_bytes():
 
 
 def test_too_many_pages():
-    with pytest.raises(ParseError, match="limit"):
+    with pytest.raises(UnreadableFileError, match="limit"):
         parse_pdf(make_pdf([LONG] * 3), max_pages=2)
 
 
@@ -118,7 +120,7 @@ def test_password_protected(monkeypatch):
         raise pdf_module.PDFPasswordIncorrect
 
     monkeypatch.setattr(pdf_module.pdfplumber, "open", locked)
-    with pytest.raises(ParseError, match="password-protected"):
+    with pytest.raises(UnreadableFileError, match="password-protected"):
         parse_pdf(b"%PDF-1.4 anything")
 
 
@@ -159,8 +161,8 @@ def test_parse_document_uses_pdf_parser():
 
 
 def test_parse_document_reports_unsupported_types():
-    with pytest.raises(UnsupportedFormatError, match="hwp"):
-        parse_document("form.hwp", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest")
+    with pytest.raises(UnsupportedFormatError, match="no text extractor"):
+        parse_document("old.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest")
 
 
 # ---- extract_text: the pipeline entry point ----------------------------------------
@@ -178,8 +180,9 @@ def test_extract_text_marks_scanned_pdf_hash_only():
 
 
 def test_extract_text_marks_unsupported_format_hash_only():
-    result = extract_text("form.hwp", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest")
+    result = extract_text("old.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest")
     assert not result.has_text and result.hash_only_reason == UNSUPPORTED_FORMAT
+    assert "no text extractor" in result.note
 
 
 def test_unknown_extension_is_hash_only_but_wrong_content_for_known_extension_fails():
@@ -190,8 +193,21 @@ def test_unknown_extension_is_hash_only_but_wrong_content_for_known_extension_fa
         extract_text("form.docx", b"%PDF-1.4 hmm")
 
 
-def test_extract_text_still_raises_for_real_failures():
-    with pytest.raises(ParseError):
-        extract_text("broken.pdf", b"%PDF-1.4\nnot really a pdf")
+def test_extract_text_reports_unreadable_files_with_a_note():
+    result = extract_text("broken.pdf", b"%PDF-1.4\nnot really a pdf")
+    assert result.unreadable and result.hash_only_reason == UNREADABLE
+    assert "could not be read" in result.note
+
+
+def test_extract_text_only_raises_when_the_bytes_are_not_the_promised_document():
     with pytest.raises(ParseError):
         extract_text("page.pdf", b"<html>login</html>")
+
+
+def test_extract_text_reads_real_hwp_and_reports_a_broken_one():
+    from pathlib import Path
+
+    real = next(Path(__file__).parent.joinpath("fixtures").glob("snuh_form_*.hwp")).read_bytes()
+    assert extract_text("form.hwp", real).has_text
+    broken = extract_text("form.hwp", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"junk" * 100)
+    assert broken.unreadable and "corrupt" in broken.note

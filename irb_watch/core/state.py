@@ -29,6 +29,7 @@ class FileContent:
     text: str | None  # normalized extracted text; None when tracked by file hash only
     hash_only_reason: str | None = None  # e.g. 'no_text_layer', 'unsupported_format'
     storage_path: str | None = None  # object name of the original in the private bucket
+    note: str | None = None  # why there is no text, in words users can read
 
     @property
     def text_hash(self) -> str | None:
@@ -67,6 +68,7 @@ class StoredDocument:
     status: str = CURRENT
     miss_count: int = 0
     removed_at: datetime | None = None
+    review_reason: str | None = None  # why the status is needs_review, for users to read
     versions: list[StoredVersion] = field(default_factory=list)
 
     @property

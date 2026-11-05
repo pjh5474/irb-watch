@@ -2,29 +2,21 @@
 
 Scanned (image-only) PDFs have no text layer; they raise TextUnavailableError instead of
 returning an empty string, because an empty hash would look like "the document became
-empty". That is an expected outcome (track by file hash), not a failure. Real problems
-(corrupt, password-protected, too many pages) raise ParseError. OCR is a later step.
+empty". Genuine PDFs we cannot read (corrupt, password-protected, too many pages) raise
+UnreadableFileError. OCR is a later step.
 """
 
-from dataclasses import dataclass
 from io import BytesIO
 
 import pdfplumber
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 
-from irb_watch.core.hashing import normalize_text, sha256_hex
-from irb_watch.parsers.errors import NO_TEXT_LAYER, ParseError, TextUnavailableError
+from irb_watch.parsers.common import ParsedDocument, build_document, internal_error
+from irb_watch.parsers.errors import ParseError, TextUnavailableError, UnreadableFileError
 
 MAX_PAGES = 500
-MIN_TEXT_CHARS = 20  # below this the file is treated as having no text layer
 
-
-@dataclass(frozen=True)
-class ParsedDocument:
-    text: str  # normalized (see core.hashing.normalize_text)
-    text_hash: str
-    pages: int
-    empty_pages: int  # pages with no extractable text, e.g. scanned inserts
+__all__ = ["MAX_PAGES", "ParsedDocument", "parse_pdf"]
 
 
 def parse_pdf(content: bytes, max_pages: int = MAX_PAGES) -> ParsedDocument:
@@ -35,27 +27,22 @@ def parse_pdf(content: bytes, max_pages: int = MAX_PAGES) -> ParsedDocument:
     try:
         with pdfplumber.open(BytesIO(content)) as pdf:
             if len(pdf.pages) > max_pages:
-                raise ParseError(f"PDF has {len(pdf.pages)} pages, limit is {max_pages}")
+                raise UnreadableFileError(f"PDF has {len(pdf.pages)} pages, limit is {max_pages}")
             for page in pdf.pages:
                 page_texts.append(page.extract_text() or "")
-    except ParseError:
+    except (UnreadableFileError, TextUnavailableError):
         raise
     except PDFPasswordIncorrect as exc:
-        raise ParseError("PDF is password-protected") from exc
+        raise UnreadableFileError("PDF is password-protected") from exc
     except Exception as exc:
-        raise ParseError(f"could not read PDF ({type(exc).__name__})") from exc
+        # pdfminer raises many different types for damaged files; all of them mean "cannot read".
+        raise UnreadableFileError(f"PDF could not be read ({type(exc).__name__})") from exc
 
     if not page_texts:
-        raise ParseError("PDF has no pages")
-
-    normalized = [normalize_text(t) for t in page_texts]
-    text = normalize_text(" ".join(normalized))
-    if len(text) < MIN_TEXT_CHARS:
-        raise TextUnavailableError(NO_TEXT_LAYER, "PDF has no extractable text (scanned image?)")
-
-    return ParsedDocument(
-        text=text,
-        text_hash=sha256_hex(text.encode("utf-8")),
-        pages=len(page_texts),
-        empty_pages=sum(1 for t in normalized if not t),
-    )
+        raise UnreadableFileError("PDF has no pages")
+    try:
+        return build_document(page_texts, "PDF")
+    except (UnreadableFileError, TextUnavailableError):
+        raise
+    except Exception as exc:
+        raise internal_error("PDF", exc) from exc

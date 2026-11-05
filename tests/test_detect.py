@@ -201,6 +201,41 @@ def test_unreadable_posts_are_neither_seen_nor_missing(store):
     assert store["2"].status == CURRENT and store["2"].miss_count == 0
 
 
+def obs_with_warning(external_id="1", warning="bad.hwp: HWP is password-protected", **kw):
+    base = obs(external_id, **kw)
+    return Observation(base.external_id, base.source_url, base.posted_on, base.content, (warning,))
+
+
+def test_warning_marks_the_post_needs_review_but_keeps_tracking_it(store):
+    baseline(store, obs("1", body="v1"))
+    result = detect_changes(store, scan([obs_with_warning("1", body="v2")], 1))
+    assert store["1"].status == NEEDS_REVIEW
+    assert store["1"].review_reason == "bad.hwp: HWP is password-protected"
+    assert result.needs_review == {"1": "bad.hwp: HWP is password-protected"}
+    assert [e.kind for e in result.events] == ["updated"]  # changes are still detected
+    assert len(store["1"].versions) == 2
+
+
+def test_warning_on_a_new_post(store):
+    baseline(store, obs("1"))
+    result = detect_changes(store, scan([obs("1"), obs_with_warning("2")], 1))
+    assert store["2"].status == NEEDS_REVIEW and "2" in result.needs_review
+    assert [e.kind for e in result.events] == ["new"]
+
+
+def test_warning_clears_when_the_problem_is_gone(store):
+    baseline(store, obs("1"))
+    detect_changes(store, scan([obs_with_warning("1")], 1))
+    detect_changes(store, scan([obs("1")], 2))
+    assert store["1"].status == CURRENT and store["1"].review_reason is None
+
+
+def test_failure_reason_is_recorded_on_the_document(store):
+    baseline(store, obs("1"))
+    detect_changes(store, scan([], 1, failures={"1": "download failed"}))
+    assert store["1"].review_reason == "download failed"
+
+
 def test_duplicate_ids_in_one_scan_are_rejected(store):
     with pytest.raises(ValueError, match="duplicate"):
         detect_changes(store, scan([obs("1"), obs("1")], 0))

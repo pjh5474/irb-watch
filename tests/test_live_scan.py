@@ -67,6 +67,15 @@ def test_scan_real_board_end_to_end():
         )
         assert files and all(f["storage_path"] == f["sha256"] for f in files)
 
+        # HWP attachments are read now: they carry text and no failure reason.
+        hwp_files = [f for f in files if f["filename"].lower().endswith(".hwp")]
+        assert hwp_files, "expected the board to have HWP attachments"
+        for f in hwp_files:
+            assert f["text_content"] and f["hash_only_reason"] is None, f["filename"]
+        # Nothing on this board should be flagged unreadable.
+        assert not [f for f in files if f["hash_only_reason"] == "unreadable"]
+        assert all(d["review_reason"] is None for d in docs)
+
         # An uploaded original must come back byte for byte.
         sample = files[0]
         stored = client.storage.from_(BUCKET).download(sample["storage_path"])

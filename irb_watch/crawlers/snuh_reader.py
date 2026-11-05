@@ -1,8 +1,11 @@
 """Turn one SNUH board into Observations for the change-detection logic.
 
 Per post: read the detail page, download every attachment, hand the original to the file
-sink (storage), extract text. A problem with one post (layout change, download error, a
-corrupt or password-protected file) marks only that post as failed; the rest is still read.
+sink (storage), extract text. Two kinds of trouble, handled differently:
+  * the post cannot be read (layout change, download error, a "document" that is really an
+    HTML error page): only that post fails and keeps its old state;
+  * an attachment is a real file we cannot read (corrupt, password-protected, a bug): the post
+    stays tracked, the file is tracked by hash, and a warning with the reason is attached.
 """
 
 from collections.abc import Callable
@@ -69,6 +72,7 @@ class SnuhSourceReader:
         body = collapse_whitespace(detail.body_text.replace(summary.title, " ", 1))
 
         files: list[FileContent] = []
+        warnings: list[str] = []
         seen_names: dict[str, int] = {}
         for ref in detail.attachments:
             downloaded = self._adapter.download(ref, self._max_file_bytes)
@@ -85,12 +89,17 @@ class SnuhSourceReader:
                     text=extracted.document.text if extracted.document else None,
                     hash_only_reason=extracted.hash_only_reason,
                     storage_path=storage_path,
+                    note=extracted.note,
                 )
             )
+            if extracted.unreadable:
+                # Still tracked by file hash, but people need to see why there is no text.
+                warnings.append(f"{name}: {extracted.note}")
 
         return Observation(
             external_id=summary.post_id,
             source_url=summary.detail_url,
             posted_on=iso_date(summary.posted_on),
             content=VersionContent(summary.title, body, tuple(files)),
+            warnings=tuple(warnings),
         )

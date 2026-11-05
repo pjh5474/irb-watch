@@ -66,6 +66,8 @@ Role changes are logged by a database trigger without an actor (the server uses 
 - A scan takes about 3 minutes per board (2-second delay between requests, plus file downloads).
 - First scan of a source is a silent baseline: documents are stored, no "new" events.
 - `needs_review` on a source means the site changed shape or the list was incomplete: read `last_scan_error`, fix the adapter, scan again. Nothing was changed by that scan.
+- `needs_review` on a document means one post has a problem: read `documents.review_reason` (also shown to subscribers as a `document.needs_review` news entry). Typical reasons: an attachment is password-protected or corrupt, or the post's page could not be read. The post stays tracked; fix or re-upload at the source, then scan again and the flag clears.
+- Files with no text are not errors by themselves: `document_version_files.hash_only_reason` says why (`no_text_layer` scanned PDF, `distribution_protected` HWP, `unsupported_format`), and `extract_note` gives the words. Only `unreadable` raises a flag.
 - A stuck `scan_in_progress` clears itself after 30 minutes.
 
 ## Tests

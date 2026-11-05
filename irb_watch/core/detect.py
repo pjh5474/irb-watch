@@ -41,6 +41,9 @@ class Observation:
     source_url: str
     posted_on: str | None
     content: VersionContent
+    # Problems with the post that do not stop it being tracked, e.g. an attachment that is
+    # password-protected. Any warning puts the document in needs_review with these reasons.
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,7 @@ def detect_changes(store: DocumentStore, scan: ScanInput) -> DetectionResult:
         doc = store.get(external_id)
         if doc is not None:
             doc.status = NEEDS_REVIEW
+            doc.review_reason = reason
         result.needs_review[external_id] = reason
 
     if scan.complete:
@@ -101,6 +105,7 @@ def detect_changes(store: DocumentStore, scan: ScanInput) -> DetectionResult:
 
 def _add_new(store: DocumentStore, obs: Observation, scan: ScanInput, result: DetectionResult):
     doc = StoredDocument(obs.external_id, obs.source_url, obs.posted_on, scan.now)
+    _apply_warnings(doc, obs, result)
     change_type = BASELINE if scan.is_first_scan else NEW
     doc.versions.append(StoredVersion(1, scan.now, change_type, obs.content))
     store[obs.external_id] = doc
@@ -112,11 +117,11 @@ def _update_existing(
     doc: StoredDocument, obs: Observation, scan: ScanInput, result: DetectionResult
 ):
     was_removed = doc.status == REMOVED
-    doc.status = CURRENT
     doc.miss_count = 0
     doc.removed_at = None
     doc.source_url = obs.source_url
     doc.posted_on = obs.posted_on
+    _apply_warnings(doc, obs, result)
 
     previous = doc.latest
     if previous.content.fingerprint() != obs.content.fingerprint():
@@ -134,6 +139,17 @@ def _update_existing(
         result.events.append(
             ChangeEvent("reappeared", doc.external_id, obs.content.title, doc.latest.version_no)
         )
+
+
+def _apply_warnings(doc: StoredDocument, obs: Observation, result: DetectionResult) -> None:
+    """A post seen this scan is `current`, or `needs_review` with the reasons if it has warnings."""
+    if obs.warnings:
+        doc.status = NEEDS_REVIEW
+        doc.review_reason = "; ".join(obs.warnings)
+        result.needs_review[obs.external_id] = doc.review_reason
+    else:
+        doc.status = CURRENT
+        doc.review_reason = None
 
 
 def _count_miss(doc: StoredDocument, scan: ScanInput, result: DetectionResult) -> None:

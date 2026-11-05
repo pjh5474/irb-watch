@@ -179,6 +179,70 @@ def test_secret_posts_are_not_counted_as_missing(h):
     assert h.repo.history[1]["2"].status == "current"
 
 
+# ---- users can see why something needs review ---------------------------------------------
+
+
+def with_warning(external_id="1", warning="bad.hwp: HWP is password-protected", **kw):
+    base = make_obs(external_id, **kw)
+    return type(base)(base.external_id, base.source_url, base.posted_on, base.content, (warning,))
+
+
+def review_entries(h):
+    return [e for e in h.audit.entries if e["event_type"] == "document.needs_review"]
+
+
+def test_unreadable_attachment_is_announced_once_with_its_reason(h):
+    h.scan(make_obs("1", title="Form"))
+    first = h.scan(with_warning("1", title="Form"), day=1)
+    assert first.status == "needs_review" and first.posts_needing_review == 1
+
+    [entry] = review_entries(h)
+    assert entry["category"] == "document"  # visible to subscribers, not admin-only
+    assert entry["title"] == "Form" and "password-protected" in entry["summary"]
+    assert entry["document_id"] == h.repo.doc_ids[(1, "1")] and entry["source_id"] == 1
+    assert h.repo.history[1]["1"].review_reason == "bad.hwp: HWP is password-protected"
+
+    h.scan(with_warning("1", title="Form"), day=2)
+    h.scan(with_warning("1", title="Form"), day=3)
+    assert len(review_entries(h)) == 1  # not repeated while nothing changes
+
+
+def test_a_changed_reason_is_announced_again(h):
+    h.scan(make_obs("1"))
+    h.scan(with_warning("1", warning="a.hwp: HWP is password-protected"), day=1)
+    h.scan(with_warning("1", warning="a.hwp: HWP is corrupt"), day=2)
+    assert [e["summary"] for e in review_entries(h)] == [
+        "a.hwp: HWP is password-protected",
+        "a.hwp: HWP is corrupt",
+    ]
+
+
+def test_a_problem_that_returns_after_being_fixed_is_announced_again(h):
+    h.scan(make_obs("1"))
+    h.scan(with_warning("1"), day=1)
+    h.scan(make_obs("1"), day=2)  # fixed
+    assert h.repo.history[1]["1"].review_reason is None
+    h.scan(with_warning("1"), day=3)
+    assert len(review_entries(h)) == 2
+
+
+def test_post_level_failure_is_announced_with_its_reason(h):
+    h.scan(make_obs("1", title="Known post"))
+    h.scan(failures={"1": "detail page 1: article.board-view not found"}, day=1)
+    [entry] = review_entries(h)
+    assert entry["title"] == "Known post" and "article.board-view" in entry["summary"]
+    assert h.repo.history[1]["1"].review_reason.startswith("detail page 1")
+    h.scan(failures={"1": "detail page 1: article.board-view not found"}, day=2)
+    assert len(review_entries(h)) == 1
+
+
+def test_failure_of_a_post_never_seen_before_still_gets_a_notice(h):
+    h.scan(make_obs("1"))
+    h.scan(make_obs("1"), failures={"9": "download failed"}, day=1)
+    [entry] = review_entries(h)
+    assert entry["title"] == "Post 9" and entry["document_id"] is None
+
+
 # ---- originals are uploaded only when the hash is new ------------------------------------
 
 

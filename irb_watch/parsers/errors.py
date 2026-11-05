@@ -1,20 +1,37 @@
-"""Two different outcomes when text cannot be extracted from a file.
+"""The outcomes when text cannot be extracted from a file.
 
-ParseError: something is wrong (corrupt, password-protected, too big, not what it claims
-to be). The pipeline marks the source `needs_review`.
+Three different things can happen, and they are handled differently:
 
-TextUnavailableError: expected and stable (scanned image PDF, HWP/DOCX with no extractor
-yet). It is deliberately NOT a ParseError, so `except ParseError` cannot swallow it. The
-file is tracked by its file hash only and labelled "text not available"; it must not raise
-an alert on every scan.
+TextUnavailableError  The file is fine but yields no text, and will stay that way (scanned
+                      PDF, DOCX-less formats, a distribution-protected HWP). Expected and
+                      stable: tracked by file hash, labelled "text not available", no alert.
+
+UnreadableFileError   A real document of the right type that we cannot read (corrupt,
+                      password-protected, too large or complex, or a bug in our reader).
+                      The post is still tracked and the file is tracked by hash, but it is
+                      flagged `needs_review` with the reason so people can see why.
+
+ParseError            The bytes are not the document the name promises (for example an HTML
+                      login page served as .pdf). That is a download problem, not a property
+                      of the document: the whole post fails and keeps its old state.
 """
 
 NO_TEXT_LAYER = "no_text_layer"
 UNSUPPORTED_FORMAT = "unsupported_format"
+DISTRIBUTION_PROTECTED = "distribution_protected"
+UNREADABLE = "unreadable"
 
 
 class ParseError(Exception):
-    """A file could not be read. Mark `needs_review`; never treat as empty or unchanged."""
+    """Bytes do not match the file type. Fails the post; never treated as empty or unchanged."""
+
+
+class UnreadableFileError(Exception):
+    """A genuine file we could not read. `note` is the reason shown to users."""
+
+    def __init__(self, note: str) -> None:
+        super().__init__(note)
+        self.note = note
 
 
 class TextUnavailableError(Exception):
@@ -26,7 +43,7 @@ class TextUnavailableError(Exception):
 
 
 class UnsupportedFormatError(TextUnavailableError):
-    """No text extractor for this file type yet (for example HWP or DOCX)."""
+    """No text extractor for this file type yet (for example legacy .doc)."""
 
     def __init__(self, message: str) -> None:
         super().__init__(UNSUPPORTED_FORMAT, message)

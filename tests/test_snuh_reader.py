@@ -86,17 +86,48 @@ def test_title_edit_does_not_change_the_body_text():
     assert a.content.body_text == b.content.body_text
 
 
-def test_scanned_pdf_and_hwp_are_hash_only():
+def test_scanned_pdf_and_old_word_file_are_hash_only_without_a_warning():
     s = summary("1")
-    files = {"scan.pdf": make_pdf(["", ""]), "form.hwp": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest"}
+    files = {"scan.pdf": make_pdf(["", ""]), "old.doc": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest"}
     [obs] = reader(
-        FakeAdapter([s], {"1": detail(s, names=["scan.pdf", "form.hwp"])}, files)
+        FakeAdapter([s], {"1": detail(s, names=["scan.pdf", "old.doc"])}, files)
     ).read(Sink()).observations
     reasons = {f.filename: (f.text, f.hash_only_reason) for f in obs.content.files}
     assert reasons == {
         "scan.pdf": (None, "no_text_layer"),
-        "form.hwp": (None, "unsupported_format"),
+        "old.doc": (None, "unsupported_format"),
     }
+    assert obs.warnings == ()  # expected and stable: nothing for people to act on
+    assert all(f.note for f in obs.content.files)  # but the reason is recorded
+
+
+def test_real_hwp_attachment_is_read():
+    from pathlib import Path
+
+    real = next(Path(__file__).parent.joinpath("fixtures").glob("snuh_form_*.hwp")).read_bytes()
+    s = summary("1")
+    [obs] = reader(
+        FakeAdapter([s], {"1": detail(s, names=["form.hwp"])}, {"form.hwp": real})
+    ).read(Sink()).observations
+    assert obs.content.files[0].text and "IRB No." in obs.content.files[0].text
+    assert obs.warnings == ()
+
+
+def test_unreadable_attachment_keeps_the_post_tracked_and_adds_a_warning():
+    s = summary("1")
+    corrupt_hwp = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"junk" * 100
+    files = {"good.pdf": make_pdf([LONG]), "bad.hwp": corrupt_hwp}
+    reading = reader(
+        FakeAdapter([s], {"1": detail(s, names=["good.pdf", "bad.hwp"])}, files)
+    ).read(Sink())
+
+    assert reading.failures == {}  # the post is NOT failed
+    [obs] = reading.observations
+    by_name = {f.filename: f for f in obs.content.files}
+    assert by_name["good.pdf"].text and by_name["bad.hwp"].text is None
+    assert by_name["bad.hwp"].hash_only_reason == "unreadable"
+    assert by_name["bad.hwp"].sha256 == sha256_hex(corrupt_hwp)  # still tracked by hash
+    assert len(obs.warnings) == 1 and obs.warnings[0].startswith("bad.hwp: HWP is corrupt")
 
 
 def test_secret_posts_are_unreadable_not_failures():
@@ -121,6 +152,7 @@ def test_one_broken_post_does_not_stop_the_others():
     assert [o.external_id for o in reading.observations] == ["1"]
     assert set(reading.failures) == {"2", "3"}
     assert "article.board-view" in reading.failures["2"]
+    # An HTML page served under a .pdf name is a download problem, so the post fails.
     assert "not a valid pdf" in reading.failures["3"]
 
 
