@@ -10,13 +10,15 @@ from irb_watch.crawlers.errors import (
     LoginExpiredError,
     LoginRejectedError,
 )
+from irb_watch.db.access import SupabaseAccessStore
 from irb_watch.main import app
-from irb_watch.services.access import AccessService
+from irb_watch.services.access import AccessService, id_fingerprint, unsettled_attempts
 from irb_watch.services.errors import (
     AuditUnavailableError,
     ForbiddenError,
     NotFoundError,
     TooManyRequestsError,
+    UnavailableError,
     UpstreamError,
     ValidationError,
 )
@@ -32,11 +34,15 @@ PRIVATE = make_source(
 PUBLIC = make_source(2)
 
 
+KEY = "test-hash-key"
+
+
 class FakeAccessStore:
-    def __init__(self):
+    def __init__(self, audit=None):
         self.sources = {1: PRIVATE, 2: PUBLIC}
         self.granted: dict[tuple[str, int], tuple[datetime, datetime]] = {}
         self.attempts = 0
+        self.audit = audit  # outcomes are read back from the audit entries, like the real store
 
     def get_source(self, source_id):
         return self.sources.get(source_id)
@@ -47,18 +53,28 @@ class FakeAccessStore:
     def count_attempts_since(self, user_id, since):
         return self.attempts
 
+    def id_outcomes_since(self, fingerprint, since):
+        return [
+            (e["event_type"], e["payload"].get("reason"))
+            for e in self.audit.entries
+            if e["event_type"].startswith("access.") and e["payload"].get("id_fp") == fingerprint
+        ]
+
 
 def make(check=lambda source, creds: None, **kw):
     users = FakeStore()
-    users.add("user-1", "u@example.com")
+    for name in ("user-1", "user-2", "user-3", "user-4"):
+        users.add(name, f"{name}@example.com")
     users.add("gone", "g@example.com", deleted_at="2026-01-01T00:00:00+00:00")
-    store, audit = FakeAccessStore(), FakeAudit()
+    audit = FakeAudit()
+    store = FakeAccessStore(audit)
     seen = []
 
     def spying_check(source, creds):
         seen.append(creds)
         return check(source, creds)
 
+    kw.setdefault("id_hash_key", KEY)
     service = AccessService(users, store, audit, spying_check, clock=lambda: NOW, **kw)
     return service, store, audit, seen
 
@@ -131,9 +147,10 @@ def test_unknown_source_and_bad_accounts():
 def test_if_the_attempt_cannot_be_logged_no_hospital_login_is_tried():
     users = FakeStore()
     users.add("user-1", "u@example.com")
-    store, audit, seen = FakeAccessStore(), FakeAudit(fail_required=True), []
+    audit, seen = FakeAudit(fail_required=True), []
+    store = FakeAccessStore(audit)
     service = AccessService(
-        users, store, audit, lambda s, c: seen.append(c), clock=lambda: NOW
+        users, store, audit, lambda s, c: seen.append(c), clock=lambda: NOW, id_hash_key=KEY
     )
     with pytest.raises(AuditUnavailableError):
         service.prove_access("user-1", 1, "id", "pw")
@@ -146,6 +163,121 @@ def test_attempt_limit_blocks_before_any_hospital_login():
     with pytest.raises(TooManyRequestsError, match="5/hour"):
         service.prove_access("user-1", 1, "id", "pw")
     assert seen == [] and audit.entries == []
+
+
+# ---- lockout protection per hospital ID ---------------------------------------------------
+
+
+def rejecting(source, creds):
+    raise LoginRejectedError("login rejected: x")
+
+
+def test_hospital_id_is_logged_only_as_a_keyed_hash():
+    service, _, audit, _ = make()
+    service.prove_access("user-1", 1, "Hospital-ID-77", "pw-123")
+    fingerprint = id_fingerprint(KEY, "Hospital-ID-77")
+    assert [e["payload"]["id_fp"] for e in audit.entries] == [fingerprint, fingerprint]
+    assert "Hospital-ID-77" not in str(audit.entries) and "pw-123" not in str(audit.entries)
+
+
+def test_fingerprint_ignores_case_and_spaces_and_depends_on_the_key():
+    assert id_fingerprint("k", "Abc ") == id_fingerprint("k", " abc")
+    assert id_fingerprint("k", "abc") != id_fingerprint("other", "abc")
+    assert len(id_fingerprint("k", "abc")) == 64
+
+
+def test_three_failed_logins_for_one_hospital_id_block_it_for_everyone():
+    service, _, audit, seen = make(rejecting)
+    for user in ("user-1", "user-2", "user-3"):  # three different app users, one hospital ID
+        with pytest.raises(ForbiddenError):
+            service.prove_access(user, 1, "shared-id", "bad")
+    logged = len(audit.entries)
+    with pytest.raises(TooManyRequestsError, match="hospital ID"):
+        service.prove_access("user-4", 1, "SHARED-ID ", "bad")  # another user, same ID
+    assert len(seen) == 3 and len(audit.entries) == logged  # no 4th login, nothing logged
+    with pytest.raises(ForbiddenError):  # a different ID is not affected
+        service.prove_access("user-4", 1, "other-id", "bad")
+    assert len(seen) == 4
+
+
+def test_successes_and_unjudged_checks_do_not_count_against_the_id():
+    results = iter([None, None, None, LoginExpiredError("x"), FetchError("site down"), None])
+
+    def check(source, creds):
+        outcome = next(results)
+        if outcome:
+            raise outcome
+
+    service, _, _, seen = make(check, attempts_per_hour=99)
+    for _ in range(6):
+        try:
+            service.prove_access("user-1", 1, "id-1", "pw")
+        except (ForbiddenError, UpstreamError):
+            pass
+    assert len(seen) == 6  # never blocked
+
+
+def test_a_check_that_never_logged_its_result_counts_like_a_failure():
+    service, _, audit, seen = make()
+    fingerprint = id_fingerprint(KEY, "id-1")
+    for _ in range(3):  # three attempts still running, or whose result was lost
+        audit.record("user", "access.attempted", "user-2", payload={"id_fp": fingerprint})
+    with pytest.raises(TooManyRequestsError):
+        service.prove_access("user-1", 1, "id-1", "pw")
+    assert seen == []
+
+
+def test_without_the_hash_key_access_checks_refuse_and_try_no_login():
+    service, store, audit, seen = make(id_hash_key="")
+    with pytest.raises(UnavailableError, match="ACCESS_ID_HASH_KEY"):
+        service.prove_access("user-1", 1, "id", "pw")
+    assert seen == [] and audit.entries == [] and store.granted == {}
+
+
+def test_unsettled_attempts_arithmetic():
+    attempted, granted = ("access.attempted", None), ("access.granted", None)
+    assert unsettled_attempts([]) == 0
+    assert unsettled_attempts([attempted, attempted, granted]) == 1
+    assert unsettled_attempts([granted]) == 0  # an old attempt outside the window: never negative
+    assert unsettled_attempts([attempted, ("access.denied", "login_rejected")]) == 1
+    assert unsettled_attempts([attempted, ("access.denied", "check_failed")]) == 0
+
+
+class QueryLog:
+    """Chainable stand-in for a Supabase table query that records the calls."""
+
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            self.calls.append((name, args))
+            return self
+
+        return call
+
+    def execute(self):
+        return type("Result", (), {"data": self.rows})()
+
+
+def test_supabase_store_reads_the_hour_of_outcomes_for_one_hashed_id():
+    query = QueryLog(
+        [
+            {"event_type": "access.attempted", "payload": {"id_fp": "f"}},
+            {"event_type": "access.denied", "payload": {"id_fp": "f", "reason": "check_failed"}},
+            {"event_type": "access.granted", "payload": None},
+        ]
+    )
+    client = type("Client", (), {"table": lambda self, name: query})()
+    since = NOW - timedelta(hours=1)
+    outcomes = SupabaseAccessStore(client).id_outcomes_since("f", since)
+    assert outcomes == [
+        ("access.attempted", None),
+        ("access.denied", "check_failed"),
+        ("access.granted", None),
+    ]
+    assert ("eq", ("payload->>id_fp", "f")) in query.calls
+    assert ("gte", ("created_at", since.isoformat())) in query.calls
 
 
 # ---- the real check wiring (fake browser login + fake board) ---------------------------

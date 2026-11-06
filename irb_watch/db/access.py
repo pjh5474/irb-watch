@@ -28,6 +28,22 @@ class SupabaseAccessStore:
             on_conflict="user_id,source_id",
         ).execute()
 
+    def id_outcomes_since(self, fingerprint: str, since: datetime) -> list[tuple[str, str | None]]:
+        """(event_type, reason) of the access log rows for one hashed hospital ID.
+
+        The created_at range keeps this to the last hour of rows (the table's time index).
+        """
+        rows = (
+            self._c.table("audit_logs")
+            .select("event_type, payload")
+            .in_("event_type", ["access.attempted", "access.granted", "access.denied"])
+            .eq("payload->>id_fp", fingerprint)
+            .gte("created_at", since.isoformat())
+            .execute()
+            .data
+        )
+        return [(r["event_type"], (r["payload"] or {}).get("reason")) for r in rows]
+
     def count_attempts_since(self, user_id: str, since: datetime) -> int:
         result = (
             self._c.table("audit_logs")

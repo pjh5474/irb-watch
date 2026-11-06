@@ -125,6 +125,8 @@ def get_access_service() -> AccessService:
         verify_user_access,
         settings.access_ttl_days,
         settings.access_attempts_per_hour,
+        id_hash_key=settings.access_id_hash_key,
+        id_failures_per_hour=settings.access_id_failures_per_hour,
     )
 
 
