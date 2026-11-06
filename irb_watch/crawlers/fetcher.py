@@ -44,6 +44,7 @@ class SafeFetcher:
         delay: float = 2.0,
         max_redirects: int = 5,
         check_robots: bool = True,
+        cookies: httpx.Cookies | None = None,
         transport: httpx.BaseTransport | None = None,
         resolver: Callable[[str], list[str]] | None = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -62,6 +63,7 @@ class SafeFetcher:
             timeout=timeout,
             follow_redirects=False,
             headers={"User-Agent": USER_AGENT},
+            cookies=cookies,
             transport=transport,
         )
 

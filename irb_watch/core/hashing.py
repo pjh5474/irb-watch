@@ -16,7 +16,9 @@ def sha256_hex(data: bytes) -> str:
 
 
 def collapse_whitespace(text: str) -> str:
-    return _WS.sub(" ", text).strip()
+    # A NUL character (code point 0) cannot be stored in a Postgres text column; some
+    # extracted file text contains it (found by the first live scan of a login board).
+    return _WS.sub(" ", text.replace(chr(0), "")).strip()
 
 
 def normalize_text(text: str) -> str:

@@ -21,6 +21,8 @@ from irb_watch.crawlers.errors import (
     FetchError,
     IncompleteScanError,
     LayoutChangedError,
+    LoginExpiredError,
+    LoginRejectedError,
     RobotsDisallowedError,
 )
 from irb_watch.crawlers.snuh_reader import FileSink, ScanReading
@@ -117,7 +119,13 @@ class ScanService:
         try:
             summary = self._scan(source, actor_id, now)
             saved = True
-        except (LayoutChangedError, IncompleteScanError, RobotsDisallowedError) as exc:
+        except (
+            LayoutChangedError,
+            IncompleteScanError,
+            RobotsDisallowedError,
+            LoginExpiredError,
+            LoginRejectedError,
+        ) as exc:
             summary = ScanSummary(source.id, NEEDS_REVIEW, error=str(exc))
         except FetchError as exc:
             summary = ScanSummary(source.id, FAILED, error=str(exc))
@@ -125,7 +133,10 @@ class ScanService:
             summary = ScanSummary(source.id, FAILED, error=exc.message)
         except Exception as exc:
             log.exception("scan of source %s crashed", source.id)
-            summary = ScanSummary(source.id, FAILED, error=f"unexpected error ({type(exc).__name__})")
+            reason = (str(exc).splitlines() or [""])[0][:200]
+            summary = ScanSummary(
+                source.id, FAILED, error=f"unexpected error ({type(exc).__name__}): {reason}"
+            )
 
         if summary.status != OK or summary.error:
             self._audit.record(

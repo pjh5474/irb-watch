@@ -21,6 +21,7 @@ class SourceOut(BaseModel):
     last_scan_status: str | None
     last_scan_error: str | None
     scan_in_progress: bool
+    login_user: str | None = None  # whose stored login this source scans with
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -36,17 +37,20 @@ class SourceOut(BaseModel):
             last_scan_status=s.last_scan_status,
             last_scan_error=s.last_scan_error,
             scan_in_progress=s.scan_started_at is not None,
+            login_user=s.config.get("login_user"),
         )
 
 
 class CreateSourceIn(BaseModel):
     name: str
     url: str
+    login_user: str | None = None
 
 
 class UpdateSourceIn(BaseModel):
     name: str | None = None
     is_active: bool | None = None
+    login_user: str | None = None  # "" removes the login
 
 
 @router.post("", status_code=201, response_model=SourceOut)
@@ -55,7 +59,7 @@ def create_source(
     admin: AuthUser = Depends(require_admin),
     service: SourceService = Depends(get_source_service),
 ) -> SourceOut:
-    return SourceOut.from_source(service.create(admin.id, body.name, body.url))
+    return SourceOut.from_source(service.create(admin.id, body.name, body.url, body.login_user))
 
 
 @router.get("", response_model=list[SourceOut])
@@ -73,7 +77,9 @@ def update_source(
     admin: AuthUser = Depends(require_admin),
     service: SourceService = Depends(get_source_service),
 ) -> SourceOut:
-    return SourceOut.from_source(service.update(admin.id, source_id, body.name, body.is_active))
+    return SourceOut.from_source(
+        service.update(admin.id, source_id, body.name, body.is_active, body.login_user)
+    )
 
 
 @router.post("/{source_id}/scan", status_code=202)

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from irb_watch.crawlers.sessions import valid_name
 from irb_watch.security.url_guard import UnsafeURLError, validate_url
 from irb_watch.services.errors import ConflictError, NotFoundError, ValidationError
 from irb_watch.services.users import AuditSink
@@ -54,6 +55,13 @@ def detect_adapter(url: str) -> tuple[str, str, dict]:
     raise ValidationError("no adapter for this site yet (supported: hrpp.snuh.org boards)")
 
 
+def _checked_login_user(login_user: str) -> str:
+    login_user = login_user.strip()
+    if not valid_name(login_user):
+        raise ValidationError("login_user may use only letters, digits, '.', '_' and '-'")
+    return login_user
+
+
 class SourceService:
     def __init__(
         self,
@@ -65,11 +73,15 @@ class SourceService:
         self._audit = audit
         self._check_url = url_checker
 
-    def create(self, actor_id: str | None, name: str, url: str) -> Source:
+    def create(
+        self, actor_id: str | None, name: str, url: str, login_user: str | None = None
+    ) -> Source:
         name = name.strip()
         if not name:
             raise ValidationError("name must not be empty")
         adapter, canonical, config = detect_adapter(url)
+        if login_user:
+            config["login_user"] = _checked_login_user(login_user)
         try:
             self._check_url(canonical)
         except UnsafeURLError as exc:
@@ -103,9 +115,15 @@ class SourceService:
         source_id: int,
         name: str | None = None,
         is_active: bool | None = None,
+        login_user: str | None = None,
     ) -> Source:
-        self.get(source_id)
+        current = self.get(source_id)
         values: dict = {}
+        if login_user is not None:  # "" removes the login
+            config = {k: v for k, v in current.config.items() if k != "login_user"}
+            if login_user:
+                config["login_user"] = _checked_login_user(login_user)
+            values["config"] = config
         if name is not None:
             if not name.strip():
                 raise ValidationError("name must not be empty")

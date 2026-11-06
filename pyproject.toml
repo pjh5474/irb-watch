@@ -9,6 +9,7 @@ dependencies = [
     "httpx",
     "beautifulsoup4",
     "playwright",
+    "keyring",
     "supabase",
     "pyjwt[crypto]",
     "email-validator",

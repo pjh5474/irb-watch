@@ -6,7 +6,7 @@ Any mismatch with that markup raises LayoutChangedError so the source is marked
 """
 
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -18,8 +18,13 @@ from irb_watch.core.models import (
     PostDetail,
     PostSummary,
 )
-from irb_watch.crawlers.errors import FetchError, IncompleteScanError, LayoutChangedError
-from irb_watch.crawlers.fetcher import SafeFetcher
+from irb_watch.crawlers.errors import (
+    FetchError,
+    IncompleteScanError,
+    LayoutChangedError,
+    LoginExpiredError,
+)
+from irb_watch.crawlers.fetcher import FetchedResponse, SafeFetcher
 
 BASE_URL = "https://hrpp.snuh.org"
 MAX_PAGES = 20
@@ -27,6 +32,8 @@ MAX_PAGES = 20
 _GO_VIEW = re.compile(r"goView\(\s*'([^']+)'\s*,\s*'([YN])'\s*,\s*'([^']*)'\s*,\s*'([YN])'\s*\)")
 _TOTAL = re.compile(r"전체\s*([\d,]+)\s*건")
 _PREV_NEXT_MARKER = "이전글"
+# The site's login page is /hrpp/lgn/form.do (seen live 2026-11-06).
+_LOGIN_PATH = re.compile(r"login|logon|/lgn/", re.IGNORECASE)
 
 
 def parse_list(html: str, board_key: str, base_url: str = BASE_URL) -> tuple[int, list[PostSummary]]:
@@ -108,6 +115,13 @@ def parse_detail(
     )
 
 
+def is_login_page(url: str, html: str) -> bool:
+    """True if the response is a login page: redirected to a login URL, or a password form."""
+    if _LOGIN_PATH.search(urlsplit(url).path):
+        return True
+    return BeautifulSoup(html, "html.parser").select_one("input[type=password]") is not None
+
+
 class SnuhAdapter:
     def __init__(self, fetcher: SafeFetcher, base_url: str = BASE_URL) -> None:
         self._fetcher = fetcher
@@ -116,12 +130,22 @@ class SnuhAdapter:
     def close(self) -> None:
         self._fetcher.close()
 
+    def _login_expired(self, response: FetchedResponse) -> LoginExpiredError:
+        return LoginExpiredError(f"login required or expired (got a login page at {response.url})")
+
+    def _page(self, url: str, params: dict[str, str] | None = None) -> FetchedResponse:
+        """GET a page; a redirect to a login URL is a login failure, not a layout change."""
+        response = self._fetcher.get(url, params=params)
+        if _LOGIN_PATH.search(urlsplit(response.url).path):
+            raise self._login_expired(response)
+        return response
+
     def list_board(self, board_key: str, max_posts: int = 200) -> tuple[int, list[PostSummary]]:
         """Read every list page. Raises IncompleteScanError if fewer posts than declared."""
         seen: dict[str, PostSummary] = {}
         declared_total = 0
         for page in range(1, MAX_PAGES + 1):
-            response = self._fetcher.get(
+            response = self._page(
                 f"{self._base}/hrpp/bbs/list.do",
                 params={
                     "key": board_key,
@@ -131,7 +155,12 @@ class SnuhAdapter:
                     "sw": "",
                 },
             )
-            declared_total, posts = parse_list(response.text, board_key, self._base)
+            try:
+                declared_total, posts = parse_list(response.text, board_key, self._base)
+            except LayoutChangedError:
+                if is_login_page(response.url, response.text):
+                    raise self._login_expired(response) from None
+                raise
             new = [p for p in posts if p.post_id not in seen]
             for post in new:
                 seen[post.post_id] = post
@@ -148,8 +177,13 @@ class SnuhAdapter:
         return declared_total, list(seen.values())
 
     def fetch_post(self, summary: PostSummary) -> PostDetail:
-        response = self._fetcher.get(summary.detail_url)
-        return parse_detail(response.text, summary, self._base)
+        response = self._page(summary.detail_url)
+        try:
+            return parse_detail(response.text, summary, self._base)
+        except LayoutChangedError:
+            if is_login_page(response.url, response.text):
+                raise self._login_expired(response) from None
+            raise
 
     def scan_board(self, board_key: str, max_posts: int = 200) -> BoardSnapshot:
         declared_total, summaries = self.list_board(board_key, max_posts)
@@ -161,6 +195,8 @@ class SnuhAdapter:
         """Download one attachment. Use a URL freshly read from the detail page."""
         response = self._fetcher.get(attachment.url, max_bytes=max_bytes)
         if "text/html" in response.headers.get("content-type", "").lower():
+            if is_login_page(response.url, response.text):
+                raise self._login_expired(response)
             raise FetchError(f"got an HTML page instead of a file for {attachment.filename}")
         if not response.content:
             raise FetchError(f"empty download for {attachment.filename}")

@@ -16,3 +16,17 @@ class LayoutChangedError(CrawlError):
 
 class IncompleteScanError(CrawlError):
     """Fewer posts were read than the site declared."""
+
+
+class LoginRejectedError(CrawlError):
+    """Automatic login failed: wrong ID/password, blocked account, or the login form changed.
+
+    Affects only the one source being scanned: it becomes `needs_review` with this reason.
+    """
+
+
+class LoginExpiredError(CrawlError):
+    """The board needs a login and the saved session is missing, expired or rejected.
+
+    Affects only the one source being scanned: it becomes `needs_review` with this reason.
+    """
