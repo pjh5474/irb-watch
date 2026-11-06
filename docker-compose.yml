@@ -1,0 +1,47 @@
+# Runs the API (with Chromium) behind Caddy for HTTPS.
+#   docker compose up -d --build
+# All settings come from the .env file next to this file (copy .env.example, fill it in by
+# hand on the server, chmod 600). Steps: docs/deploy-ec2.md
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      # Linux has no Windows Credential Manager: logins are read from the encrypted table.
+      CREDENTIAL_STORE: database
+      # On by default here; set SCHEDULER_ENABLED=false in .env to stop the daily scan.
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+    # Chromium crashes with Docker's default 64 MB shared memory.
+    shm_size: "1gb"
+    restart: unless-stopped
+    expose:
+      - "8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN in .env, for example irb-api.warwarsn.online}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

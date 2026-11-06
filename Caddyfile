@@ -1,0 +1,7 @@
+# HTTPS in front of the API. The hostname comes from API_DOMAIN in .env (for example
+# irb-api.warwarsn.online). Caddy gets and renews a free certificate by itself; ports 80
+# and 443 must be open to the internet and the DNS record must point at this server.
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:8000
+}
