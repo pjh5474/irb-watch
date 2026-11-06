@@ -176,6 +176,24 @@ class SnuhAdapter:
             raise IncompleteScanError(f"board {board_key}: {len(seen)} posts exceeds cap {max_posts}")
         return declared_total, list(seen.values())
 
+    def check_board_access(self, board_key: str) -> int:
+        """Open page 1 of the board with the current session; return its declared post count.
+
+        Cheap proof that this login may read this board (one request, no posts opened).
+        Raises LoginExpiredError if the site answers with a login page instead.
+        """
+        response = self._page(
+            f"{self._base}/hrpp/bbs/list.do",
+            params={"key": board_key, "pageIndex": "1", "sc_bbsCtgrySn": "0", "sc": "pstTtl", "sw": ""},
+        )
+        try:
+            declared_total, _ = parse_list(response.text, board_key, self._base)
+        except LayoutChangedError:
+            if is_login_page(response.url, response.text):
+                raise self._login_expired(response) from None
+            raise
+        return declared_total
+
     def fetch_post(self, summary: PostSummary) -> PostDetail:
         response = self._page(summary.detail_url)
         try:

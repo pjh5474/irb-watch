@@ -28,6 +28,8 @@ class Source:
     last_scan_status: str | None = None
     last_scan_error: str | None = None
     scan_started_at: str | None = None
+    # Members-only board: readable only by admins and by subscribers who proved access.
+    requires_login: bool = False
 
 
 class DuplicateSourceError(Exception):
@@ -36,7 +38,13 @@ class DuplicateSourceError(Exception):
 
 class SourceStore(Protocol):
     def create(
-        self, name: str, adapter: str, url: str, config: dict, created_by: str | None
+        self,
+        name: str,
+        adapter: str,
+        url: str,
+        config: dict,
+        created_by: str | None,
+        requires_login: bool = False,
     ) -> Source: ...
     def get(self, source_id: int) -> Source | None: ...
     def list(self) -> list[Source]: ...
@@ -87,7 +95,9 @@ class SourceService:
         except UnsafeURLError as exc:
             raise ValidationError(f"URL is not allowed: {exc}") from exc
         try:
-            source = self._store.create(name, adapter, canonical, config, actor_id)
+            source = self._store.create(
+                name, adapter, canonical, config, actor_id, requires_login="login_user" in config
+            )
         except DuplicateSourceError as exc:
             raise ConflictError("this URL is already registered") from exc
         self._audit.record(
@@ -123,6 +133,9 @@ class SourceService:
             config = {k: v for k, v in current.config.items() if k != "login_user"}
             if login_user:
                 config["login_user"] = _checked_login_user(login_user)
+                values["requires_login"] = True
+            # Removing the scanning login never clears requires_login: data already
+            # scanned from a members-only board must not become public by accident.
             values["config"] = config
         if name is not None:
             if not name.strip():

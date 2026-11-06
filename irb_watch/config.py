@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # New summaries one user may request per day (cached ones are free).
     summary_requests_per_day: int = 20
 
+    # Proof of access to a members-only board: how long it lasts, and how many login
+    # checks one user may start per hour (protects hospital accounts from lockout).
+    access_ttl_days: int = 30
+    access_attempts_per_hour: int = 5
+
     scan_cron: str = "0 6 * * *"
     max_file_bytes: int = 20_000_000
     max_docs_per_url: int = 200

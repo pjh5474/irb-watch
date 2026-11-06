@@ -12,6 +12,7 @@ from irb_watch.crawlers.credentials import KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
+from irb_watch.db.access import SupabaseAccessStore
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.documents import (
     SupabaseFileStorage,
@@ -20,9 +21,10 @@ from irb_watch.db.documents import (
     SupabaseSummaryRepo,
 )
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
+from irb_watch.services.access import AccessService
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.scan import ScanService, SourceReader
-from irb_watch.services.source_login import cookies_for_source
+from irb_watch.services.source_login import cookies_for_source, verify_user_access
 from irb_watch.services.sources import Source, SourceService
 from irb_watch.services.summaries import SummaryService
 from irb_watch.services.users import UserService, UserStore
@@ -87,6 +89,19 @@ def get_scan_service() -> ScanService:
         build_reader,
         SupabaseAuditSink(client),
         enricher=build_enricher(),
+    )
+
+
+def get_access_service() -> AccessService:
+    client = get_supabase_client()
+    settings = get_settings()
+    return AccessService(
+        SupabaseUserStore(client),
+        SupabaseAccessStore(client),
+        SupabaseAuditSink(client),
+        verify_user_access,
+        settings.access_ttl_days,
+        settings.access_attempts_per_hour,
     )
 
 

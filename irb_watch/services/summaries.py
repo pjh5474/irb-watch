@@ -1,6 +1,7 @@
 """Summary of a whole document, requested by a signed-in user.
 
-Rules: the user must be active and subscribed to the document's source (or be an admin);
+Rules: the user must be active and may read the document's source (subscribed, plus a valid
+proof of access for members-only sources) or be an admin;
 a cached summary is returned for free; a new one counts toward a per-user daily limit.
 Documents the user may not see answer "not found", so their existence is not revealed.
 """
@@ -42,7 +43,7 @@ class SummaryResult:
 
 class SummaryRepo(Protocol):
     def get_latest(self, document_id: int) -> DocumentForSummary | None: ...
-    def is_subscribed(self, user_id: str, source_id: int) -> bool: ...
+    def may_read(self, user_id: str, source_id: int, now: datetime) -> bool: ...
     def count_requests_since(self, user_id: str, since: datetime) -> int: ...
     def save_summary(self, version_id: int, text: str, now: datetime) -> None: ...
     def record_request(self, user_id: str, version_id: int, now: datetime) -> None: ...
@@ -70,10 +71,13 @@ class SummaryService:
         if profile is None or profile.deleted_at is not None:
             raise ForbiddenError("this account cannot request summaries")
 
+        now = self._clock()
         doc = self._repo.get_latest(document_id)
         if doc is None:
             raise NotFoundError("document not found")
-        if profile.role != "admin" and not self._repo.is_subscribed(user_id, doc.source_id):
+        # Same rule as the database policies: followers of a members-only source also
+        # need an unexpired proof of access.
+        if profile.role != "admin" and not self._repo.may_read(user_id, doc.source_id, now):
             raise NotFoundError("document not found")
 
         if doc.document_summary:
@@ -82,7 +86,6 @@ class SummaryService:
         if self._summarizer is None:
             raise UnavailableError("AI summaries are not switched on for this server")
 
-        now = self._clock()
         used = self._repo.count_requests_since(user_id, now - timedelta(days=1))
         if used >= self._daily_limit:
             raise TooManyRequestsError(

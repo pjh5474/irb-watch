@@ -22,6 +22,7 @@ class SourceOut(BaseModel):
     last_scan_error: str | None
     scan_in_progress: bool
     login_user: str | None = None  # whose stored login this source scans with
+    requires_login: bool = False  # members-only: users must prove access to read it
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -38,6 +39,7 @@ class SourceOut(BaseModel):
             last_scan_error=s.last_scan_error,
             scan_in_progress=s.scan_started_at is not None,
             login_user=s.config.get("login_user"),
+            requires_login=s.requires_login,
         )
 
 

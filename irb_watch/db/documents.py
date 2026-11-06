@@ -36,6 +36,7 @@ def _source(row: dict) -> Source:
         last_scan_status=row.get("last_scan_status"),
         last_scan_error=row.get("last_scan_error"),
         scan_started_at=row.get("scan_started_at"),
+        requires_login=bool(row.get("requires_login", False)),
     )
 
 
@@ -43,7 +44,7 @@ class SupabaseSourceStore:
     def __init__(self, client: Client) -> None:
         self._c = client
 
-    def create(self, name, adapter, url, config, created_by) -> Source:
+    def create(self, name, adapter, url, config, created_by, requires_login=False) -> Source:
         try:
             rows = (
                 self._c.table("sources")
@@ -54,6 +55,7 @@ class SupabaseSourceStore:
                         "url": url,
                         "config": config,
                         "created_by": created_by,
+                        "requires_login": requires_login,
                     }
                 )
                 .execute()
@@ -362,8 +364,12 @@ class SupabaseSummaryRepo:
             document_summary=version["document_summary"],
         )
 
-    def is_subscribed(self, user_id: str, source_id: int) -> bool:
-        rows = (
+    def may_read(self, user_id: str, source_id: int, now: datetime) -> bool:
+        """Server-side twin of the database rule private.can_read_source (non-admins).
+
+        Subscribed, and for a members-only source also holding an unexpired proof of access.
+        """
+        subscribed = (
             self._c.table("subscriptions")
             .select("user_id")
             .eq("user_id", user_id)
@@ -372,7 +378,26 @@ class SupabaseSummaryRepo:
             .execute()
             .data
         )
-        return bool(rows)
+        if not subscribed:
+            return False
+        source = (
+            self._c.table("sources").select("requires_login").eq("id", source_id).execute().data
+        )
+        if not source:
+            return False
+        if not source[0]["requires_login"]:
+            return True
+        proof = (
+            self._c.table("source_access")
+            .select("user_id")
+            .eq("user_id", user_id)
+            .eq("source_id", source_id)
+            .gt("expires_at", now.isoformat())
+            .limit(1)
+            .execute()
+            .data
+        )
+        return bool(proof)
 
     def count_requests_since(self, user_id: str, since: datetime) -> int:
         result = (

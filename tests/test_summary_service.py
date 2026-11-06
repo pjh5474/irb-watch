@@ -31,14 +31,21 @@ class FakeSummaryRepo:
             )
         }
         self.subscriptions = {("user-1", 1)}
+        self.members_only: set[int] = set()  # source ids that require a proof of access
+        self.access: dict[tuple[str, int], datetime] = {}  # (user, source) -> expires_at
         self.requests: list[tuple[str, datetime]] = []
         self.saved: dict[int, str] = {}
 
     def get_latest(self, document_id):
         return self.docs.get(document_id)
 
-    def is_subscribed(self, user_id, source_id):
-        return (user_id, source_id) in self.subscriptions
+    def may_read(self, user_id, source_id, now):
+        if (user_id, source_id) not in self.subscriptions:
+            return False
+        if source_id not in self.members_only:
+            return True
+        expires = self.access.get((user_id, source_id))
+        return expires is not None and expires > now
 
     def count_requests_since(self, user_id, since):
         return sum(1 for u, at in self.requests if u == user_id and at >= since)
@@ -88,6 +95,32 @@ def test_non_subscriber_sees_not_found(env):
     service, *_ = env
     with pytest.raises(NotFoundError):
         service.summarize_document("other", 10)
+
+
+def test_members_only_source_needs_a_valid_proof_of_access_on_top_of_following(env):
+    service, repo, _, _, _ = env
+    repo.members_only.add(1)
+    with pytest.raises(NotFoundError):  # follows the source but never proved access
+        service.summarize_document("user-1", 10)
+    repo.access[("user-1", 1)] = NOW - timedelta(seconds=1)
+    with pytest.raises(NotFoundError):  # proof expired
+        service.summarize_document("user-1", 10)
+    repo.access[("user-1", 1)] = NOW + timedelta(days=1)
+    assert service.summarize_document("user-1", 10).summary == "Whole document summary."
+
+
+def test_proof_of_access_alone_does_not_replace_following(env):
+    service, repo, _, _, _ = env
+    repo.members_only.add(1)
+    repo.access[("other", 1)] = NOW + timedelta(days=1)  # proved access but does not follow
+    with pytest.raises(NotFoundError):
+        service.summarize_document("other", 10)
+
+
+def test_admin_reads_members_only_documents_without_a_proof(env):
+    service, repo, _, _, _ = env
+    repo.members_only.add(1)
+    assert service.summarize_document("admin-1", 10).summary == "Whole document summary."
 
 
 def test_admin_may_summarize_any_document(env):

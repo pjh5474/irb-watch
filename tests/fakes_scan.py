@@ -40,10 +40,17 @@ class FakeSourceStore:
     def __init__(self) -> None:
         self.sources: dict[int, Source] = {}
 
-    def create(self, name, adapter, url, config, created_by):
+    def create(self, name, adapter, url, config, created_by, requires_login=False):
         if any(s.url == url for s in self.sources.values()):
             raise DuplicateSourceError
-        source = make_source(len(self.sources) + 1, name=name, adapter=adapter, url=url, config=config)
+        source = make_source(
+            len(self.sources) + 1,
+            name=name,
+            adapter=adapter,
+            url=url,
+            config=config,
+            requires_login=requires_login,
+        )
         self.sources[source.id] = source
         return source
 

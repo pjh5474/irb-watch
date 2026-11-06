@@ -63,6 +63,22 @@ def test_update_sets_changes_and_clears_login_user():
     assert untouched.config == {"board_key": "2605277031"}
 
 
+def test_login_user_makes_the_source_members_only_and_removing_it_never_makes_it_public():
+    service = make_sources()
+    public = service.create("a", "Public", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=1")
+    assert public.requires_login is False
+
+    private = service.create("a", "Private", URL, login_user="owner")
+    assert private.requires_login is True
+
+    later = service.update("a", public.id, login_user="owner")
+    assert later.requires_login is True
+
+    cleared = service.update("a", private.id, login_user="")
+    assert "login_user" not in cleared.config
+    assert cleared.requires_login is True  # data already scanned stays protected
+
+
 # ---- cookies_for_source ------------------------------------------------------------------
 
 
