@@ -15,7 +15,7 @@ from datetime import datetime
 from irb_watch.core.detect import Observation
 from irb_watch.core.hashing import collapse_whitespace
 from irb_watch.core.state import FileContent, VersionContent
-from irb_watch.crawlers.errors import CrawlError, LoginExpiredError
+from irb_watch.crawlers.errors import CrawlError, LoginExpiredError, SiteUnavailableError
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.parsers.errors import ParseError
 from irb_watch.parsers.formats import extract_text
@@ -62,8 +62,10 @@ class SnuhSourceReader:
                 continue
             try:
                 reading.observations.append(self._observe(summary, file_sink))
-            except LoginExpiredError:
-                raise  # the session died mid-scan: fail the whole scan, not every post
+            except (LoginExpiredError, SiteUnavailableError):
+                # The session died or the site is down: fail the whole scan once, with one
+                # reason, instead of flagging every remaining post.
+                raise
             except (CrawlError, ParseError) as exc:
                 reading.failures[summary.post_id] = str(exc)
         return reading

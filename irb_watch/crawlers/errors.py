@@ -6,6 +6,14 @@ class FetchError(CrawlError):
     """Network, HTTP status, redirect, size or URL-safety failure."""
 
 
+class SiteUnavailableError(FetchError):
+    """The site kept failing (502/503/504, timeouts, no connection) and retrying did not help.
+
+    Also raised when a scan used up its whole retry budget. A scan that gets this stops
+    with status `failed` and this reason; nothing is changed.
+    """
+
+
 class RobotsDisallowedError(CrawlError):
     """robots.txt forbids fetching this URL."""
 

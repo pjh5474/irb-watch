@@ -69,7 +69,7 @@ irb-watch/
 
 ## Open items
 - Login-only boards (board `2605277031` on hrpp.snuh.org): login and read verified live read-only on 2026-11-06. Not yet done: a scan that writes to the DB for this source, attachment download with a session, wrong-password behaviour on the real site, and the per-user access rule (see decisions.md "Access to login-only content", needs a migration). Server-side credential storage is Windows-only for now (`keyring`); a hosted server needs an encrypted DB store behind `CredentialStore`.
-- The site returns intermittent `502` (including `robots.txt`); `SafeFetcher` has no retry, so one 502 fails a scan. Decide retry rules before the scheduler.
+- The site returns intermittent `502` (seen on `robots.txt` and the login form). Retry rules are built (see decisions.md "Temporary site errors"); not yet exercised against the real site during an actual outage.
 - Which API gateway (affects Agents SDK client setup).
 - Second board `2605277034` fully scanned live; HWP/DOCX samples.
 - RLS from a real user's token (users see only subscribed sources); refresh-token behaviour after a ban; a real login token against the verifier. Needs the project's publishable key.

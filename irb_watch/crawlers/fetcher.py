@@ -11,11 +11,20 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
-from irb_watch.crawlers.errors import FetchError, RobotsDisallowedError
+from irb_watch.crawlers.errors import FetchError, RobotsDisallowedError, SiteUnavailableError
 from irb_watch.security.limits import TooLargeError, check_content_length, stream_with_cap
 from irb_watch.security.url_guard import UnsafeURLError, validate_url
 
 USER_AGENT = "IRBWatchBot/0.1"
+
+# Temporary "try again" answers. A plain 500 is not retried: it often means a real bug on
+# that one page, and repeating it only adds load.
+RETRYABLE_STATUS = frozenset({502, 503, 504})
+DEFAULT_RETRY_WAITS = (5.0, 15.0)  # seconds before the 2nd and 3rd try
+
+
+class _Transient(Exception):
+    """A connection-level failure worth retrying (internal to this module)."""
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,8 @@ class SafeFetcher:
         delay: float = 2.0,
         max_redirects: int = 5,
         check_robots: bool = True,
+        retry_waits: tuple[float, ...] = DEFAULT_RETRY_WAITS,
+        retry_budget: int = 10,
         cookies: httpx.Cookies | None = None,
         transport: httpx.BaseTransport | None = None,
         resolver: Callable[[str], list[str]] | None = None,
@@ -57,6 +68,9 @@ class SafeFetcher:
         self._resolver = resolver
         self._sleep = sleep
         self._monotonic = monotonic
+        self._retry_waits = retry_waits
+        self._retry_budget = retry_budget
+        self._retries_used = 0
         self._last_request: dict[str, float] = {}
         self._robots: dict[str, RobotFileParser] = {}
         self._client = httpx.Client(
@@ -98,6 +112,39 @@ class SafeFetcher:
     def _request(
         self, url: str, params: dict[str, str] | None, max_bytes: int, check_robots: bool
     ) -> FetchedResponse:
+        """One GET with retries for temporary site trouble (GET is safe to repeat).
+
+        Retried: HTTP 502/503/504, connection errors and timeouts. Waits come from
+        retry_waits (default 5 s then 15 s = 3 tries). All retries in this fetcher's life
+        (one scan) share retry_budget; when it is used up the scan is abandoned with
+        SiteUnavailableError instead of hammering a site that is down.
+        """
+        tries = len(self._retry_waits) + 1
+        for attempt in range(1, tries + 1):
+            problem: str
+            try:
+                response = self._request_once(url, params, max_bytes, check_robots)
+            except _Transient as exc:
+                problem = str(exc)
+            else:
+                if response.status not in RETRYABLE_STATUS:
+                    return response
+                problem = f"HTTP {response.status} for {response.url}"
+
+            if attempt == tries:
+                raise FetchError(f"{problem} (gave up after {tries} tries)")
+            if self._retries_used >= self._retry_budget:
+                raise SiteUnavailableError(
+                    f"site unavailable: {problem}; stopped after {self._retries_used} "
+                    "retries in this scan"
+                )
+            self._retries_used += 1
+            self._sleep(self._retry_waits[attempt - 1])
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _request_once(
+        self, url: str, params: dict[str, str] | None, max_bytes: int, check_robots: bool
+    ) -> FetchedResponse:
         if params:
             url = str(httpx.URL(url).copy_merge_params(params))
 
@@ -121,6 +168,8 @@ class SafeFetcher:
                     return FetchedResponse(url, r.status_code, r.headers, content)
             except TooLargeError as exc:
                 raise FetchError(f"too large: {url}: {exc}") from exc
+            except httpx.TransportError as exc:  # connect errors, timeouts, dropped connections
+                raise _Transient(f"request failed: {url}: {exc}") from exc
             except httpx.HTTPError as exc:
                 raise FetchError(f"request failed: {url}: {exc}") from exc
         raise FetchError("too many redirects")

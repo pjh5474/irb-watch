@@ -55,7 +55,15 @@ class Settings(BaseSettings):
     max_scan_payload_bytes: int = 20_000_000
     max_llm_calls_per_run: int = 100
     per_domain_delay_seconds: float = 2.0
+    # Temporary site errors (HTTP 502/503/504, timeouts): waits before each retry, and how
+    # many retries one scan may use in total before it is abandoned as "site unavailable".
+    fetch_retry_waits_seconds: str = "5,15"
+    fetch_retry_budget: int = 10
     request_timeout_seconds: float = 30.0
+
+    @property
+    def fetch_retry_waits(self) -> tuple[float, ...]:
+        return tuple(float(x) for x in self.fetch_retry_waits_seconds.split(",") if x.strip())
 
     @property
     def frontend_origin_list(self) -> list[str]:

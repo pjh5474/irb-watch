@@ -66,6 +66,8 @@ def build_reader(source: Source) -> SourceReader:
         max_bytes=settings.max_file_bytes,
         timeout=settings.request_timeout_seconds,
         delay=settings.per_domain_delay_seconds,
+        retry_waits=settings.fetch_retry_waits,
+        retry_budget=settings.fetch_retry_budget,
         cookies=cookies,
     )
     return SnuhSourceReader(
