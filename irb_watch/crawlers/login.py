@@ -18,7 +18,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
 from irb_watch.crawlers.credentials import Credentials, CredentialStore
-from irb_watch.crawlers.errors import LoginRejectedError, SiteUnavailableError
+from irb_watch.crawlers.errors import FetchError, LoginRejectedError, SiteUnavailableError
 from irb_watch.crawlers.fetcher import DEFAULT_RETRY_WAITS, RETRYABLE_STATUS
 from irb_watch.crawlers.sessions import SessionStore, cookies_from_state
 from irb_watch.security.url_guard import validate_url
@@ -49,7 +49,9 @@ def _load_login_form(
             if status < 400:
                 return
             if status not in RETRYABLE_STATUS:
-                raise SiteUnavailableError(f"login page answered HTTP {status}")
+                # Not temporary (403, 404, 500 ...): fail now, and the scheduler will not
+                # plan a retry for it.
+                raise FetchError(f"login page answered HTTP {status}")
             problem = f"login page answered HTTP {status}"
         if attempt == tries:
             raise SiteUnavailableError(f"{problem} (gave up after {tries} tries)")

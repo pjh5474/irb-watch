@@ -10,7 +10,7 @@ from supabase import Client
 from irb_watch.core.hashing import sha256_hex
 from irb_watch.core.state import FileContent, StoredDocument, StoredVersion, VersionContent
 from irb_watch.crawlers.errors import ScanTooLargeError
-from irb_watch.services.scan import LoadedStore, ScanCard
+from irb_watch.services.scan import KEEP_PAUSE, LoadedStore, ScanCard
 from irb_watch.services.sources import DuplicateSourceError, Source
 from irb_watch.services.summaries import DocumentForSummary
 
@@ -124,8 +124,9 @@ class SupabaseScanRepo:
             "scan_started_at": None,
             "last_scan_status": status,
             "last_scan_error": error,
-            "scans_paused_reason": paused_reason,
         }
+        if paused_reason is not KEEP_PAUSE:  # text sets the pause, None clears it
+            values["scans_paused_reason"] = paused_reason
         if scanned_at is not None:
             values["last_scan_at"] = scanned_at.isoformat()
         self._c.table("sources").update(values).eq("id", source_id).execute()

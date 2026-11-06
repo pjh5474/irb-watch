@@ -136,15 +136,21 @@ class ScanRunner:
     def run_retry(self, source_id: int) -> RunReport:
         """The single later retry of a source whose scan failed because the site was down."""
         report = RunReport(RETRY)
-        source = self._get_source(source_id)
-        if source is None or not source.is_active:
-            return report
-        reason = self._skip_reason(source)
-        if reason:
-            self._record_skip(source, RETRY, reason, None)
-            report.skipped[source.id] = reason
-            return report
-        self._run_one(source, RETRY, None, report)
+        try:
+            source = self._get_source(source_id)
+            if source is not None:
+                self._run_one(source, RETRY, None, report)
+        except Exception:  # a planned retry must never fail silently
+            log.exception("planned retry of source %s crashed", source_id)
+            report.scanned[source_id] = FAILED
+            self._audit.record(
+                "scan",
+                "scan.failed",
+                None,
+                title=f"Retry of source {source_id}: runner error",
+                payload={"error": "the planned retry hit an unexpected error; see server log"},
+                source_id=source_id,
+            )
         return report
 
     # -- decisions ---------------------------------------------------------------------
@@ -185,6 +191,18 @@ class ScanRunner:
     def _run_one(
         self, source: Source, trigger: str, actor_id: str | None, report: RunReport
     ) -> None:
+        # The list was read when the run started; a site's later boards can wait minutes.
+        # Look again so a source paused or deactivated meanwhile is not scanned.
+        fresh = self._get_source(source.id)
+        if fresh is None or not fresh.is_active:
+            report.skipped[source.id] = "source was removed or deactivated"
+            return
+        source = fresh
+        reason = self._skip_reason(source)
+        if reason:
+            self._record_skip(source, trigger, reason, actor_id)
+            report.skipped[source.id] = reason
+            return
         try:
             claimed = self._scans.begin_scan(source.id)
         except ConflictError as exc:

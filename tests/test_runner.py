@@ -217,6 +217,39 @@ def test_a_retry_never_plans_another_retry():
     assert scans.order == [1]
 
 
+def test_a_source_paused_or_deactivated_during_the_run_is_skipped_when_its_turn_comes():
+    from dataclasses import replace
+
+    sources = [src(1), src(2), src(3)]
+
+    def hold(source):
+        if source.id == 1:  # while board 1 scans, a person pauses board 2 and disables board 3
+            sources[1] = replace(sources[1], scans_paused_reason="login rejected: x")
+            sources[2] = replace(sources[2], is_active=False)
+
+    scans = FakeScans(sources, hold=hold)
+    runner, _, audit, _ = make_runner(sources, scans)
+    report = runner.run_all()
+    assert scans.order == [1]
+    assert "paused after a rejected login" in report.skipped[2]
+    assert report.skipped[3] == "source was removed or deactivated"
+    assert "scan.skipped" in kinds(audit)
+
+
+def test_a_crashing_planned_retry_is_recorded_not_lost():
+    sources = [src(1)]
+    audit = FakeAudit()
+
+    def broken_get(source_id):
+        raise RuntimeError("database down")
+
+    runner = ScanRunner(lambda: sources, broken_get, FakeScans(sources), audit, lambda *a: None, lambda: NOW)
+    report = runner.run_retry(1)
+    assert report.scanned == {1: FAILED}
+    failed = next(e for e in audit.entries if e["event_type"] == "scan.failed")
+    assert failed["source_id"] == 1 and "unexpected error" in failed["payload"]["error"]
+
+
 def test_retry_skips_a_source_that_was_paused_or_removed_meanwhile():
     paused = src(1, scans_paused_reason="login rejected")
     inactive = src(2, is_active=False)
@@ -276,6 +309,36 @@ def test_a_later_successful_scan_clears_the_pause():
     assert repo.get_source(1).scans_paused_reason
     service.scan_source(1, "admin-1")  # a person starts a scan by hand
     assert repo.get_source(1).scans_paused_reason is None
+
+
+def scan_paused_source(error):
+    """One scan of a source that is paused after a rejected login; returns the repo."""
+    repo = FakeScanRepo()
+    repo.add_source(make_source(1, scans_paused_reason="login rejected: old reason"))
+    reader = FakeReader(error=error) if error else FakeReader()
+    service = ScanService(repo, FakeFileStorage(), lambda s: reader, FakeAudit(), clock=lambda: NOW)
+    service.scan_source(1, "admin-1")
+    return repo
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SiteUnavailableError("site unavailable"),  # the login form never answered
+        FetchError("HTTP 404"),
+        RuntimeError("boom"),  # unexpected crash
+        LayoutChangedError("markup changed"),
+    ],
+)
+def test_a_failure_that_never_checked_the_login_leaves_the_pause_in_place(error):
+    repo = scan_paused_source(error)
+    assert repo.get_source(1).scans_paused_reason == "login rejected: old reason"
+
+
+def test_a_new_rejection_replaces_the_pause_reason_and_a_saved_scan_clears_it():
+    repo = scan_paused_source(LoginRejectedError("login rejected: new reason"))
+    assert repo.get_source(1).scans_paused_reason == "login rejected: new reason"
+    assert scan_paused_source(None).get_source(1).scans_paused_reason is None
 
 
 def test_paused_source_is_skipped_by_the_runner_using_real_state():

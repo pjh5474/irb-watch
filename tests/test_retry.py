@@ -208,7 +208,9 @@ FORM = """<html><body><form id="foLgnForm" method="post" action="/hrpp/lgn/login
 
 
 class Site(BaseHTTPRequestHandler):
-    form_failures = 0  # how many form loads still answer 502
+    form_failures = 0  # how many form loads still answer form_code
+    form_code = 502
+    form_loads = 0  # how many times the form was requested
     post_status = 302  # what the submit answers
     posts = 0
 
@@ -225,9 +227,10 @@ class Site(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/hrpp/lgn/form.do"):
+            Site.form_loads += 1
             if Site.form_failures > 0:
                 Site.form_failures -= 1
-                return self._send(502, "bad gateway")
+                return self._send(Site.form_code, "error page")
             return self._send(200, FORM)
         if self.path.startswith("/hrpp/bbs/list.do"):
             return self._send(200, "<html>board</html>")
@@ -246,7 +249,8 @@ class Site(BaseHTTPRequestHandler):
 def site():
     server = HTTPServer(("127.0.0.1", 0), Site)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    Site.form_failures, Site.post_status, Site.posts = 0, 302, 0
+    Site.form_failures, Site.form_code, Site.form_loads = 0, 502, 0
+    Site.post_status, Site.posts = 302, 0
     yield f"http://127.0.0.1:{server.server_port}"
     server.shutdown()
 
@@ -275,6 +279,15 @@ def test_login_form_always_502_says_site_unavailable_not_wrong_password(site):
         login(site)
     assert not isinstance(info.value, LoginRejectedError)
     assert Site.posts == 0  # the password was never submitted
+
+
+@pytest.mark.parametrize("code", [403, 404, 500])
+def test_a_non_temporary_error_on_the_login_form_fails_at_once_and_is_not_retryable(site, code):
+    Site.form_failures, Site.form_code = 99, code
+    with pytest.raises(FetchError, match=f"HTTP {code}") as info:
+        login(site)
+    assert not isinstance(info.value, SiteUnavailableError)  # so no retry is planned later
+    assert Site.form_loads == 1 and Site.posts == 0
 
 
 def test_502_after_submit_is_reported_as_site_error_and_not_retried(site):

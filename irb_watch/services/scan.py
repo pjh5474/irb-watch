@@ -36,6 +36,8 @@ from irb_watch.services.users import AuditSink
 log = logging.getLogger(__name__)
 
 STALE_SCAN_MINUTES = 30
+# Passed to release_scan to leave the source's login pause unchanged.
+KEEP_PAUSE = object()
 NEEDS_REVIEW = "needs_review"
 FAILED = "failed"
 OK = "ok"
@@ -64,8 +66,10 @@ class ScanRepo(Protocol):
         status: str,
         error: str | None,
         scanned_at: datetime | None,
-        paused_reason: str | None = None,
-    ) -> None: ...
+        paused_reason: "str | None | object" = None,
+    ) -> None:
+        """paused_reason: a text sets the pause, None clears it, KEEP_PAUSE leaves it as is."""
+        ...
     def load_store(self, source_id: int) -> LoadedStore: ...
     def commit_scan(
         self,
@@ -197,13 +201,17 @@ class ScanService:
             )
         # last_scan_at marks the baseline: only a scan that stored its results may set it,
         # otherwise a failed first scan would make the next one report every post as new.
-        # Every scan overwrites the pause: a successful one clears it, a rejected login sets it.
+        # The pause (after a rejected login) changes only when the scan says something about
+        # the login: a saved scan proves it works (clear), a rejection sets it, and every
+        # other failure leaves it as it was, because the login was never checked.
+        if saved:
+            pause = None
+        elif summary.paused_reason:
+            pause = summary.paused_reason
+        else:
+            pause = KEEP_PAUSE
         self._repo.release_scan(
-            source.id,
-            summary.status,
-            summary.error,
-            now if saved else None,
-            summary.paused_reason,
+            source.id, summary.status, summary.error, now if saved else None, pause
         )
         return summary
 
