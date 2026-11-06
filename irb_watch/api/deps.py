@@ -11,12 +11,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from irb_watch.ai.factory import build_enricher, build_summarizer
 from irb_watch.auth.jwt import AuthUnavailableError, AuthUser, InvalidTokenError, TokenVerifier
 from irb_watch.config import get_settings
-from irb_watch.crawlers.credentials import KeyringCredentialStore
+from irb_watch.crawlers.credentials import CredentialStore, KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
 from irb_watch.db.access import SupabaseAccessStore
 from irb_watch.db.client import get_supabase_client
+from irb_watch.db.credentials import DatabaseCredentialStore
 from irb_watch.db.documents import (
     SupabaseFileStorage,
     SupabaseScanRepo,
@@ -27,7 +28,7 @@ from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.services.access import AccessService
 from irb_watch.services.downloads import DownloadService
-from irb_watch.services.errors import ValidationError
+from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
 from irb_watch.services.source_login import cookies_for_source, verify_user_access
@@ -63,13 +64,35 @@ def get_user_service() -> UserService:
     )
 
 
+def get_audit_sink() -> SupabaseAuditSink:
+    return SupabaseAuditSink(get_supabase_client())
+
+
+def get_credential_store() -> CredentialStore:
+    """The store for the logins used by scheduled scans (CREDENTIAL_STORE)."""
+    settings = get_settings()
+    if settings.credential_store == "database":
+        return DatabaseCredentialStore(get_supabase_client(), settings.credentials_key)
+    return KeyringCredentialStore()
+
+
+def get_managed_credentials() -> DatabaseCredentialStore:
+    """The database store, for the admin API. Only exists when CREDENTIAL_STORE=database."""
+    store = get_credential_store()
+    if not isinstance(store, DatabaseCredentialStore):
+        raise ConflictError(
+            "managing credentials over the API needs CREDENTIAL_STORE=database on this server"
+        )
+    return store
+
+
 def build_reader(source: Source) -> SourceReader:
     """One reader per site type; a new site gets a new adapter and one more branch here."""
     settings = get_settings()
     if source.adapter != "snuh_hrpp":
         raise ValidationError(f"no adapter named {source.adapter}")
     # One login attempt per scan; LoginRejectedError fails only this source (needs_review).
-    cookies = cookies_for_source(source, KeyringCredentialStore())
+    cookies = cookies_for_source(source, get_credential_store())
     fetcher = SafeFetcher(
         max_bytes=settings.max_file_bytes,
         timeout=settings.request_timeout_seconds,

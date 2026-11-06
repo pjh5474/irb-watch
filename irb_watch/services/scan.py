@@ -18,6 +18,7 @@ from irb_watch.core.detect import (
     detect_changes,
 )
 from irb_watch.crawlers.errors import (
+    CredentialStoreError,
     FetchError,
     IncompleteScanError,
     LayoutChangedError,
@@ -171,6 +172,7 @@ class ScanService:
             RobotsDisallowedError,
             LoginExpiredError,
             ScanTooLargeError,
+            CredentialStoreError,  # nothing was sent to the site, so no pause
         ) as exc:
             summary = ScanSummary(source.id, NEEDS_REVIEW, error=str(exc))
         except FetchError as exc:

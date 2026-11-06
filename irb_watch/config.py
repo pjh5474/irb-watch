@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,6 +47,14 @@ class Settings(BaseSettings):
     # one user may request per day (admins are not limited).
     download_link_ttl_seconds: int = 60
     download_links_per_day: int = 200
+
+    # Where the hospital logins used for scheduled scans of members-only boards are kept:
+    #   keyring  = Windows Credential Manager (this PC only; entered with save_credentials.py)
+    #   database = encrypted rows in site_credentials (for a server); needs CREDENTIALS_KEY,
+    #              a Fernet key you create yourself (see irb_watch/security/secretbox.py).
+    #              Several keys separated by commas rotate keys: the first encrypts.
+    credential_store: Literal["keyring", "database"] = "keyring"
+    credentials_key: str = ""
 
     # Proof of access to a members-only board: how long it lasts, and how many login
     # checks one user may start per hour (protects hospital accounts from lockout).

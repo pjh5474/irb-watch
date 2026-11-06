@@ -34,6 +34,15 @@ class IncompleteScanError(CrawlError):
     """Fewer posts were read than the site declared."""
 
 
+class CredentialStoreError(CrawlError):
+    """The stored hospital login cannot be read (missing or wrong CREDENTIALS_KEY, damaged
+    data, or the credential store is unreachable). No hospital login was tried.
+
+    The source becomes `needs_review` with this reason; it is not paused, because nothing
+    was sent to the hospital site.
+    """
+
+
 class ScanTooLargeError(CrawlError):
     """The scan's data is too big to save in one transaction; nothing was saved."""
 
