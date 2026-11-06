@@ -37,6 +37,7 @@ def _source(row: dict) -> Source:
         last_scan_error=row.get("last_scan_error"),
         scan_started_at=row.get("scan_started_at"),
         requires_login=bool(row.get("requires_login", False)),
+        scans_paused_reason=row.get("scans_paused_reason"),
     )
 
 
@@ -118,11 +119,12 @@ class SupabaseScanRepo:
         )
         return bool(rows)
 
-    def release_scan(self, source_id, status, error, scanned_at) -> None:
+    def release_scan(self, source_id, status, error, scanned_at, paused_reason=None) -> None:
         values: dict = {
             "scan_started_at": None,
             "last_scan_status": status,
             "last_scan_error": error,
+            "scans_paused_reason": paused_reason,
         }
         if scanned_at is not None:
             values["last_scan_at"] = scanned_at.isoformat()

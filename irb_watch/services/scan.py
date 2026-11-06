@@ -25,6 +25,8 @@ from irb_watch.crawlers.errors import (
     LoginRejectedError,
     RobotsDisallowedError,
     ScanTooLargeError,
+    SiteUnavailableError,
+    TransientFetchError,
 )
 from irb_watch.crawlers.snuh_reader import FileSink, ScanReading
 from irb_watch.services.errors import ConflictError, NotFoundError, ValidationError
@@ -57,7 +59,12 @@ class ScanRepo(Protocol):
     def get_source(self, source_id: int) -> Source | None: ...
     def claim_scan(self, source_id: int, now: datetime, stale_minutes: int) -> bool: ...
     def release_scan(
-        self, source_id: int, status: str, error: str | None, scanned_at: datetime | None
+        self,
+        source_id: int,
+        status: str,
+        error: str | None,
+        scanned_at: datetime | None,
+        paused_reason: str | None = None,
     ) -> None: ...
     def load_store(self, source_id: int) -> LoadedStore: ...
     def commit_scan(
@@ -105,6 +112,10 @@ class ScanSummary:
     reappeared: int = 0
     posts_needing_review: int = 0
     error: str | None = None
+    # True when the failure was temporary site trouble: the scheduler may retry once later.
+    retryable: bool = False
+    # Set after a rejected login: scheduled scans skip this source until a person scans it.
+    paused_reason: str | None = None
 
 
 class ScanService:
@@ -144,17 +155,28 @@ class ScanService:
         try:
             summary = self._scan(source, actor_id, now)
             saved = True
+        except LoginRejectedError as exc:
+            # The site refused the login. Scheduled scans must not try again (account
+            # lockout): they stay paused until a person starts a scan of this source.
+            summary = ScanSummary(
+                source.id, NEEDS_REVIEW, error=str(exc), paused_reason=str(exc)
+            )
         except (
             LayoutChangedError,
             IncompleteScanError,
             RobotsDisallowedError,
             LoginExpiredError,
-            LoginRejectedError,
             ScanTooLargeError,
         ) as exc:
             summary = ScanSummary(source.id, NEEDS_REVIEW, error=str(exc))
         except FetchError as exc:
-            summary = ScanSummary(source.id, FAILED, error=str(exc))
+            # Only temporary site trouble is worth trying again later (see ScanRunner).
+            summary = ScanSummary(
+                source.id,
+                FAILED,
+                error=str(exc),
+                retryable=isinstance(exc, (SiteUnavailableError, TransientFetchError)),
+            )
         except ValidationError as exc:
             summary = ScanSummary(source.id, FAILED, error=exc.message)
         except Exception as exc:
@@ -175,7 +197,14 @@ class ScanService:
             )
         # last_scan_at marks the baseline: only a scan that stored its results may set it,
         # otherwise a failed first scan would make the next one report every post as new.
-        self._repo.release_scan(source.id, summary.status, summary.error, now if saved else None)
+        # Every scan overwrites the pause: a successful one clears it, a rejected login sets it.
+        self._repo.release_scan(
+            source.id,
+            summary.status,
+            summary.error,
+            now if saved else None,
+            summary.paused_reason,
+        )
         return summary
 
     def scan_source(self, source_id: int, actor_id: str | None) -> ScanSummary:

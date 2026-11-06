@@ -47,7 +47,10 @@ class Settings(BaseSettings):
     access_ttl_days: int = 30
     access_attempts_per_hour: int = 5
 
+    # The daily scan: off unless SCHEDULER_ENABLED=true (tests and local runs stay quiet).
+    scheduler_enabled: bool = False
     scan_cron: str = "0 6 * * *"
+    scan_timezone: str = "Asia/Seoul"
     max_file_bytes: int = 20_000_000
     max_docs_per_url: int = 200
     # A scan is saved in one database call; refuse (needs_review) above this JSON size.

@@ -23,6 +23,7 @@ class SourceOut(BaseModel):
     scan_in_progress: bool
     login_user: str | None = None  # whose stored login this source scans with
     requires_login: bool = False  # members-only: users must prove access to read it
+    scans_paused_reason: str | None = None  # why daily scans skip this source, if they do
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -40,6 +41,7 @@ class SourceOut(BaseModel):
             scan_in_progress=s.scan_started_at is not None,
             login_user=s.config.get("login_user"),
             requires_login=s.requires_login,
+            scans_paused_reason=s.scans_paused_reason,
         )
 
 

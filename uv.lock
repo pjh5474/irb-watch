@@ -448,6 +448,7 @@ dependencies = [
     { name = "pyjwt", extra = ["crypto"] },
     { name = "supabase" },
     { name = "typesafe-sdk" },
+    { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -475,6 +476,7 @@ requires-dist = [
     { name = "pyjwt", extras = ["crypto"] },
     { name = "supabase" },
     { name = "typesafe-sdk" },
+    { name = "tzdata" },
     { name = "uvicorn", extras = ["standard"] },
 ]
 

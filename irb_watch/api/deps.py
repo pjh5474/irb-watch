@@ -1,5 +1,8 @@
 """FastAPI dependencies: login-token check, admin check, service wiring."""
 
+import logging
+from collections.abc import Callable
+from datetime import datetime
 from functools import lru_cache
 
 from fastapi import Depends, HTTPException
@@ -23,11 +26,14 @@ from irb_watch.db.documents import (
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.services.access import AccessService
 from irb_watch.services.errors import ValidationError
+from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
 from irb_watch.services.source_login import cookies_for_source, verify_user_access
 from irb_watch.services.sources import Source, SourceService
 from irb_watch.services.summaries import SummaryService
 from irb_watch.services.users import UserService, UserStore
+
+log = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -104,6 +110,28 @@ def get_access_service() -> AccessService:
         verify_user_access,
         settings.access_ttl_days,
         settings.access_attempts_per_hour,
+    )
+
+
+# The scheduler (if running) replaces this so retries of failed scans get scheduled.
+retry_hook: list[Callable[[int, datetime], None]] = [
+    lambda source_id, due: log.warning(
+        "no scheduler running: retry of source %s at %s was not scheduled", source_id, due
+    )
+]
+
+
+@lru_cache
+def get_runner() -> ScanRunner:
+    """One runner per process, so the daily run and "run all now" never overlap."""
+    client = get_supabase_client()
+    sources = SupabaseSourceStore(client)
+    return ScanRunner(
+        sources.list,
+        sources.get,
+        get_scan_service(),
+        SupabaseAuditSink(client),
+        lambda source_id, due: retry_hook[0](source_id, due),
     )
 
 

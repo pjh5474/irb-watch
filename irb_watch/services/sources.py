@@ -30,6 +30,8 @@ class Source:
     scan_started_at: str | None = None
     # Members-only board: readable only by admins and by subscribers who proved access.
     requires_login: bool = False
+    # Set after a rejected login. Scheduled scans skip the source until a person scans it.
+    scans_paused_reason: str | None = None
 
 
 class DuplicateSourceError(Exception):

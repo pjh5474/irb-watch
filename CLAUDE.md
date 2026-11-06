@@ -20,7 +20,8 @@ irb_watch/
   config.py          settings; APP_ENV picks .env.<APP_ENV> (default dev)
   api/               routers (health, admin_users, admin_sources, documents) and deps.py
   auth/jwt.py        login-token check against the project's public ES256 keys
-  services/          business rules: users, sources, scan, summaries (+ errors.py)
+  services/          business rules: users, sources, scan, runner, access, summaries (+ errors.py)
+  scheduler.py       APScheduler daily run + catch-up + retries (off unless SCHEDULER_ENABLED)
   core/              state, detect (changes), diff, hashing, models: pure logic, no I/O
   crawlers/          fetcher (SSRF guard, robots, delays), snuh adapter, snuh_reader
   parsers/           pdf, hwp, hwpx, docx readers; formats.py picks one; extract_text()
@@ -57,6 +58,6 @@ Supabase CLI v3 targets the local stack by default; hosted needs `--remote`. The
 ## Where things stand (2026-11-06)
 Working and verified live: login and admin API, sources, manual scans of two SNUH boards (data stored in the project: sources 4 and 5), PDF/HWP/HWPX/DOCX text, change detection with version history, AI summaries (OpenAI `gpt-6-luna` + Jev), on-demand whole-document summaries.
 
-Next: **the scheduler** (daily scan of every active source). Open questions to ask the owner first: run time and timezone, what to do about a run missed while the server was down, how many boards at once (a board takes about 2 minutes), and what to do if a scan is still running at the next run time.
+Built since: login-only boards (fresh headless login per scan, per-user proof of access with RLS, `requires_login`), atomic scan saving (`commit_scan`), 502 retry rules, and **the scheduler** (06:00 Asia/Seoul, startup catch-up, one worker per site, one retry after 1 hour, pause after a rejected login; see decisions.md). The scheduler is off until `SCHEDULER_ENABLED=true`. One live `run_all` over sources 4, 5, 6 succeeded; the 06:00 trigger itself has not run yet.
 
 Then: check Jev's accuracy against about 20 hand-labelled real revisions; verify row-level security and the on-demand endpoint with a real user's login token (needs the project's publishable key); real DOCX, HWPX and protected HWP samples; later, search over stored text and a read-only chat (email drafting only with a human send button).

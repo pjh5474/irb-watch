@@ -6,6 +6,14 @@ class FetchError(CrawlError):
     """Network, HTTP status, redirect, size or URL-safety failure."""
 
 
+class TransientFetchError(FetchError):
+    """One request kept failing temporarily (502/503/504, timeouts) through all its tries.
+
+    Per post this is flagged like any broken post. When it hits the list page the scan fails
+    with this reason, and the scheduler may try that source again later.
+    """
+
+
 class SiteUnavailableError(FetchError):
     """The site kept failing (502/503/504, timeouts, no connection) and retrying did not help.
 

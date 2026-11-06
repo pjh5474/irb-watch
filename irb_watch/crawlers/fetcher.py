@@ -11,7 +11,12 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
-from irb_watch.crawlers.errors import FetchError, RobotsDisallowedError, SiteUnavailableError
+from irb_watch.crawlers.errors import (
+    FetchError,
+    RobotsDisallowedError,
+    SiteUnavailableError,
+    TransientFetchError,
+)
 from irb_watch.security.limits import TooLargeError, check_content_length, stream_with_cap
 from irb_watch.security.url_guard import UnsafeURLError, validate_url
 
@@ -132,7 +137,7 @@ class SafeFetcher:
                 problem = f"HTTP {response.status} for {response.url}"
 
             if attempt == tries:
-                raise FetchError(f"{problem} (gave up after {tries} tries)")
+                raise TransientFetchError(f"{problem} (gave up after {tries} tries)")
             if self._retries_used >= self._retry_budget:
                 raise SiteUnavailableError(
                     f"site unavailable: {problem}; stopped after {self._retries_used} "

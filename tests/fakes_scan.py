@@ -91,9 +91,13 @@ class FakeScanRepo:
         self.locked.add(source_id)
         return True
 
-    def release_scan(self, source_id, status, error, scanned_at):
+    def release_scan(self, source_id, status, error, scanned_at, paused_reason=None):
         self.locked.discard(source_id)
-        changes = {"last_scan_status": status, "last_scan_error": error}
+        changes = {
+            "last_scan_status": status,
+            "last_scan_error": error,
+            "scans_paused_reason": paused_reason,
+        }
         if scanned_at is not None:
             changes["last_scan_at"] = scanned_at.isoformat()
         self.sources[source_id] = replace(self.sources[source_id], **changes)

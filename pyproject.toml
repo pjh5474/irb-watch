@@ -10,6 +10,7 @@ dependencies = [
     "beautifulsoup4",
     "playwright",
     "keyring",
+    "tzdata",
     "supabase",
     "pyjwt[crypto]",
     "email-validator",

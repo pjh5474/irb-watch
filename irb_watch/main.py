@@ -1,12 +1,34 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from irb_watch.api import access, admin_sources, admin_users, documents, health
+from irb_watch.api import access, admin_scans, admin_sources, admin_users, documents, health
 from irb_watch.config import get_settings
 from irb_watch.services.errors import ServiceError
 
-app = FastAPI(title="IRB Watch")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Start the daily scan schedule when SCHEDULER_ENABLED=true; stop it on shutdown."""
+    settings = get_settings()
+    scheduler = None
+    if settings.scheduler_enabled:
+        from irb_watch.api import deps
+        from irb_watch.scheduler import ScanScheduler
+
+        scheduler = ScanScheduler(deps.get_runner(), settings.scan_cron, settings.scan_timezone)
+        deps.retry_hook[0] = scheduler.schedule_retry
+        scheduler.start()
+    try:
+        yield
+    finally:
+        if scheduler is not None:
+            scheduler.stop()
+
+
+app = FastAPI(title="IRB Watch", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,5 +46,6 @@ async def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
 app.include_router(health.router)
 app.include_router(admin_users.router)
 app.include_router(admin_sources.router)
+app.include_router(admin_scans.router)
 app.include_router(documents.router)
 app.include_router(access.router)
