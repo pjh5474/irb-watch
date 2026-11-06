@@ -312,6 +312,40 @@ def build_commit_documents(loaded: LoadedStore) -> list[dict]:
     return items
 
 
+def user_may_read(client: Client, user_id: str, source_id: int, now: datetime) -> bool:
+    """Server-side twin of the database rule private.can_read_source (for non-admins).
+
+    Subscribed, and for a members-only source also holding an unexpired proof of access.
+    """
+    subscribed = (
+        client.table("subscriptions")
+        .select("user_id")
+        .eq("user_id", user_id)
+        .eq("source_id", source_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not subscribed:
+        return False
+    source = client.table("sources").select("requires_login").eq("id", source_id).execute().data
+    if not source:
+        return False
+    if not source[0]["requires_login"]:
+        return True
+    proof = (
+        client.table("source_access")
+        .select("user_id")
+        .eq("user_id", user_id)
+        .eq("source_id", source_id)
+        .gt("expires_at", now.isoformat())
+        .limit(1)
+        .execute()
+        .data
+    )
+    return bool(proof)
+
+
 class SupabaseSummaryRepo:
     """Reads and writes for summaries requested by users."""
 
@@ -367,39 +401,7 @@ class SupabaseSummaryRepo:
         )
 
     def may_read(self, user_id: str, source_id: int, now: datetime) -> bool:
-        """Server-side twin of the database rule private.can_read_source (non-admins).
-
-        Subscribed, and for a members-only source also holding an unexpired proof of access.
-        """
-        subscribed = (
-            self._c.table("subscriptions")
-            .select("user_id")
-            .eq("user_id", user_id)
-            .eq("source_id", source_id)
-            .limit(1)
-            .execute()
-            .data
-        )
-        if not subscribed:
-            return False
-        source = (
-            self._c.table("sources").select("requires_login").eq("id", source_id).execute().data
-        )
-        if not source:
-            return False
-        if not source[0]["requires_login"]:
-            return True
-        proof = (
-            self._c.table("source_access")
-            .select("user_id")
-            .eq("user_id", user_id)
-            .eq("source_id", source_id)
-            .gt("expires_at", now.isoformat())
-            .limit(1)
-            .execute()
-            .data
-        )
-        return bool(proof)
+        return user_may_read(self._c, user_id, source_id, now)
 
     def count_requests_since(self, user_id: str, since: datetime) -> int:
         result = (

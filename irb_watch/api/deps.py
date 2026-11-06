@@ -23,8 +23,10 @@ from irb_watch.db.documents import (
     SupabaseSourceStore,
     SupabaseSummaryRepo,
 )
+from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.services.access import AccessService
+from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
@@ -97,6 +99,19 @@ def get_scan_service() -> ScanService:
         build_reader,
         SupabaseAuditSink(client),
         enricher=build_enricher(),
+    )
+
+
+def get_download_service() -> DownloadService:
+    client = get_supabase_client()
+    settings = get_settings()
+    return DownloadService(
+        SupabaseUserStore(client),
+        SupabaseDownloadRepo(client),
+        SupabaseUrlSigner(client),
+        SupabaseAuditSink(client),
+        settings.download_link_ttl_seconds,
+        settings.download_links_per_day,
     )
 
 

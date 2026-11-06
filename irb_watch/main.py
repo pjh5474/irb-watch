@@ -4,7 +4,15 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from irb_watch.api import access, admin_scans, admin_sources, admin_users, documents, health
+from irb_watch.api import (
+    access,
+    admin_scans,
+    admin_sources,
+    admin_users,
+    documents,
+    files,
+    health,
+)
 from irb_watch.config import get_settings
 from irb_watch.services.errors import ServiceError
 
@@ -49,3 +57,4 @@ app.include_router(admin_sources.router)
 app.include_router(admin_scans.router)
 app.include_router(documents.router)
 app.include_router(access.router)
+app.include_router(files.router)

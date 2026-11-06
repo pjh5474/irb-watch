@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # New summaries one user may request per day (cached ones are free).
     summary_requests_per_day: int = 20
 
+    # Download links for original files: how long a signed link works, and how many links
+    # one user may request per day (admins are not limited).
+    download_link_ttl_seconds: int = 60
+    download_links_per_day: int = 200
+
     # Proof of access to a members-only board: how long it lasts, and how many login
     # checks one user may start per hour (protects hospital accounts from lockout).
     access_ttl_days: int = 30
