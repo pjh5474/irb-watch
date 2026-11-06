@@ -18,7 +18,13 @@ from irb_watch.services.errors import ConflictError
 from irb_watch.services.runner import CATCH_UP, MANUAL, SCHEDULED, ScanRunner, site_of
 from irb_watch.services.scan import FAILED, NEEDS_REVIEW, OK, ScanService, ScanSummary
 from tests.fakes import FakeAudit, FakeStore
-from tests.fakes_scan import FakeFileStorage, FakeReader, FakeScanRepo, make_source
+from tests.fakes_scan import (
+    FakeFileStorage,
+    FakeReader,
+    FakeScanRepo,
+    make_source,
+    scan_once,
+)
 from tests.test_admin_users_api import FakeVerifier
 
 NOW = datetime(2026, 11, 6, 6, tzinfo=UTC)
@@ -263,13 +269,7 @@ def test_retry_skips_a_source_that_was_paused_or_removed_meanwhile():
 
 
 def classify(error):
-    repo = FakeScanRepo()
-    repo.add_source(make_source(1))
-    reader = FakeReader(error=error)
-    service = ScanService(
-        repo, FakeFileStorage(), lambda s: reader, FakeAudit(), clock=lambda: NOW
-    )
-    return service.scan_source(1, None), repo
+    return scan_once(error, actor=None)
 
 
 @pytest.mark.parametrize(
@@ -313,12 +313,8 @@ def test_a_later_successful_scan_clears_the_pause():
 
 def scan_paused_source(error):
     """One scan of a source that is paused after a rejected login; returns the repo."""
-    repo = FakeScanRepo()
-    repo.add_source(make_source(1, scans_paused_reason="login rejected: old reason"))
-    reader = FakeReader(error=error) if error else FakeReader()
-    service = ScanService(repo, FakeFileStorage(), lambda s: reader, FakeAudit(), clock=lambda: NOW)
-    service.scan_source(1, "admin-1")
-    return repo
+    paused = make_source(1, scans_paused_reason="login rejected: old reason")
+    return scan_once(error, source=paused)[1]
 
 
 @pytest.mark.parametrize(

@@ -23,7 +23,7 @@ from irb_watch.services.errors import (
     ValidationError,
 )
 from irb_watch.services.sources import Source
-from irb_watch.services.users import AuditSink, UserStore
+from irb_watch.services.users import AuditSink, UserStore, active_profile
 
 
 class AccessStore(Protocol):
@@ -61,9 +61,7 @@ class AccessService:
         self, user_id: str, source_id: int, login_id: str, password: str
     ) -> datetime:
         """Return the new expiry. Raises with a reason the user can act on."""
-        profile = self._users.get_profile(user_id)
-        if profile is None or profile.deleted_at is not None:
-            raise ForbiddenError("this account cannot prove access")
+        active_profile(self._users, user_id, "this account cannot prove access")
         source = self._store.get_source(source_id)
         if source is None:
             raise NotFoundError("source not found")

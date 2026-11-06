@@ -2,13 +2,15 @@
 
 import copy
 from dataclasses import replace
+from datetime import UTC, datetime
 
 from irb_watch.core.detect import Observation
 from irb_watch.core.state import StoredDocument, VersionContent
 from irb_watch.crawlers.snuh_reader import ScanReading
 from irb_watch.db.documents import _snapshot
-from irb_watch.services.scan import KEEP_PAUSE, LoadedStore
+from irb_watch.services.scan import KEEP_PAUSE, LoadedStore, ScanService
 from irb_watch.services.sources import DuplicateSourceError, Source
+from tests.fakes import FakeAudit
 
 
 def make_source(source_id=1, **overrides) -> Source:
@@ -183,3 +185,37 @@ class FakeReader:
 
     def close(self):
         self.closed = True
+
+
+SCAN_NOW = datetime(2026, 11, 6, tzinfo=UTC)
+
+
+def scan_once(error=None, *, source=None, factory=None, actor="admin-1", audit=None):
+    """Scan one source (id 1) once with a fake reader that fails with `error`, or succeeds.
+
+    `factory` replaces the reader factory (e.g. one that raises). Returns (summary, repo).
+    """
+    repo = FakeScanRepo()
+    repo.add_source(source or make_source(1))
+    reader = FakeReader(error=error)
+    service = ScanService(
+        repo,
+        FakeFileStorage(),
+        factory or (lambda _source: reader),
+        audit or FakeAudit(),
+        clock=lambda: SCAN_NOW,
+    )
+    return service.scan_source(1, actor), repo
+
+
+class MemCreds:
+    """In-memory credential store."""
+
+    def __init__(self, creds=None):
+        self.creds = creds
+
+    def get(self, user, site):
+        return self.creds
+
+    def set(self, user, site, credentials):
+        self.creds = credentials

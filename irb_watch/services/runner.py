@@ -111,11 +111,12 @@ class ScanRunner:
             if by_site:
                 workers = min(len(by_site), MAX_SITE_WORKERS)
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scan-site") as pool:
-                    for _ in pool.map(
-                        lambda sources: self._run_site(sources, trigger, actor_id, report),
-                        by_site.values(),
-                    ):
-                        pass
+                    list(
+                        pool.map(
+                            lambda sources: self._run_site(sources, trigger, actor_id, report),
+                            by_site.values(),
+                        )
+                    )
             self._audit.record(
                 "scan",
                 "scan.run_finished",

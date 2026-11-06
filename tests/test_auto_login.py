@@ -10,6 +10,7 @@ from irb_watch.crawlers.credentials import Credentials
 from irb_watch.crawlers.errors import LoginRejectedError
 from irb_watch.crawlers.login import browser_login, fresh_login, snuh_login_url
 from irb_watch.crawlers.sessions import FileSessionStore
+from tests.fakes_scan import MemCreds
 
 GOOD = Credentials("tester", "s3cret-pw")
 FORM = """<html><body><form id="foLgnForm" method="post" action="/hrpp/lgn/login.do">
@@ -88,17 +89,6 @@ def test_credentials_repr_hides_password():
 
 
 # ---- fresh_login orchestration (fake browser) -------------------------------
-
-
-class MemCreds:
-    def __init__(self, creds=None):
-        self.creds = creds
-
-    def get(self, user, site):
-        return self.creds
-
-    def set(self, user, site, credentials):
-        self.creds = credentials
 
 
 def test_fresh_login_saves_session_and_returns_cookies(tmp_path):

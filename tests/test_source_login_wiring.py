@@ -16,22 +16,13 @@ from tests.fakes_scan import (
     FakeReader,
     FakeScanRepo,
     FakeSourceStore,
+    MemCreds,
     make_source,
+    scan_once,
 )
 from tests.test_snuh_adapter import detail_html, list_html, row
 
 URL = "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277031"
-
-
-class MemCreds:
-    def __init__(self, creds=None):
-        self.creds = creds
-
-    def get(self, user, site):
-        return self.creds
-
-    def set(self, user, site, credentials):
-        self.creds = credentials
 
 
 # ---- source config ---------------------------------------------------------------------
@@ -139,16 +130,10 @@ def test_login_failures_mark_only_this_source_needs_review_with_reason(error):
 
 
 def test_factory_login_error_is_also_caught():
-    repo = FakeScanRepo()
-    repo.add_source(make_source(1))
-
     def factory(source):
         raise LoginRejectedError("login rejected: no stored credentials")
 
-    service = ScanService(
-        repo, FakeFileStorage(), factory, FakeAudit(), clock=lambda: datetime(2026, 11, 6, tzinfo=UTC)
-    )
-    result = service.scan_source(1, "admin-1")
+    result, _ = scan_once(factory=factory)
     assert result.status == "needs_review" and "no stored credentials" in result.error
 
 

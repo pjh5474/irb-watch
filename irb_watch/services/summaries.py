@@ -15,13 +15,12 @@ from irb_watch.ai.digest import document_digest
 from irb_watch.ai.types import DOCUMENT, Summarizer
 from irb_watch.core.state import VersionContent
 from irb_watch.services.errors import (
-    ForbiddenError,
     NotFoundError,
     TooManyRequestsError,
     UnavailableError,
     UpstreamError,
 )
-from irb_watch.services.users import AuditSink, UserStore
+from irb_watch.services.users import AuditSink, UserStore, active_profile
 
 
 @dataclass(frozen=True)
@@ -67,9 +66,7 @@ class SummaryService:
         self._clock = clock
 
     def summarize_document(self, user_id: str, document_id: int) -> SummaryResult:
-        profile = self._users.get_profile(user_id)
-        if profile is None or profile.deleted_at is not None:
-            raise ForbiddenError("this account cannot request summaries")
+        profile = active_profile(self._users, user_id, "this account cannot request summaries")
 
         now = self._clock()
         doc = self._repo.get_latest(document_id)

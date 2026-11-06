@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 
 from irb_watch.services.errors import (
     ConflictError,
+    ForbiddenError,
     NotFoundError,
     UpstreamError,
     ValidationError,
@@ -50,6 +51,18 @@ class AuthAdmin(Protocol):
     def create_user(self, email: str, password: str, display_name: str | None) -> str: ...
     def set_banned(self, user_id: str, banned: bool) -> None: ...
     def hard_delete(self, user_id: str) -> None: ...
+
+
+def active_profile(users: UserStore, user_id: str, refusal: str) -> Profile:
+    """The profile of a signed-in user whose account still exists and is not deleted.
+
+    Read from the database on every call, so a deleted or demoted account loses access at
+    once. Raises ForbiddenError(refusal) otherwise.
+    """
+    profile = users.get_profile(user_id)
+    if profile is None or profile.deleted_at is not None:
+        raise ForbiddenError(refusal)
+    return profile
 
 
 class AuditSink(Protocol):

@@ -10,8 +10,7 @@ from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.login import browser_login, snuh_login_url
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
-from tests.fakes import FakeAudit
-from tests.fakes_scan import FakeFileStorage, FakeReader, FakeScanRepo, make_source
+from tests.fakes_scan import scan_once
 from tests.test_snuh_adapter import KEY, RESOLVER, list_html, row
 
 URL = "https://hrpp.snuh.org/x"
@@ -183,17 +182,9 @@ def test_single_broken_page_is_still_just_one_flagged_post():
 
 
 def test_scan_service_reports_site_unavailable_as_failed_with_the_reason():
-    from datetime import UTC, datetime
-
-    from irb_watch.services.scan import ScanService
-
-    repo = FakeScanRepo()
-    repo.add_source(make_source(1))
-    reader = FakeReader(error=SiteUnavailableError("site unavailable: HTTP 502; stopped after 10 retries"))
-    service = ScanService(
-        repo, FakeFileStorage(), lambda s: reader, FakeAudit(), clock=lambda: datetime(2026, 11, 6, tzinfo=UTC)
+    result, repo = scan_once(
+        SiteUnavailableError("site unavailable: HTTP 502; stopped after 10 retries")
     )
-    result = service.scan_source(1, "admin-1")
     assert result.status == "failed" and "stopped after 10 retries" in result.error
     assert repo.get_source(1).last_scan_at is None
 

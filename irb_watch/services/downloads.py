@@ -13,12 +13,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from irb_watch.services.errors import (
-    ForbiddenError,
     NotFoundError,
     TooManyRequestsError,
     UpstreamError,
 )
-from irb_watch.services.users import AuditSink, UserStore
+from irb_watch.services.users import AuditSink, UserStore, active_profile
 
 
 @dataclass(frozen=True)
@@ -69,9 +68,7 @@ class DownloadService:
         self._clock = clock
 
     def download_link(self, user_id: str, file_id: int) -> DownloadLink:
-        profile = self._users.get_profile(user_id)
-        if profile is None or profile.deleted_at is not None:
-            raise ForbiddenError("this account cannot download files")
+        profile = active_profile(self._users, user_id, "this account cannot download files")
         is_admin = profile.role == "admin"
 
         now = self._clock()
