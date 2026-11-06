@@ -13,6 +13,7 @@ from irb_watch.crawlers.errors import (
 from irb_watch.main import app
 from irb_watch.services.access import AccessService
 from irb_watch.services.errors import (
+    AuditUnavailableError,
     ForbiddenError,
     NotFoundError,
     TooManyRequestsError,
@@ -125,6 +126,18 @@ def test_unknown_source_and_bad_accounts():
         service.prove_access("nobody", 1, "id", "pw")
     with pytest.raises(ValidationError):
         service.prove_access("user-1", 1, "  ", "pw")
+
+
+def test_if_the_attempt_cannot_be_logged_no_hospital_login_is_tried():
+    users = FakeStore()
+    users.add("user-1", "u@example.com")
+    store, audit, seen = FakeAccessStore(), FakeAudit(fail_required=True), []
+    service = AccessService(
+        users, store, audit, lambda s, c: seen.append(c), clock=lambda: NOW
+    )
+    with pytest.raises(AuditUnavailableError):
+        service.prove_access("user-1", 1, "id", "pw")
+    assert seen == [] and store.granted == {}  # the password was never used
 
 
 def test_attempt_limit_blocks_before_any_hospital_login():

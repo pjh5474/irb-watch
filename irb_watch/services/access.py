@@ -80,8 +80,10 @@ class AccessService:
             raise TooManyRequestsError(
                 f"too many login checks; try again in an hour (limit {self._attempts_per_hour}/hour)"
             )
-        # Logged before the check, so a crash or a timeout still counts as an attempt.
-        self._audit.record(
+        # Logged before the check, so a crash or a timeout still counts as an attempt. The
+        # entry is also the hourly counter, so if it cannot be written no hospital login
+        # is tried at all (fail closed).
+        self._audit.record_required(
             "user", "access.attempted", user_id, source_id=source.id, title=source.name
         )
 

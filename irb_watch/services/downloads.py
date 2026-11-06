@@ -95,7 +95,10 @@ class DownloadService:
         except Exception as exc:
             raise UpstreamError(f"could not create the download link ({type(exc).__name__})") from exc
 
-        self._audit.record(
+        # The log entry is also the daily-cap counter, so it must exist before the link is
+        # handed out. If it cannot be written the link is discarded (it was never delivered
+        # and dies on its own within seconds).
+        self._audit.record_required(
             "user",
             "file.download_link",
             user_id,

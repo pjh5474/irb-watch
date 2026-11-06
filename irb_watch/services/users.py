@@ -65,7 +65,29 @@ class AuditSink(Protocol):
         document_id: int | None = None,
         summary: str | None = None,
         priority: str | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Best effort: a failed write is logged and ignored."""
+        ...
+
+    def record_required(
+        self,
+        category: str,
+        event_type: str,
+        actor_id: str | None,
+        title: str | None = None,
+        payload: dict | None = None,
+        *,
+        source_id: int | None = None,
+        document_id: int | None = None,
+        summary: str | None = None,
+        priority: str | None = None,
+    ) -> None:
+        """Fail closed: raises AuditUnavailableError if the entry was not written.
+
+        For actions whose log is also their limit counter or their only trace (download
+        links, login checks): no entry, no action.
+        """
+        ...
 
 
 class UserService:

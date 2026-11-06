@@ -8,6 +8,7 @@ from irb_watch.db.downloads import SupabaseUrlSigner
 from irb_watch.main import app
 from irb_watch.services.downloads import DownloadService, StoredFile
 from irb_watch.services.errors import (
+    AuditUnavailableError,
     ForbiddenError,
     NotFoundError,
     TooManyRequestsError,
@@ -124,6 +125,26 @@ def test_signing_failure_is_an_error_with_a_reason_and_is_not_logged_as_a_downlo
     with pytest.raises(UpstreamError, match="RuntimeError"):
         service.download_link("user-1", 10)
     assert audit.entries == []
+
+
+def test_if_the_log_entry_cannot_be_written_no_link_is_handed_out():
+    users = FakeStore()
+    users.add("user-1", "u@example.com")
+    audit, signer = FakeAudit(fail_required=True), FakeSigner()
+    service = DownloadService(users, FakeRepo(), signer, audit, clock=lambda: NOW)
+    with pytest.raises(AuditUnavailableError, match="not carried out|audit log"):
+        service.download_link("user-1", 10)
+    assert audit.entries == []  # nothing logged, and the caller got no URL
+
+
+def test_admin_downloads_are_logged_fail_closed_too():
+    users = FakeStore()
+    users.add("admin-1", "a@example.com", role="admin")
+    service = DownloadService(
+        users, FakeRepo(), FakeSigner(), FakeAudit(fail_required=True), clock=lambda: NOW
+    )
+    with pytest.raises(AuditUnavailableError):
+        service.download_link("admin-1", 10)
 
 
 def test_custom_ttl_is_used():

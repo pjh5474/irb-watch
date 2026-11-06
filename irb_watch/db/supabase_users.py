@@ -5,6 +5,7 @@ import logging
 from supabase import Client
 from supabase_auth.errors import AuthApiError
 
+from irb_watch.services.errors import AuditUnavailableError
 from irb_watch.services.users import EmailTakenError, Profile
 
 log = logging.getLogger(__name__)
@@ -96,10 +97,37 @@ class SupabaseAuthAdmin:
 
 
 class SupabaseAuditSink:
-    """Best effort: a failed log write must not undo an action that already happened."""
+    """record(): best effort, a failed log write must not undo an action that already happened.
+    record_required(): fail closed, for actions that must not happen without their log entry."""
 
     def __init__(self, client: Client) -> None:
         self._c = client
+
+    def _insert(
+        self,
+        category: str,
+        event_type: str,
+        actor_id: str | None,
+        title: str | None,
+        payload: dict | None,
+        source_id: int | None,
+        document_id: int | None,
+        summary: str | None,
+        priority: str | None,
+    ) -> None:
+        self._c.table("audit_logs").insert(
+            {
+                "category": category,
+                "event_type": event_type,
+                "actor_id": actor_id,
+                "source_id": source_id,
+                "document_id": document_id,
+                "title": title,
+                "summary": summary,
+                "priority": priority,
+                "payload": payload or {},
+            }
+        ).execute()
 
     def record(
         self,
@@ -115,18 +143,34 @@ class SupabaseAuditSink:
         priority: str | None = None,
     ) -> None:
         try:
-            self._c.table("audit_logs").insert(
-                {
-                    "category": category,
-                    "event_type": event_type,
-                    "actor_id": actor_id,
-                    "source_id": source_id,
-                    "document_id": document_id,
-                    "title": title,
-                    "summary": summary,
-                    "priority": priority,
-                    "payload": payload or {},
-                }
-            ).execute()
+            self._insert(
+                category, event_type, actor_id, title, payload, source_id, document_id,
+                summary, priority,
+            )
         except Exception:
             log.exception("could not write audit log entry %s", event_type)
+
+    def record_required(
+        self,
+        category: str,
+        event_type: str,
+        actor_id: str | None,
+        title: str | None = None,
+        payload: dict | None = None,
+        *,
+        source_id: int | None = None,
+        document_id: int | None = None,
+        summary: str | None = None,
+        priority: str | None = None,
+    ) -> None:
+        try:
+            self._insert(
+                category, event_type, actor_id, title, payload, source_id, document_id,
+                summary, priority,
+            )
+        except Exception as exc:
+            log.exception("could not write required audit log entry %s", event_type)
+            raise AuditUnavailableError(
+                "could not record this action in the audit log, so it was not carried out; "
+                "try again shortly"
+            ) from exc

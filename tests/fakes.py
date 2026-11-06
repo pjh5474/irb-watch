@@ -84,8 +84,16 @@ class FakeAuth:
 
 
 class FakeAudit:
-    def __init__(self) -> None:
+    def __init__(self, fail_required: bool = False) -> None:
         self.entries: list[dict] = []
+        self.fail_required = fail_required  # make record_required() fail like a down database
+
+    def record_required(self, *args, **kwargs):
+        if self.fail_required:
+            from irb_watch.services.errors import AuditUnavailableError
+
+            raise AuditUnavailableError("could not record this action in the audit log")
+        return self.record(*args, **kwargs)
 
     def record(
         self,

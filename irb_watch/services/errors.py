@@ -35,3 +35,7 @@ class UpstreamError(ServiceError):
 
 class UnavailableError(ServiceError):
     status_code = 503
+
+
+class AuditUnavailableError(UnavailableError):
+    """An action that must be logged first could not be logged, so it was not carried out."""
