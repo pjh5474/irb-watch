@@ -82,7 +82,7 @@ def get_source_service() -> SourceService:
 def get_scan_service() -> ScanService:
     client = get_supabase_client()
     return ScanService(
-        SupabaseScanRepo(client),
+        SupabaseScanRepo(client, get_settings().max_scan_payload_bytes),
         SupabaseFileStorage(client),
         build_reader,
         SupabaseAuditSink(client),

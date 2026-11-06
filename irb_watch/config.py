@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     scan_cron: str = "0 6 * * *"
     max_file_bytes: int = 20_000_000
     max_docs_per_url: int = 200
+    # A scan is saved in one database call; refuse (needs_review) above this JSON size.
+    # The largest real board so far is about 2 MB of text.
+    max_scan_payload_bytes: int = 20_000_000
     max_llm_calls_per_run: int = 100
     per_domain_delay_seconds: float = 2.0
     request_timeout_seconds: float = 30.0

@@ -24,6 +24,7 @@ from irb_watch.crawlers.errors import (
     LoginExpiredError,
     LoginRejectedError,
     RobotsDisallowedError,
+    ScanTooLargeError,
 )
 from irb_watch.crawlers.snuh_reader import FileSink, ScanReading
 from irb_watch.services.errors import ConflictError, NotFoundError, ValidationError
@@ -59,14 +60,38 @@ class ScanRepo(Protocol):
         self, source_id: int, status: str, error: str | None, scanned_at: datetime | None
     ) -> None: ...
     def load_store(self, source_id: int) -> LoadedStore: ...
-    def persist(
-        self, source_id: int, loaded: LoadedStore, seen: set[str], now: datetime
-    ) -> dict[str, int]: ...
+    def commit_scan(
+        self,
+        source_id: int,
+        loaded: LoadedStore,
+        seen: set[str],
+        now: datetime,
+        cards: "list[ScanCard]",
+        status: str,
+        error: str | None,
+    ) -> dict[str, int]:
+        """Save documents, versions, files, cards and the scan result all-or-nothing."""
+        ...
+
     def has_stored_file(self, sha256: str) -> bool: ...
 
 
 class FileStorage(Protocol):
     def put(self, path: str, content: bytes) -> None: ...
+
+
+@dataclass(frozen=True)
+class ScanCard:
+    """One audit-log row (news card) written together with the scan's data."""
+
+    category: str
+    event_type: str
+    actor_id: str | None
+    title: str | None = None
+    summary: str | None = None
+    payload: dict = field(default_factory=dict)
+    priority: str | None = None
+    external_id: str | None = None  # the post this card is about; None for scan-level cards
 
 
 @dataclass
@@ -125,6 +150,7 @@ class ScanService:
             RobotsDisallowedError,
             LoginExpiredError,
             LoginRejectedError,
+            ScanTooLargeError,
         ) as exc:
             summary = ScanSummary(source.id, NEEDS_REVIEW, error=str(exc))
         except FetchError as exc:
@@ -194,10 +220,13 @@ class ScanService:
         # news card are written together (the audit log cannot be edited afterwards).
         enrichments = self._enricher.enrich(result.events, loaded.store) if self._enricher else {}
         seen = {o.external_id for o in reading.observations}
-        doc_ids = self._repo.persist(source.id, loaded, seen, now)
 
-        for event in result.events:
-            self._log_event(source, event, doc_ids, actor_id, enrichments.get(event.external_id))
+        # Everything below is saved in ONE transaction by commit_scan: documents, versions,
+        # files, these news cards and the scan result. Any failure saves nothing.
+        cards = [
+            self._event_card(event, actor_id, enrichments.get(event.external_id))
+            for event in result.events
+        ]
 
         titles = {o.external_id: o.content.title for o in reading.observations}
         for external_id, reason in result.needs_review.items():
@@ -207,15 +236,16 @@ class ScanService:
             title = titles.get(external_id) or (
                 doc.latest.content.title if doc else f"Post {external_id}"
             )
-            self._audit.record(
-                "document",
-                "document.needs_review",
-                actor_id,
-                title=title,
-                summary=reason,
-                payload={"external_id": external_id, "reason": reason},
-                source_id=source.id,
-                document_id=doc_ids.get(external_id),
+            cards.append(
+                ScanCard(
+                    "document",
+                    "document.needs_review",
+                    actor_id,
+                    title=title,
+                    summary=reason,
+                    payload={"external_id": external_id, "reason": reason},
+                    external_id=external_id,
+                )
             )
 
         counts = {k: sum(1 for e in result.events if e.kind == k) for k in
@@ -229,32 +259,31 @@ class ScanService:
             error=_failure_text(result.needs_review) if review else None,
             **counts,
         )
-        self._audit.record(
-            "scan",
-            "scan.finished",
-            actor_id,
-            title=f"Scan of {source.name} finished",
-            payload={
-                "baseline": summary.baseline,
-                "posts": len(reading.observations),
-                "new": summary.new,
-                "updated": summary.updated,
-                "removed": summary.removed,
-                "reappeared": summary.reappeared,
-                "posts_needing_review": review,
-            },
-            source_id=source.id,
+        cards.append(
+            ScanCard(
+                "scan",
+                "scan.finished",
+                actor_id,
+                title=f"Scan of {source.name} finished",
+                payload={
+                    "baseline": summary.baseline,
+                    "posts": len(reading.observations),
+                    "new": summary.new,
+                    "updated": summary.updated,
+                    "removed": summary.removed,
+                    "reappeared": summary.reappeared,
+                    "posts_needing_review": review,
+                },
+            )
+        )
+        self._repo.commit_scan(
+            source.id, loaded, seen, now, cards, summary.status, summary.error
         )
         return summary
 
-    def _log_event(
-        self,
-        source: Source,
-        event: ChangeEvent,
-        doc_ids: dict[str, int],
-        actor_id: str | None,
-        enrichment: Enrichment | None,
-    ) -> None:
+    def _event_card(
+        self, event: ChangeEvent, actor_id: str | None, enrichment: Enrichment | None
+    ) -> "ScanCard":
         detail = event.detail
         payload: dict = {"version_no": event.version_no}
         if detail is not None:
@@ -270,16 +299,15 @@ class ScanService:
             payload["summary_source"] = enrichment.source
             if enrichment.note:
                 payload["ai_note"] = enrichment.note
-        self._audit.record(
+        return ScanCard(
             "document",
             f"document.{event.kind}",
             actor_id,
             title=event.title,
             summary=summary,
             payload=payload,
-            source_id=source.id,
-            document_id=doc_ids.get(event.external_id),
             priority=priority,
+            external_id=event.external_id,
         )
 
 

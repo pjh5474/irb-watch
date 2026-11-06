@@ -18,6 +18,10 @@ class IncompleteScanError(CrawlError):
     """Fewer posts were read than the site declared."""
 
 
+class ScanTooLargeError(CrawlError):
+    """The scan's data is too big to save in one transaction; nothing was saved."""
+
+
 class LoginRejectedError(CrawlError):
     """Automatic login failed: wrong ID/password, blocked account, or the login form changed.
 

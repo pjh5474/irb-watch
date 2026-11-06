@@ -13,11 +13,11 @@ T0 = datetime(2026, 11, 5, tzinfo=UTC)
 
 
 class Harness:
-    def __init__(self, enricher=None):
-        self.repo = FakeScanRepo()
+    def __init__(self, enricher=None, repo_class=FakeScanRepo):
+        self.audit = FakeAudit()
+        self.repo = repo_class(audit=self.audit)
         self.repo.add_source(make_source(1))
         self.storage = FakeFileStorage()
-        self.audit = FakeAudit()
         self.reader = FakeReader()
         self.day = 0
         self.service = ScanService(

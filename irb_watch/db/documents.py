@@ -1,5 +1,6 @@
 """Supabase-backed storage for sources, documents, versions, files and original files."""
 
+import json
 from datetime import datetime, timedelta
 
 from postgrest.exceptions import APIError
@@ -8,7 +9,8 @@ from supabase import Client
 
 from irb_watch.core.hashing import sha256_hex
 from irb_watch.core.state import FileContent, StoredDocument, StoredVersion, VersionContent
-from irb_watch.services.scan import LoadedStore
+from irb_watch.crawlers.errors import ScanTooLargeError
+from irb_watch.services.scan import LoadedStore, ScanCard
 from irb_watch.services.sources import DuplicateSourceError, Source
 from irb_watch.services.summaries import DocumentForSummary
 
@@ -93,8 +95,9 @@ class SupabaseFileStorage:
 
 
 class SupabaseScanRepo:
-    def __init__(self, client: Client) -> None:
+    def __init__(self, client: Client, max_payload_bytes: int = 20_000_000) -> None:
         self._c = client
+        self._max_payload_bytes = max_payload_bytes
 
     # -- sources / lock ----------------------------------------------------------
 
@@ -204,81 +207,105 @@ class SupabaseScanRepo:
 
     # -- save ---------------------------------------------------------------------
 
-    def persist(
-        self, source_id: int, loaded: LoadedStore, seen: set[str], now: datetime
+    def commit_scan(
+        self,
+        source_id: int,
+        loaded: LoadedStore,
+        seen: set[str],
+        now: datetime,
+        cards: list[ScanCard],
+        status: str,
+        error: str | None,
     ) -> dict[str, int]:
-        """Write what detect_changes decided. Returns external_id -> document id."""
-        doc_ids = dict(loaded.doc_ids)
-        for external_id, doc in loaded.store.items():
-            if external_id not in doc_ids:
-                doc_ids[external_id] = self._insert_document(source_id, doc, now)
-                new_versions = doc.versions
-            else:
-                already = loaded.loaded_latest.get(external_id, 0)
-                new_versions = [v for v in doc.versions if v.version_no > already]
+        """Save the whole scan with one call to the database function public.commit_scan.
 
-            latest_id = None
-            for version in new_versions:
-                latest_id = self._insert_version(source_id, doc_ids[external_id], version)
-            if latest_id is not None or _snapshot(doc) != loaded.snapshots.get(external_id):
-                values = _document_values(doc)
-                if latest_id is not None:
-                    values["latest_version_id"] = latest_id
-                self._c.table("documents").update(values).eq("id", doc_ids[external_id]).execute()
-
-        seen_ids = [doc_ids[e] for e in seen if e in doc_ids]
-        if seen_ids:
-            self._c.table("documents").update({"last_seen_at": now.isoformat()}).in_(
-                "id", seen_ids
-            ).execute()
-        return doc_ids
-
-    def _insert_document(self, source_id: int, doc: StoredDocument, now: datetime) -> int:
-        row = {
-            "source_id": source_id,
-            "external_id": doc.external_id,
-            "first_seen_at": doc.first_seen_at.isoformat(),
-            **_document_values(doc),
+        The function runs in a single transaction: on any error nothing is saved, so no
+        partial documents, no versions without their cards, and last_scan_at never moves.
+        Returns external_id -> document id for the documents written.
+        """
+        params = {
+            "p_source_id": source_id,
+            "p_now": now.isoformat(),
+            "p_documents": build_commit_documents(loaded),
+            "p_seen": sorted(seen),
+            "p_cards": [_card_row(c) for c in cards],
+            "p_status": status,
+            "p_error": error,
         }
-        return self._c.table("documents").insert(row).execute().data[0]["id"]
+        size = len(json.dumps(params, ensure_ascii=False).encode("utf-8"))
+        if size > self._max_payload_bytes:
+            raise ScanTooLargeError(
+                f"scan too large to save safely in one step ({size / 1e6:.1f} MB, "
+                f"limit {self._max_payload_bytes / 1e6:.1f} MB); nothing was saved"
+            )
+        return self._c.rpc("commit_scan", params).execute().data
 
-    def _insert_version(self, source_id: int, document_id: int, version: StoredVersion) -> int:
-        c = version.content
-        row = self._c.table("document_versions").insert(
+
+def _card_row(card: ScanCard) -> dict:
+    return {
+        "category": card.category,
+        "event_type": card.event_type,
+        "actor_id": card.actor_id,
+        "title": card.title,
+        "summary": card.summary,
+        "priority": card.priority,
+        "payload": card.payload,
+        "external_id": card.external_id,
+    }
+
+
+def _version_row(version: StoredVersion) -> dict:
+    c = version.content
+    return {
+        "version_no": version.version_no,
+        "change_type": version.change_type,
+        "title": c.title,
+        "body_hash": sha256_hex(c.body_text.encode("utf-8")),
+        "body_text": c.body_text,
+        "created_at": version.created_at.isoformat(),
+        "summary": version.summary,
+        "priority": version.priority,
+        "category": version.category,
+        "summary_source": version.summary_source,
+        "classification": version.classification,
+        "files": [
             {
-                "document_id": document_id,
-                "source_id": source_id,
-                "version_no": version.version_no,
-                "change_type": version.change_type,
-                "title": c.title,
-                "body_hash": sha256_hex(c.body_text.encode("utf-8")),
-                "body_text": c.body_text,
-                "created_at": version.created_at.isoformat(),
-                "summary": version.summary,
-                "priority": version.priority,
-                "category": version.category,
-                "summary_source": version.summary_source,
-                "classification": version.classification,
+                "filename": f.filename,
+                "size_label": f.size_label,
+                "sha256": f.sha256,
+                "storage_path": f.storage_path,
+                "text_content": f.text,
+                "hash_only_reason": f.hash_only_reason,
+                "extract_note": f.note,
             }
-        ).execute().data[0]
-        if c.files:
-            self._c.table("document_version_files").insert(
-                [
-                    {
-                        "version_id": row["id"],
-                        "source_id": source_id,
-                        "filename": f.filename,
-                        "size_label": f.size_label,
-                        "sha256": f.sha256,
-                        "storage_path": f.storage_path,
-                        "text_content": f.text,
-                        "hash_only_reason": f.hash_only_reason,
-                        "extract_note": f.note,
-                    }
-                    for f in c.files
-                ]
-            ).execute()
-        return row["id"]
+            for f in c.files
+        ],
+    }
+
+
+def build_commit_documents(loaded: LoadedStore) -> list[dict]:
+    """The documents that need writing: new ones, ones with new versions, ones whose row changed."""
+    items: list[dict] = []
+    for external_id, doc in loaded.store.items():
+        doc_id = loaded.doc_ids.get(external_id)
+        if doc_id is None:
+            new_versions = list(doc.versions)
+        else:
+            already = loaded.loaded_latest.get(external_id, 0)
+            new_versions = [v for v in doc.versions if v.version_no > already]
+        changed = _snapshot(doc) != loaded.snapshots.get(external_id)
+        if doc_id is not None and not new_versions and not changed:
+            continue
+        items.append(
+            {
+                "external_id": external_id,
+                "doc_id": doc_id,
+                "first_seen_at": doc.first_seen_at.isoformat(),
+                "values": _document_values(doc),
+                "versions": [_version_row(v) for v in new_versions],
+            }
+        )
+    return items
 
 
 class SupabaseSummaryRepo:

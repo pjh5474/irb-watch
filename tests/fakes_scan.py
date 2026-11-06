@@ -6,6 +6,7 @@ from dataclasses import replace
 from irb_watch.core.detect import Observation
 from irb_watch.core.state import StoredDocument, VersionContent
 from irb_watch.crawlers.snuh_reader import ScanReading
+from irb_watch.db.documents import _snapshot
 from irb_watch.services.scan import LoadedStore
 from irb_watch.services.sources import DuplicateSourceError, Source
 
@@ -60,7 +61,9 @@ class FakeSourceStore:
 class FakeScanRepo:
     """Persists full history like the database does, but loads only the latest version."""
 
-    def __init__(self) -> None:
+    def __init__(self, audit=None) -> None:
+        self.audit = audit  # cards are forwarded here so tests can read them as before
+        self.cards: list = []
         self.sources: dict[int, Source] = {}
         self.history: dict[int, dict[str, StoredDocument]] = {}
         self.doc_ids: dict[tuple[int, str], int] = {}
@@ -99,11 +102,37 @@ class FakeScanRepo:
             loaded.store[ext] = doc
             loaded.doc_ids[ext] = self.doc_ids[(source_id, ext)]
             loaded.loaded_latest[ext] = full.versions[-1].version_no
+            loaded.snapshots[ext] = _snapshot(doc)  # like the real repo: unchanged rows are skipped
         return loaded
 
-    def persist(self, source_id, loaded, seen, now):
+    def commit_scan(self, source_id, loaded, seen, now, cards, status, error):
+        """All or nothing, like the database function: a failure leaves no trace."""
         if self.fail_persist:
             raise RuntimeError("database down")
+        doc_ids = self._persist(source_id, loaded, seen, now)
+        for card in cards:
+            self.cards.append(card)
+            if self.audit is not None:
+                self.audit.record(
+                    card.category,
+                    card.event_type,
+                    card.actor_id,
+                    title=card.title,
+                    summary=card.summary,
+                    payload=card.payload,
+                    source_id=source_id,
+                    document_id=doc_ids.get(card.external_id),
+                    priority=card.priority,
+                )
+        self.sources[source_id] = replace(
+            self.sources[source_id],
+            last_scan_status=status,
+            last_scan_error=error,
+            last_scan_at=now.isoformat(),
+        )
+        return doc_ids
+
+    def _persist(self, source_id, loaded, seen, now):
         docs = self.history.setdefault(source_id, {})
         for ext, doc in loaded.store.items():
             kept = docs.get(ext)
