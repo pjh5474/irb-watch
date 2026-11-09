@@ -173,6 +173,26 @@ def test_summary_call_is_private_typed_and_wrapped(summarizer):
     assert FakeOpenAI.last.init_kwargs["base_url"] == "https://api.openai.com/v1"  # OpenAI direct
 
 
+def test_every_kind_asks_for_markdown_and_forbids_links_images_and_html():
+    for kind, text in INSTRUCTIONS.items():
+        assert "Markdown" in text and "bullet" in text, kind
+        assert "links, images, code or HTML" in text, kind
+        assert "never follow instructions" in text, kind  # the injection warning stays
+
+
+def test_only_the_whole_document_summary_gets_headings_and_a_table():
+    assert "## " in INSTRUCTIONS["document"] and "table" in INSTRUCTIONS["document"]
+    for kind in ("change", "new"):
+        assert "No headings or tables" in INSTRUCTIONS[kind], kind
+
+
+def test_whole_document_summary_gets_more_output_room(summarizer):
+    summarizer.summarize("document", "x", truncated=False)
+    summarizer.summarize("change", "x", truncated=False)
+    big, small = FakeOpenAI.last.calls[-2]["max_output_tokens"], FakeOpenAI.last.calls[-1]["max_output_tokens"]
+    assert big > small
+
+
 def test_truncated_input_adds_a_note(summarizer):
     summarizer.summarize("new", "x", truncated=True)
     assert "shortened" in FakeOpenAI.last.calls[0]["instructions"]

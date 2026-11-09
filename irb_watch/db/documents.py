@@ -357,7 +357,7 @@ class SupabaseSummaryRepo:
         doc = docs[0]
         version = (
             self._c.table("document_versions")
-            .select("id, version_no, title, body_text, document_summary")
+            .select("id, version_no, title, body_text, document_summary, document_summary_at")
             .eq("id", doc["latest_version_id"])
             .limit(1)
             .execute()
@@ -389,6 +389,7 @@ class SupabaseSummaryRepo:
             version_no=version["version_no"],
             content=VersionContent(version["title"], version["body_text"], files),
             document_summary=version["document_summary"],
+            summary_at=version["document_summary_at"],
         )
 
     def may_read(self, user_id: str, source_id: int, now: datetime) -> bool:

@@ -4,6 +4,7 @@ Rules: the user must be active and may read the document's source (a valid proof
 for members-only sources) or be an admin;
 a cached summary is returned for free; a new one counts toward a per-user daily limit.
 Documents the user may not see answer "not found", so their existence is not revealed.
+Admins can also write the summary again (regenerate_document), exempt from the limit.
 """
 
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from irb_watch.ai.digest import document_digest
 from irb_watch.ai.types import DOCUMENT, Summarizer
 from irb_watch.core.state import VersionContent
 from irb_watch.services.errors import (
+    ForbiddenError,
     NotFoundError,
     TooManyRequestsError,
     UnavailableError,
@@ -31,6 +33,7 @@ class DocumentForSummary:
     version_no: int
     content: VersionContent
     document_summary: str | None
+    summary_at: str | None = None  # when document_summary was saved (ISO text), if known
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,13 @@ class SummaryResult:
     summary: str
     cached: bool
     version_no: int
+
+
+@dataclass(frozen=True)
+class RegenerateResult:
+    summary: str
+    version_no: int
+    replaced: bool  # True when an earlier saved summary was overwritten
 
 
 class SummaryRepo(Protocol):
@@ -108,3 +118,47 @@ class SummaryService:
             document_id=document_id,
         )
         return SummaryResult(text, False, doc.version_no)
+
+    def regenerate_document(self, user_id: str, document_id: int) -> RegenerateResult:
+        """Admin only: write the whole-document summary again and replace the saved one.
+
+        The saved summary is shared by every user, so the new text shows for all of them.
+        Only the current version can be redone. Admins are exempt from the daily limit, so
+        nothing is counted. A failed generation leaves the old summary untouched. The audit
+        entry records who did it, when, and the old and new lengths (not the old text).
+        """
+        profile = active_profile(self._users, user_id, "this account cannot request summaries")
+        if profile.role != "admin":
+            raise ForbiddenError("admin access required")
+        if self._summarizer is None:
+            raise UnavailableError("AI summaries are not switched on for this server")
+
+        now = self._clock()
+        doc = self._repo.get_latest(document_id)
+        if doc is None:
+            raise NotFoundError("document not found")
+
+        digest = document_digest(doc.content)
+        try:
+            text = self._summarizer.summarize(DOCUMENT, digest.text, truncated=digest.truncated)
+        except Exception as exc:
+            raise UpstreamError(f"the summary service failed ({type(exc).__name__})") from exc
+
+        self._repo.save_summary(doc.version_id, text, now)
+        self._audit.record(
+            "admin",
+            "summary.regenerated",
+            user_id,
+            title=doc.content.title,
+            payload={
+                "version_no": doc.version_no,
+                "truncated": digest.truncated,
+                "had_summary": bool(doc.document_summary),
+                "old_length": len(doc.document_summary or ""),
+                "old_summary_at": doc.summary_at,
+                "new_length": len(text),
+            },
+            source_id=doc.source_id,
+            document_id=document_id,
+        )
+        return RegenerateResult(text, doc.version_no, replaced=bool(doc.document_summary))

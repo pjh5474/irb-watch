@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_summary_service, get_verifier
+from irb_watch.api.deps import get_summary_service, get_user_store, get_verifier
 from irb_watch.core.state import FileContent, VersionContent
 from irb_watch.main import app
 from irb_watch.services.errors import (
@@ -168,6 +168,82 @@ def test_switched_off_when_no_summarizer(env):
         service.summarize_document("user-1", 10)
 
 
+# ---- admin: regenerate -----------------------------------------------------------------
+
+
+def test_admin_regenerates_and_replaces_the_saved_summary(env):
+    service, repo, audit, ai, _ = env
+    service.summarize_document("user-1", 10)  # saves the first summary
+    ai.result = "New README-style summary."
+    out = service.regenerate_document("admin-1", 10)
+    assert (out.summary, out.version_no, out.replaced) == ("New README-style summary.", 2, True)
+    assert repo.saved[100] == "New README-style summary."
+    entry = audit.entries[-1]
+    assert entry["event_type"] == "summary.regenerated" and entry["actor_id"] == "admin-1"
+    assert entry["payload"]["had_summary"] is True
+    assert entry["payload"]["old_length"] == len("Whole document summary.")
+    assert entry["payload"]["new_length"] == len("New README-style summary.")
+    assert "Whole document summary." not in str(entry)  # lengths only, never the old text
+
+
+def test_regenerating_when_there_was_no_summary_says_replaced_false(env):
+    service, *_ = env
+    assert service.regenerate_document("admin-1", 10).replaced is False
+
+
+def test_regenerating_is_not_counted_and_ignores_the_daily_limit(env):
+    service, repo, *_ = env
+    repo.requests = [("admin-1", NOW)] * 50  # far above the limit of 2
+    service.regenerate_document("admin-1", 10)
+    service.regenerate_document("admin-1", 10)
+    assert len(repo.requests) == 50  # nothing was added
+
+
+def test_regenerating_always_calls_the_ai_even_when_a_summary_is_saved(env):
+    service, _, _, ai, _ = env
+    service.summarize_document("user-1", 10)
+    service.regenerate_document("admin-1", 10)
+    assert len(ai.calls) == 2
+
+
+def test_normal_users_cannot_regenerate(env):
+    service, repo, _, ai, _ = env
+    with pytest.raises(ForbiddenError, match="admin"):
+        service.regenerate_document("user-1", 10)
+    assert ai.calls == [] and repo.saved == {}
+
+
+@pytest.mark.parametrize("user", ["gone", "ghost"])
+def test_deleted_or_unknown_accounts_cannot_regenerate(env, user):
+    service, *_ = env
+    with pytest.raises(ForbiddenError):
+        service.regenerate_document(user, 10)
+
+
+def test_regenerating_an_unknown_document(env):
+    service, *_ = env
+    with pytest.raises(NotFoundError):
+        service.regenerate_document("admin-1", 999)
+
+
+def test_failed_regeneration_keeps_the_old_summary_and_logs_nothing(env):
+    service, repo, audit, ai, _ = env
+    service.summarize_document("user-1", 10)
+    entries_before = len(audit.entries)
+    ai.result = TimeoutError("slow")
+    with pytest.raises(UpstreamError, match="TimeoutError"):
+        service.regenerate_document("admin-1", 10)
+    assert repo.saved[100] == "Whole document summary."
+    assert len(audit.entries) == entries_before
+
+
+def test_regenerating_is_switched_off_without_a_summarizer(env):
+    _, repo, audit, _, users = env
+    service = SummaryService(users, repo, None, audit, 2, clock=lambda: NOW)
+    with pytest.raises(UnavailableError):
+        service.regenerate_document("admin-1", 10)
+
+
 # ---- over HTTP --------------------------------------------------------------------------
 
 
@@ -201,6 +277,22 @@ def test_endpoint_returns_the_summary_then_the_cached_copy(client):
 )
 def test_endpoint_status_codes(client, user, document, status):
     assert client.post(f"/documents/{document}/summary", headers=auth(user)).status_code == status
+
+
+def test_admin_regenerate_endpoint(client, env):
+    users = env[4]
+    app.dependency_overrides[get_user_store] = lambda: users
+    ok = client.post("/admin/documents/10/summary", headers=auth("admin-1"))
+    assert ok.status_code == 200
+    assert ok.json() == {"summary": "Whole document summary.", "version_no": 2, "replaced": False}
+
+
+def test_regenerate_endpoint_refuses_normal_users_and_anonymous(client, env):
+    users = env[4]
+    app.dependency_overrides[get_user_store] = lambda: users
+    assert client.post("/admin/documents/10/summary").status_code == 401
+    assert client.post("/admin/documents/10/summary", headers=auth("user-1")).status_code == 403
+    assert env[3].calls == []  # no AI call was made for either
 
 
 def test_endpoint_rate_limit_is_429(client, env):
