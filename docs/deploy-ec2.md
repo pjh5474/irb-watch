@@ -94,7 +94,14 @@ last saved scan is older than 24 hours, so expect scans right away on the first 
 | Scan of a members-only source says `CREDENTIALS_KEY ... cannot be decrypted` | The key in `.env` is not the key used when the login was stored. |
 | Frontend gets a CORS error | `FRONTEND_ORIGINS` does not match the frontend address exactly. |
 
-## 9. Automatic deploy from GitHub (written 2026-11-09, not run yet)
+## 9. Automatic deploy from GitHub (written 2026-11-09; a push ran test and deploy successfully, as reported by the owner)
+**Status:** after setup, the first run failed in `test` because some offline tests start a real
+headless Chromium and the runner had none; the workflow now runs `playwright install --with-deps
+chromium` first. The first deploy also needed a manual `git pull` and `docker compose up -d --build`
+on the server, because `scripts/deploy.sh` did not exist there yet. Not yet verified: the lock test
+(a login with the CI key must print the hash error and give no shell), and a deploy that interrupts
+a running scan.
+
 On every push to `main`, `.github/workflows/deploy.yml` runs `ruff` and `pytest`; if both pass it
 SSHes to the server with a **locked key** that can only run `scripts/deploy.sh <commit>`. The
 script fast-forwards the checkout to that commit (it must be on `origin/main`), rebuilds with
