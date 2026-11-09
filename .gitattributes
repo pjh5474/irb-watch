@@ -1,0 +1,2 @@
+# The deploy script runs on Linux: keep LF line endings whatever the checkout machine is.
+*.sh text eol=lf

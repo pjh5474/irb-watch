@@ -1,0 +1,45 @@
+# On every push to main: run the offline tests and lint, and only if both pass, deploy that
+# exact commit to the server. Setup steps and secrets: docs/deploy-ec2.md section 9.
+# Database migrations are NOT deployed here; apply them by hand first (db push, dry-run first).
+name: test-and-deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run ruff check irb_watch tests
+      - run: uv run pytest -q   # offline tests only: live tests need RUN_LIVE=1 and are never run here
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    # One deploy at a time; a newer push waits instead of cancelling a running deploy.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy this commit over SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # The server's host key is pinned from a secret, so a fake server is refused.
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 "$USER_NAME@$HOST" "${GITHUB_SHA}"

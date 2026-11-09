@@ -94,6 +94,38 @@ last saved scan is older than 24 hours, so expect scans right away on the first 
 | Scan of a members-only source says `CREDENTIALS_KEY ... cannot be decrypted` | The key in `.env` is not the key used when the login was stored. |
 | Frontend gets a CORS error | `FRONTEND_ORIGINS` does not match the frontend address exactly. |
 
+## 9. Automatic deploy from GitHub (written 2026-11-09, not run yet)
+On every push to `main`, `.github/workflows/deploy.yml` runs `ruff` and `pytest`; if both pass it
+SSHes to the server with a **locked key** that can only run `scripts/deploy.sh <commit>`. The
+script fast-forwards the checkout to that commit (it must be on `origin/main`), rebuilds with
+`docker compose up -d --build`, and waits up to 180 s for the API to be healthy. Migrations are
+not deployed: apply them by hand first.
+
+One-time setup:
+1. On your PC (not on the server): `ssh-keygen -t ed25519 -f irb_deploy_ci -N ""`. Never reuse your `.pem`.
+2. On the server, add ONE line to `~/.ssh/authorized_keys`, with the contents of `irb_deploy_ci.pub` after `restrict `:
+   ```
+   command="bash /home/ubuntu/irb-watch/scripts/deploy.sh",restrict ssh-ed25519 AAAA... irb-deploy-ci
+   ```
+   `restrict` turns off shells, port forwarding and agent forwarding; `command=` forces the script.
+3. Get the server's host key: on the server, `cat /etc/ssh/ssh_host_ed25519_key.pub`, and put
+   `<EC2 address> ` in front of that line (for example `ec2-x-x-x-x.ap-northeast-2.compute.amazonaws.com ssh-ed25519 AAAA...`).
+4. GitHub, repo, Settings, Secrets and variables, Actions, add four **repository secrets**:
+   `DEPLOY_HOST` (Elastic IP or hostname, same as in step 3), `DEPLOY_USER` (`ubuntu`),
+   `DEPLOY_SSH_KEY` (the whole private key file `irb_deploy_ci`), `DEPLOY_HOST_KEY` (the line from step 3).
+   Then delete the private key file from the PC or keep it only in a password manager.
+5. **Port 22.** GitHub's runners use changing addresses, so the "SSH only from My IP" rule must be
+   widened to `0.0.0.0/0` for this to work. Password logins are off by default on Ubuntu EC2, and
+   this key cannot open a shell, but the port is then open to the internet: expect scanning noise in
+   the logs. Your own `.pem` stays the only key that opens a shell.
+6. In GitHub, Settings, Branches, protect `main` (require the `test` check) if other people can push.
+
+Notes:
+- A deploy restarts the API container. A scan running at that moment dies; its lock clears after
+  30 minutes. Avoid pushing around 06:00 Asia/Seoul.
+- The server's `.env` is never touched; it stays only on the server.
+- Roll back: push a revert commit (the script only moves forward).
+
 ## 8. Security notes
 - SSH only from your IP (update the rule when your home IP changes). Never open port 8000.
 - `.env` has mode 600 and is not in the repository. The `.pem` key file stays on your PC.
