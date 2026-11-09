@@ -28,7 +28,7 @@ class Source:
     last_scan_status: str | None = None
     last_scan_error: str | None = None
     scan_started_at: str | None = None
-    # Members-only board: readable only by admins and by subscribers who proved access.
+    # Members-only board: readable only by admins and by users who proved access.
     requires_login: bool = False
     # Set after a rejected login. Scheduled scans skip the source until a person scans it.
     scans_paused_reason: str | None = None

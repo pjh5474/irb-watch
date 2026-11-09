@@ -61,7 +61,7 @@ def make(**kw):
     return service, repo, signer, audit
 
 
-def test_follower_gets_a_60_second_link_with_the_original_filename():
+def test_reader_gets_a_60_second_link_with_the_original_filename():
     service, _, signer, audit = make()
     link = service.download_link("user-1", 10)
     assert link.expires_at == NOW + timedelta(seconds=60)

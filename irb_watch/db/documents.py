@@ -316,19 +316,9 @@ def build_commit_documents(loaded: LoadedStore) -> list[dict]:
 def user_may_read(client: Client, user_id: str, source_id: int, now: datetime) -> bool:
     """Server-side twin of the database rule private.can_read_source (for non-admins).
 
-    Subscribed, and for a members-only source also holding an unexpired proof of access.
+    Any existing source is readable; a members-only source also needs an unexpired proof
+    of access.
     """
-    subscribed = (
-        client.table("subscriptions")
-        .select("user_id")
-        .eq("user_id", user_id)
-        .eq("source_id", source_id)
-        .limit(1)
-        .execute()
-        .data
-    )
-    if not subscribed:
-        return False
     source = client.table("sources").select("requires_login").eq("id", source_id).execute().data
     if not source:
         return False

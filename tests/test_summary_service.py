@@ -30,7 +30,6 @@ class FakeSummaryRepo:
                 None,
             )
         }
-        self.subscriptions = {("user-1", 1)}
         self.members_only: set[int] = set()  # source ids that require a proof of access
         self.access: dict[tuple[str, int], datetime] = {}  # (user, source) -> expires_at
         self.requests: list[tuple[str, datetime]] = []
@@ -40,8 +39,6 @@ class FakeSummaryRepo:
         return self.docs.get(document_id)
 
     def may_read(self, user_id, source_id, now):
-        if (user_id, source_id) not in self.subscriptions:
-            return False
         if source_id not in self.members_only:
             return True
         expires = self.access.get((user_id, source_id))
@@ -73,7 +70,7 @@ def env():
     return service, repo, audit, ai, users
 
 
-def test_subscriber_gets_a_fresh_summary_then_a_cached_one(env):
+def test_any_user_gets_a_fresh_summary_then_a_cached_one(env):
     service, repo, audit, ai, _ = env
     first = service.summarize_document("user-1", 10)
     assert (first.summary, first.cached, first.version_no) == ("Whole document summary.", False, 2)
@@ -91,16 +88,15 @@ def test_the_whole_document_text_is_sent(env):
     assert kind == "document" and "page text" in text and "file text" in text and not truncated
 
 
-def test_non_subscriber_sees_not_found(env):
+def test_user_without_any_subscription_reads_a_public_source(env):
     service, *_ = env
-    with pytest.raises(NotFoundError):
-        service.summarize_document("other", 10)
+    assert service.summarize_document("other", 10).summary == "Whole document summary."
 
 
-def test_members_only_source_needs_a_valid_proof_of_access_on_top_of_following(env):
+def test_members_only_source_needs_a_valid_proof_of_access(env):
     service, repo, _, _, _ = env
     repo.members_only.add(1)
-    with pytest.raises(NotFoundError):  # follows the source but never proved access
+    with pytest.raises(NotFoundError):  # never proved access
         service.summarize_document("user-1", 10)
     repo.access[("user-1", 1)] = NOW - timedelta(seconds=1)
     with pytest.raises(NotFoundError):  # proof expired
@@ -109,12 +105,12 @@ def test_members_only_source_needs_a_valid_proof_of_access_on_top_of_following(e
     assert service.summarize_document("user-1", 10).summary == "Whole document summary."
 
 
-def test_proof_of_access_alone_does_not_replace_following(env):
+def test_proof_of_one_user_does_not_open_the_source_for_another(env):
     service, repo, _, _, _ = env
     repo.members_only.add(1)
-    repo.access[("other", 1)] = NOW + timedelta(days=1)  # proved access but does not follow
+    repo.access[("other", 1)] = NOW + timedelta(days=1)
     with pytest.raises(NotFoundError):
-        service.summarize_document("other", 10)
+        service.summarize_document("user-1", 10)
 
 
 def test_admin_reads_members_only_documents_without_a_proof(env):
@@ -201,7 +197,7 @@ def test_endpoint_returns_the_summary_then_the_cached_copy(client):
 
 @pytest.mark.parametrize(
     "user, document, status",
-    [("other", 10, 404), ("user-1", 999, 404), ("gone", 10, 403)],
+    [("user-1", 999, 404), ("gone", 10, 403)],
 )
 def test_endpoint_status_codes(client, user, document, status):
     assert client.post(f"/documents/{document}/summary", headers=auth(user)).status_code == status

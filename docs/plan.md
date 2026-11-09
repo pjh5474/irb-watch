@@ -68,6 +68,7 @@ irb-watch/
 - The CLI labels this project "production". It is the only project and has no real data yet.
 
 ## Open items
+- No-subscription access rule (2026-11-09): migration `20261108235959_drop_subscription_requirement.sql` written, dry-run and apply pending the owner's go; then run the rolled-back impersonation test (user without subscription: public yes, members-only without proof no, with proof yes, expired no, admin yes). Frontend must stop relying on subscriptions.
 - File download links are built and checked live for the signer (real stored file: 200, hash matches, filename header set; the same object without a link and an expired link both answer 400). The endpoint itself has only run with fakes; it has not been called with a real user's login token.
 - Login-only boards (board `2605277031` on hrpp.snuh.org): login and read verified live read-only on 2026-11-06. Not yet done: a scan that writes to the DB for this source, attachment download with a session, wrong-password behaviour on the real site, and the per-user access rule (see decisions.md "Access to login-only content", needs a migration). Server-side credential storage is Windows-only for now (`keyring`); a hosted server needs an encrypted DB store behind `CredentialStore`.
 - The site returns intermittent `502` (seen on `robots.txt` and the login form). Retry rules are built (see decisions.md "Temporary site errors"); not yet exercised against the real site during an actual outage.

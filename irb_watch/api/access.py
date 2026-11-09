@@ -27,7 +27,7 @@ def prove_access(
     """Prove with your OWN hospital login that you may read a members-only source.
 
     The password is used once, in memory, and never stored or logged. Access then lasts
-    30 days. Follow the source separately (subscribe) to see it.
+    30 days.
     """
     expires = service.prove_access(
         user.id, source_id, body.login_id, body.password.get_secret_value()

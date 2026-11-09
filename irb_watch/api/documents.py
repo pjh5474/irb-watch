@@ -20,6 +20,6 @@ def summarize_document(
     user: AuthUser = Depends(current_user),
     service: SummaryService = Depends(get_summary_service),
 ) -> SummaryOut:
-    """Summary of the whole current document. For subscribers of its source and admins."""
+    """Summary of the whole current document. For users who may read its source, and admins."""
     result = service.summarize_document(user.id, document_id)
     return SummaryOut(summary=result.summary, cached=result.cached, version_no=result.version_no)

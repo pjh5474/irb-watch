@@ -144,12 +144,11 @@ def test_scan_real_board_end_to_end():
         status = client.table("sources").select("*").eq("id", source.id).execute().data[0]
         assert status["last_scan_status"] == "ok" and status["scan_started_at"] is None
 
-        # 4. A subscribed user asks for a summary of the whole document: generated once,
+        # 4. A signed-in user asks for a summary of the whole document: generated once,
         #    then served from the cache; the request is counted once.
         users = UserService(SupabaseUserStore(client), auth, audit)
         user = users.create_user(None, f"irbwatch-live-{uuid.uuid4().hex[:8]}@example.com", "temporary-pass-1")
         user_id = user.id
-        client.table("subscriptions").insert({"user_id": user_id, "source_id": source.id}).execute()
         summaries = SummaryService(
             SupabaseUserStore(client),
             SupabaseSummaryRepo(client),

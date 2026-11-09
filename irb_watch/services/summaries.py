@@ -1,7 +1,7 @@
 """Summary of a whole document, requested by a signed-in user.
 
-Rules: the user must be active and may read the document's source (subscribed, plus a valid
-proof of access for members-only sources) or be an admin;
+Rules: the user must be active and may read the document's source (a valid proof of access
+for members-only sources) or be an admin;
 a cached summary is returned for free; a new one counts toward a per-user daily limit.
 Documents the user may not see answer "not found", so their existence is not revealed.
 """
@@ -72,8 +72,8 @@ class SummaryService:
         doc = self._repo.get_latest(document_id)
         if doc is None:
             raise NotFoundError("document not found")
-        # Same rule as the database policies: followers of a members-only source also
-        # need an unexpired proof of access.
+        # Same rule as the database policies: a members-only source needs an unexpired
+        # proof of access.
         if profile.role != "admin" and not self._repo.may_read(user_id, doc.source_id, now):
             raise NotFoundError("document not found")
 
