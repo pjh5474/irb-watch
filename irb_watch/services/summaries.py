@@ -1,7 +1,7 @@
 """Summary of a whole document, requested by a signed-in user.
 
-Rules: the user must be active and may read the document's source (a valid proof of access
-for members-only sources) or be an admin;
+Rules: the user must be active and may read the document's source (members-only sources
+only for users an admin assigned to them) or be an admin;
 a cached summary is returned for free; a new one counts toward a per-user daily limit.
 Documents the user may not see answer "not found", so their existence is not revealed.
 Admins can also write the summary again (regenerate_document), exempt from the limit.
@@ -24,6 +24,8 @@ from irb_watch.services.errors import (
 )
 from irb_watch.services.users import AuditSink, UserStore, active_profile
 
+AI_OFF_FOR_SOURCE = "AI summaries are switched off for this source"
+
 
 @dataclass(frozen=True)
 class DocumentForSummary:
@@ -34,6 +36,8 @@ class DocumentForSummary:
     content: VersionContent
     document_summary: str | None
     summary_at: str | None = None  # when document_summary was saved (ISO text), if known
+    # False: an admin switched AI off for this source (study documents may be confidential).
+    ai_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -82,14 +86,16 @@ class SummaryService:
         doc = self._repo.get_latest(document_id)
         if doc is None:
             raise NotFoundError("document not found")
-        # Same rule as the database policies: a members-only source needs an unexpired
-        # proof of access.
+        # Same rule as the database policies: a members-only source is readable only by
+        # users an admin assigned to it.
         if profile.role != "admin" and not self._repo.may_read(user_id, doc.source_id, now):
             raise NotFoundError("document not found")
 
         if doc.document_summary:
             return SummaryResult(doc.document_summary, True, doc.version_no)
 
+        if not doc.ai_enabled:
+            raise UnavailableError(AI_OFF_FOR_SOURCE)
         if self._summarizer is None:
             raise UnavailableError("AI summaries are not switched on for this server")
 
@@ -137,6 +143,8 @@ class SummaryService:
         doc = self._repo.get_latest(document_id)
         if doc is None:
             raise NotFoundError("document not found")
+        if not doc.ai_enabled:
+            raise UnavailableError(AI_OFF_FOR_SOURCE)
 
         digest = document_digest(doc.content)
         try:

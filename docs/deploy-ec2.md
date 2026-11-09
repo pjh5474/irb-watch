@@ -54,7 +54,6 @@ Fill in, copying values from your own env file on the PC:
 - `FRONTEND_ORIGINS` = your frontend address, exactly, with no trailing slash
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `TYPESAFE_API_KEY` (AI parts stay off without them)
 - `CREDENTIALS_KEY` = **the same key** that encrypted the stored login, or the login cannot be read
-- `ACCESS_ID_HASH_KEY` (keep the same value as on the PC so counts stay consistent)
 - `API_DOMAIN=irb-api.warwarsn.online`
 - `SCHEDULER_ENABLED=true` (the default in the compose file)
 Do not paste these values into chats or tickets. Keep a safe backup of `CREDENTIALS_KEY` somewhere other than the server.

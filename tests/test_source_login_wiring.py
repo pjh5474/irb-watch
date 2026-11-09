@@ -70,6 +70,53 @@ def test_login_user_makes_the_source_members_only_and_removing_it_never_makes_it
     assert cleared.requires_login is True  # data already scanned stays protected
 
 
+# ---- studies: AI switch and one board for several accounts ------------------------------------
+
+
+def test_ai_is_off_by_default_for_a_members_only_source_and_on_for_a_public_one():
+    service = make_sources()
+    assert service.create("a", "Public", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=1").ai_enabled
+    assert service.create("a", "Study", URL, login_user="study-1").ai_enabled is False
+
+
+def test_ai_can_be_chosen_when_creating_and_changed_later():
+    service = make_sources()
+    on = service.create("a", "Study", URL, login_user="study-1", ai_enabled=True)
+    assert on.ai_enabled is True
+    off = service.update("a", on.id, ai_enabled=False)
+    assert off.ai_enabled is False
+    again = service.update("a", on.id, ai_enabled=True)
+    assert again.ai_enabled is True
+
+
+def test_turning_a_public_source_members_only_switches_ai_off_unless_told_otherwise():
+    service = make_sources()
+    a = service.create("a", "A", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=1")
+    b = service.create("a", "B", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2")
+    assert service.update("a", a.id, login_user="study-1").ai_enabled is False
+    assert service.update("a", b.id, login_user="study-2", ai_enabled=True).ai_enabled is True
+
+
+def test_the_same_board_may_be_registered_for_different_accounts_but_not_twice():
+    from irb_watch.services.errors import ConflictError
+
+    service = make_sources()
+    service.create("a", "Study 1", URL, login_user="study-1")
+    service.create("a", "Study 2", URL, login_user="study-2")  # same board, other account
+    with pytest.raises(ConflictError, match="already registered"):
+        service.create("a", "Study 1 again", URL, login_user="study-1")
+
+
+def test_removing_a_login_that_would_duplicate_another_source_is_refused():
+    from irb_watch.services.errors import ConflictError
+
+    service = make_sources()
+    service.create("a", "Public", URL)
+    study = service.create("a", "Study", URL, login_user="study-1")
+    with pytest.raises(ConflictError):
+        service.update("a", study.id, login_user="")
+
+
 # ---- cookies_for_source ------------------------------------------------------------------
 
 

@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from irb_watch.ai.enrich import Enricher, Enrichment
+from irb_watch.ai.templates import template_summary
 from irb_watch.core.detect import (
     ChangeEvent,
     DocumentStore,
@@ -257,13 +258,18 @@ class ScanService:
         )
         # Summaries, priority and category are decided before saving, so a version and its
         # news card are written together (the audit log cannot be edited afterwards).
-        enrichments = self._enricher.enrich(result.events, loaded.store) if self._enricher else {}
+        # A source with AI switched off (a study: its documents may be confidential) sends
+        # nothing to the AI services; its cards get the plain template line instead.
+        use_ai = self._enricher is not None and source.ai_enabled
+        enrichments = self._enricher.enrich(result.events, loaded.store) if use_ai else {}
         seen = {o.external_id for o in reading.observations}
 
         # Everything below is saved in ONE transaction by commit_scan: documents, versions,
         # files, these news cards and the scan result. Any failure saves nothing.
         cards = [
-            self._event_card(event, actor_id, enrichments.get(event.external_id))
+            self._event_card(
+                event, actor_id, enrichments.get(event.external_id), plain=not source.ai_enabled
+            )
             for event in result.events
         ]
 
@@ -321,7 +327,11 @@ class ScanService:
         return summary
 
     def _event_card(
-        self, event: ChangeEvent, actor_id: str | None, enrichment: Enrichment | None
+        self,
+        event: ChangeEvent,
+        actor_id: str | None,
+        enrichment: Enrichment | None,
+        plain: bool = False,
     ) -> "ScanCard":
         detail = event.detail
         payload: dict = {"version_no": event.version_no}
@@ -338,6 +348,10 @@ class ScanService:
             payload["summary_source"] = enrichment.source
             if enrichment.note:
                 payload["ai_note"] = enrichment.note
+        elif plain and detail is not None:
+            # AI is off for this source: a factual template line, no text leaves the server.
+            summary = template_summary(detail, event.title)
+            payload["summary_source"] = "template"
         return ScanCard(
             "document",
             f"document.{event.kind}",

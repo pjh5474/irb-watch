@@ -22,8 +22,9 @@ class SourceOut(BaseModel):
     last_scan_error: str | None
     scan_in_progress: bool
     login_user: str | None = None  # whose stored login this source scans with
-    requires_login: bool = False  # members-only: users must prove access to read it
+    requires_login: bool = False  # members-only (a study): readable only by assigned users
     scans_paused_reason: str | None = None  # why daily scans skip this source, if they do
+    ai_enabled: bool = True  # False: no text of this source goes to the AI services
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -42,6 +43,7 @@ class SourceOut(BaseModel):
             login_user=s.config.get("login_user"),
             requires_login=s.requires_login,
             scans_paused_reason=s.scans_paused_reason,
+            ai_enabled=s.ai_enabled,
         )
 
 
@@ -49,12 +51,15 @@ class CreateSourceIn(BaseModel):
     name: str
     url: str
     login_user: str | None = None
+    # Default: off for a members-only source (login_user set), on for a public one.
+    ai_enabled: bool | None = None
 
 
 class UpdateSourceIn(BaseModel):
     name: str | None = None
     is_active: bool | None = None
     login_user: str | None = None  # "" removes the login
+    ai_enabled: bool | None = None
 
 
 @router.post("", status_code=201, response_model=SourceOut)
@@ -63,7 +68,9 @@ def create_source(
     admin: AuthUser = Depends(require_admin),
     service: SourceService = Depends(get_source_service),
 ) -> SourceOut:
-    return SourceOut.from_source(service.create(admin.id, body.name, body.url, body.login_user))
+    return SourceOut.from_source(
+        service.create(admin.id, body.name, body.url, body.login_user, body.ai_enabled)
+    )
 
 
 @router.get("", response_model=list[SourceOut])
@@ -82,7 +89,9 @@ def update_source(
     service: SourceService = Depends(get_source_service),
 ) -> SourceOut:
     return SourceOut.from_source(
-        service.update(admin.id, source_id, body.name, body.is_active, body.login_user)
+        service.update(
+            admin.id, source_id, body.name, body.is_active, body.login_user, body.ai_enabled
+        )
     )
 
 

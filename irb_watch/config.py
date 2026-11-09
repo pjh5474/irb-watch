@@ -56,17 +56,6 @@ class Settings(BaseSettings):
     credential_store: Literal["keyring", "database"] = "keyring"
     credentials_key: str = ""
 
-    # Proof of access to a members-only board: how long it lasts, and how many login
-    # checks one user may start per hour (protects hospital accounts from lockout).
-    access_ttl_days: int = 30
-    access_attempts_per_hour: int = 5
-    # Failed hospital logins one hospital ID may have per hour through this server, whoever
-    # types it (stops several users from locking one hospital account together). The ID is
-    # logged only as an HMAC with ACCESS_ID_HASH_KEY, a random secret you set yourself:
-    # python -c "import secrets; print(secrets.token_hex(32))". Empty = access checks refuse.
-    access_id_failures_per_hour: int = 3
-    access_id_hash_key: str = ""
-
     # The daily scan: off unless SCHEDULER_ENABLED=true (tests and local runs stay quiet).
     scheduler_enabled: bool = False
     scan_cron: str = "0 6 * * *"

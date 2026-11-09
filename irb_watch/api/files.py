@@ -23,7 +23,8 @@ def create_download_link(
     """Short-lived link to the original of one stored file (any version).
 
     `file_id` is `document_version_files.id`. Needs the same access as reading the
-    document: any signed-in user (plus a valid proof of access for members-only sources) and admins.
+    document: any signed-in user for public sources, assigned members for members-only
+    sources (studies), and admins.
     Each request is logged and counted toward a daily cap.
     """
     link = service.download_link(user.id, file_id)

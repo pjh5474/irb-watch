@@ -42,8 +42,12 @@ class FakeSourceStore:
     def __init__(self) -> None:
         self.sources: dict[int, Source] = {}
 
-    def create(self, name, adapter, url, config, created_by, requires_login=False):
-        if any(s.url == url for s in self.sources.values()):
+    def create(
+        self, name, adapter, url, config, created_by, requires_login=False, ai_enabled=True
+    ):
+        # Same rule as the database's unique index: one url per login label.
+        key = (url, config.get("login_user", ""))
+        if any((s.url, s.config.get("login_user", "")) == key for s in self.sources.values()):
             raise DuplicateSourceError
         source = make_source(
             len(self.sources) + 1,
@@ -52,6 +56,7 @@ class FakeSourceStore:
             url=url,
             config=config,
             requires_login=requires_login,
+            ai_enabled=ai_enabled,
         )
         self.sources[source.id] = source
         return source
@@ -63,8 +68,15 @@ class FakeSourceStore:
         return list(self.sources.values())
 
     def update(self, source_id, values):
-        self.sources[source_id] = replace(self.sources[source_id], **values)
-        return self.sources[source_id]
+        updated = replace(self.sources[source_id], **values)
+        key = (updated.url, updated.config.get("login_user", ""))
+        if any(
+            s.id != source_id and (s.url, s.config.get("login_user", "")) == key
+            for s in self.sources.values()
+        ):
+            raise DuplicateSourceError
+        self.sources[source_id] = updated
+        return updated
 
 
 class FakeScanRepo:

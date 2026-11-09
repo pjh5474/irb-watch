@@ -38,6 +38,7 @@ def _source(row: dict) -> Source:
         scan_started_at=row.get("scan_started_at"),
         requires_login=bool(row.get("requires_login", False)),
         scans_paused_reason=row.get("scans_paused_reason"),
+        ai_enabled=bool(row.get("ai_enabled", True)),
     )
 
 
@@ -45,7 +46,9 @@ class SupabaseSourceStore:
     def __init__(self, client: Client) -> None:
         self._c = client
 
-    def create(self, name, adapter, url, config, created_by, requires_login=False) -> Source:
+    def create(
+        self, name, adapter, url, config, created_by, requires_login=False, ai_enabled=True
+    ) -> Source:
         try:
             rows = (
                 self._c.table("sources")
@@ -57,6 +60,7 @@ class SupabaseSourceStore:
                         "config": config,
                         "created_by": created_by,
                         "requires_login": requires_login,
+                        "ai_enabled": ai_enabled,
                     }
                 )
                 .execute()
@@ -77,7 +81,12 @@ class SupabaseSourceStore:
         return [_source(r) for r in rows]
 
     def update(self, source_id: int, values: dict) -> Source:
-        rows = self._c.table("sources").update(values).eq("id", source_id).execute().data
+        try:
+            rows = self._c.table("sources").update(values).eq("id", source_id).execute().data
+        except APIError as exc:
+            if exc.code == UNIQUE_VIOLATION:  # e.g. removing the login makes it a duplicate
+                raise DuplicateSourceError from exc
+            raise
         return _source(rows[0])
 
 
@@ -316,25 +325,25 @@ def build_commit_documents(loaded: LoadedStore) -> list[dict]:
 def user_may_read(client: Client, user_id: str, source_id: int, now: datetime) -> bool:
     """Server-side twin of the database rule private.can_read_source (for non-admins).
 
-    Any existing source is readable; a members-only source also needs an unexpired proof
-    of access.
+    Any existing public source is readable; a members-only source (a study) only by users an
+    admin assigned to it (source_members). `now` is unused; it stays so the callers' shape
+    does not change.
     """
     source = client.table("sources").select("requires_login").eq("id", source_id).execute().data
     if not source:
         return False
     if not source[0]["requires_login"]:
         return True
-    proof = (
-        client.table("source_access")
+    member = (
+        client.table("source_members")
         .select("user_id")
         .eq("user_id", user_id)
         .eq("source_id", source_id)
-        .gt("expires_at", now.isoformat())
         .limit(1)
         .execute()
         .data
     )
-    return bool(proof)
+    return bool(member)
 
 
 class SupabaseSummaryRepo:
@@ -355,6 +364,16 @@ class SupabaseSummaryRepo:
         if not docs or not docs[0]["latest_version_id"]:
             return None
         doc = docs[0]
+        source_rows = (
+            self._c.table("sources")
+            .select("ai_enabled")
+            .eq("id", doc["source_id"])
+            .limit(1)
+            .execute()
+            .data
+        )
+        # A source that cannot be read here fails closed: no AI on it.
+        ai_enabled = bool(source_rows and source_rows[0]["ai_enabled"])
         version = (
             self._c.table("document_versions")
             .select("id, version_no, title, body_text, document_summary, document_summary_at")
@@ -390,6 +409,7 @@ class SupabaseSummaryRepo:
             content=VersionContent(version["title"], version["body_text"], files),
             document_summary=version["document_summary"],
             summary_at=version["document_summary_at"],
+            ai_enabled=ai_enabled,
         )
 
     def may_read(self, user_id: str, source_id: int, now: datetime) -> bool:

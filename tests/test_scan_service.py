@@ -304,6 +304,23 @@ def test_scan_without_an_enricher_still_writes_cards():
     assert card["summary"] is None and card["priority"] is None
 
 
+def test_a_source_with_ai_switched_off_sends_nothing_and_gets_a_template_line():
+    from dataclasses import replace
+
+    from tests.fakes_ai import FakeClassifier, FakeSummarizer
+
+    jev, ai = FakeClassifier(), FakeSummarizer()
+    h = ai_harness(jev, ai)
+    h.repo.sources[1] = replace(h.repo.sources[1], ai_enabled=False)
+    h.scan(make_obs("1", body="old"))
+    summary = h.scan(make_obs("1", body="new"), make_obs("2", title="Fresh"), day=1)
+    assert summary.status == "ok" and summary.updated == 1 and summary.new == 1
+    assert jev.calls == [] and ai.calls == []  # no text left the server
+    updated = cards(h)["document.updated"]
+    assert updated["summary"] and updated["payload"]["summary_source"] == "template"
+    assert "category" not in updated["payload"]  # Jev was not asked
+
+
 # ---- originals are uploaded only when the hash is new ------------------------------------
 
 

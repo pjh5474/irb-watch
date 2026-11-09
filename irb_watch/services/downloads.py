@@ -2,7 +2,7 @@
 
 The files sit in a private bucket; nobody but the server can reach them. A user asks for a
 link to one file (any version), the server applies the same read rule as everywhere else
-(admin, or any user plus a valid proof of access for members-only sources) and hands back
+(admin, or any user for public sources, or an assigned member of a members-only source) and hands back
 a signed link that works for 60 seconds. A file the user may not read answers "not found",
 so its existence is not revealed. Every link request is logged and capped per user per day.
 """

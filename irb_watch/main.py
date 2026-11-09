@@ -5,9 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from irb_watch.api import (
-    access,
     admin_credentials,
     admin_documents,
+    admin_members,
     admin_scans,
     admin_sources,
     admin_users,
@@ -43,7 +43,7 @@ app = FastAPI(title="IRB Watch", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().frontend_origin_list,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -59,6 +59,6 @@ app.include_router(admin_sources.router)
 app.include_router(admin_scans.router)
 app.include_router(admin_credentials.router)
 app.include_router(admin_documents.router)
+app.include_router(admin_members.router)
 app.include_router(documents.router)
-app.include_router(access.router)
 app.include_router(files.router)

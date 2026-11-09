@@ -30,8 +30,8 @@ class FakeSummaryRepo:
                 None,
             )
         }
-        self.members_only: set[int] = set()  # source ids that require a proof of access
-        self.access: dict[tuple[str, int], datetime] = {}  # (user, source) -> expires_at
+        self.members_only: set[int] = set()  # source ids readable only by assigned members
+        self.members: set[tuple[str, int]] = set()  # (user, source) an admin assigned
         self.requests: list[tuple[str, datetime]] = []
         self.saved: dict[int, str] = {}
 
@@ -39,10 +39,7 @@ class FakeSummaryRepo:
         return self.docs.get(document_id)
 
     def may_read(self, user_id, source_id, now):
-        if source_id not in self.members_only:
-            return True
-        expires = self.access.get((user_id, source_id))
-        return expires is not None and expires > now
+        return source_id not in self.members_only or (user_id, source_id) in self.members
 
     def count_requests_since(self, user_id, since):
         return sum(1 for u, at in self.requests if u == user_id and at >= since)
@@ -93,27 +90,25 @@ def test_user_without_any_subscription_reads_a_public_source(env):
     assert service.summarize_document("other", 10).summary == "Whole document summary."
 
 
-def test_members_only_source_needs_a_valid_proof_of_access(env):
-    service, repo, _, _, _ = env
+def test_members_only_source_is_for_assigned_members_only(env):
+    service, repo, _, ai, _ = env
     repo.members_only.add(1)
-    with pytest.raises(NotFoundError):  # never proved access
+    with pytest.raises(NotFoundError):  # not assigned: the document's existence is not revealed
         service.summarize_document("user-1", 10)
-    repo.access[("user-1", 1)] = NOW - timedelta(seconds=1)
-    with pytest.raises(NotFoundError):  # proof expired
-        service.summarize_document("user-1", 10)
-    repo.access[("user-1", 1)] = NOW + timedelta(days=1)
+    assert ai.calls == []
+    repo.members.add(("user-1", 1))
     assert service.summarize_document("user-1", 10).summary == "Whole document summary."
 
 
-def test_proof_of_one_user_does_not_open_the_source_for_another(env):
+def test_another_users_assignment_does_not_open_the_source(env):
     service, repo, _, _, _ = env
     repo.members_only.add(1)
-    repo.access[("other", 1)] = NOW + timedelta(days=1)
+    repo.members.add(("other", 1))
     with pytest.raises(NotFoundError):
         service.summarize_document("user-1", 10)
 
 
-def test_admin_reads_members_only_documents_without_a_proof(env):
+def test_admin_reads_members_only_documents_without_being_assigned(env):
     service, repo, _, _, _ = env
     repo.members_only.add(1)
     assert service.summarize_document("admin-1", 10).summary == "Whole document summary."
@@ -166,6 +161,40 @@ def test_switched_off_when_no_summarizer(env):
     service = SummaryService(users, repo, None, audit, 2, clock=lambda: NOW)
     with pytest.raises(UnavailableError):
         service.summarize_document("user-1", 10)
+
+
+# ---- sources with AI switched off ---------------------------------------------------------
+
+
+def switch_ai_off(repo):
+    from dataclasses import replace
+
+    repo.docs[10] = replace(repo.docs[10], ai_enabled=False)
+
+
+def test_ai_off_for_the_source_refuses_a_new_summary_and_calls_nothing(env):
+    service, repo, _, ai, _ = env
+    switch_ai_off(repo)
+    with pytest.raises(UnavailableError, match="switched off for this source"):
+        service.summarize_document("user-1", 10)
+    assert ai.calls == [] and repo.saved == {} and repo.requests == []
+
+
+def test_ai_off_still_serves_a_summary_that_was_saved_before(env):
+    from dataclasses import replace
+
+    service, repo, _, ai, _ = env
+    repo.docs[10] = replace(repo.docs[10], document_summary="Saved earlier.", ai_enabled=False)
+    out = service.summarize_document("user-1", 10)
+    assert (out.summary, out.cached) == ("Saved earlier.", True) and ai.calls == []
+
+
+def test_ai_off_also_refuses_the_admin_re_summarize(env):
+    service, repo, _, ai, _ = env
+    switch_ai_off(repo)
+    with pytest.raises(UnavailableError, match="switched off for this source"):
+        service.regenerate_document("admin-1", 10)
+    assert ai.calls == [] and repo.saved == {}
 
 
 # ---- admin: regenerate -----------------------------------------------------------------
