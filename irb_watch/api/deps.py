@@ -6,15 +6,17 @@ from datetime import datetime
 from functools import lru_cache
 
 from fastapi import Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import OAuth2PasswordBearer
 
-from irb_watch.ai.factory import build_enricher, build_summarizer
+from irb_watch.ai.factory import build_agent_model, build_enricher, build_summarizer
 from irb_watch.auth.jwt import AuthUnavailableError, AuthUser, InvalidTokenError, TokenVerifier
+from irb_watch.auth.password_login import SupabasePasswordLogin
 from irb_watch.config import get_settings
 from irb_watch.crawlers.credentials import CredentialStore, KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
+from irb_watch.db.agent import SupabaseAgentData, SupabaseAgentStore
 from irb_watch.db.alerts import SupabaseAlertStore
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.credentials import DatabaseCredentialStore
@@ -30,6 +32,7 @@ from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
+from irb_watch.services.agent import AgentService
 from irb_watch.services.alerts import AlertService
 from irb_watch.services.digest import DigestService
 from irb_watch.services.downloads import DownloadService
@@ -40,12 +43,15 @@ from irb_watch.services.scan import ScanService, SourceReader
 from irb_watch.services.source_login import cookies_for_source
 from irb_watch.services.sources import Source, SourceService
 from irb_watch.services.summaries import SummaryService
+from irb_watch.services.token_login import FailureLimiter, TokenLoginService
 from irb_watch.services.users import UserService, UserStore
 from irb_watch.services.weekly import WeeklyStatsService
 
 log = logging.getLogger(__name__)
 
-_bearer = HTTPBearer(auto_error=False)
+# The docs page's Authorize button logs in through POST /auth/token (an OAuth2 password flow) and
+# then sends "Authorization: Bearer <token>", the same header every client already uses.
+_bearer = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
 
 @lru_cache
@@ -244,14 +250,47 @@ def get_summary_service() -> SummaryService:
     )
 
 
+def get_agent_service() -> AgentService:
+    """The assistant. Without OPENAI_API_KEY and OPENAI_MODEL it is built without a model and
+    answers 503; the rest of the API is unaffected."""
+    client = get_supabase_client()
+    return AgentService(
+        SupabaseUserStore(client),
+        SupabaseAgentStore(client),
+        SupabaseAgentData(client),
+        build_agent_model(),
+        SupabaseAuditSink(client),
+    )
+
+
+@lru_cache
+def _failure_limiter() -> FailureLimiter:
+    """One limiter per process, so wrong-password counts survive between requests."""
+    return FailureLimiter()
+
+
+def get_token_login_service() -> TokenLoginService:
+    """Sign in by email and password for POST /auth/token. Without SUPABASE_PUBLISHABLE_KEY it is
+    built without a login and answers 503."""
+    settings = get_settings()
+    key = settings.supabase_publishable_key.strip()
+    login = SupabasePasswordLogin(settings.supabase_url, key) if key else None
+    return TokenLoginService(
+        login,
+        SupabaseUserStore(get_supabase_client()),
+        SupabaseAuditSink(get_supabase_client()),
+        _failure_limiter(),
+    )
+
+
 def current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    token: str | None = Depends(_bearer),
     verifier: TokenVerifier = Depends(get_verifier),
 ) -> AuthUser:
-    if credentials is None:
+    if token is None:
         raise HTTPException(401, "missing bearer token", headers={"WWW-Authenticate": "Bearer"})
     try:
-        return verifier.verify(credentials.credentials)
+        return verifier.verify(token)
     except InvalidTokenError as exc:
         raise HTTPException(
             401, "invalid or expired token", headers={"WWW-Authenticate": "Bearer"}

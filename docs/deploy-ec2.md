@@ -183,6 +183,9 @@ them `/irb-watch/prod/<SETTING>`, for example `/irb-watch/prod/OPENAI_API_KEY`. 
 (`SUPABASE_URL`, `FRONTEND_ORIGINS`, `APP_URL`, `MAIL_FROM`, `OPENAI_MODEL`, `API_DOMAIN`,
 `SCHEDULER_ENABLED`, ...). The names are exactly the names in `.env.example`.
 Copy the real values from the current server `.env` once; never paste them into chats.
+To use the login behind the Authorize button of `/docs`, also add `SUPABASE_PUBLISHABLE_KEY`
+(`String`; it is the project's publishable key from Supabase, Project Settings, API Keys. It is
+the same public key the frontend already has as `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`).
 
 **2. Give the server permission.** IAM, Roles, create a role for EC2 (trusted entity: EC2) with
 this inline policy, then attach the role to the instance (EC2, Actions, Security, Modify IAM

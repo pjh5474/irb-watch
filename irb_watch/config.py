@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""
+    # The project's publishable (public) key. Only used by POST /auth/token, the login behind the
+    # Authorize button of the API docs page. Empty = that endpoint answers 503.
+    supabase_publishable_key: str = ""
 
     # Comma-separated browser origins allowed to call this API (CORS).
     frontend_origins: str = "http://localhost:3000"

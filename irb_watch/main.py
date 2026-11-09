@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from irb_watch.api import (
+    admin_agent,
     admin_credentials,
     admin_documents,
     admin_mail,
@@ -12,6 +13,8 @@ from irb_watch.api import (
     admin_scans,
     admin_sources,
     admin_users,
+    agent,
+    auth_token,
     documents,
     files,
     health,
@@ -38,6 +41,8 @@ async def lifespan(_: FastAPI):
             # The weekly stats mail only exists when mail is set up.
             weekly=weekly.send_scheduled if weekly.enabled else None,
             weekly_cron=settings.weekly_stats_cron,
+            # Old assistant conversations are deleted after 30 days (needs no model or mail).
+            purge_chats=deps.get_agent_service().purge_old,
         )
         deps.retry_hook[0] = scheduler.schedule_retry
         scheduler.start()
@@ -60,10 +65,15 @@ app.add_middleware(
 
 @app.exception_handler(ServiceError)
 async def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message},
+        headers=getattr(exc, "headers", None),
+    )
 
 
 app.include_router(health.router)
+app.include_router(auth_token.router)
 app.include_router(admin_users.router)
 app.include_router(admin_sources.router)
 app.include_router(admin_scans.router)
@@ -71,6 +81,8 @@ app.include_router(admin_credentials.router)
 app.include_router(admin_documents.router)
 app.include_router(admin_members.router)
 app.include_router(admin_mail.router)
+app.include_router(admin_agent.router)
+app.include_router(agent.router)
 app.include_router(documents.router)
 app.include_router(files.router)
 app.include_router(unsubscribe.router)

@@ -207,6 +207,21 @@ def test_the_weekly_job_is_registered_only_when_given():
         without.stop()
 
 
+def test_the_chat_purge_job_is_registered_only_when_given():
+    with_purge = ScanScheduler(StubRunner(), "0 6 * * *", "Asia/Seoul", purge_chats=lambda: 0)
+    with_purge.start()
+    try:
+        assert "chat-purge" in with_purge.job_ids()
+    finally:
+        with_purge.stop()
+    without = ScanScheduler(StubRunner(), "0 6 * * *", "Asia/Seoul")
+    without.start()
+    try:
+        assert "chat-purge" not in without.job_ids()
+    finally:
+        without.stop()
+
+
 def test_the_default_weekly_time_is_monday_0700_in_seoul():
     from irb_watch.config import Settings
 

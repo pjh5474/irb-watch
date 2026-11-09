@@ -4,6 +4,7 @@ the rest of the API keep working without it."""
 import logging
 from functools import lru_cache
 
+from irb_watch.agent.openai_model import OpenAIAgentModel
 from irb_watch.ai.enrich import Enricher
 from irb_watch.ai.jev import JevClassifier
 from irb_watch.ai.openai_summarizer import OpenAISummarizer
@@ -32,6 +33,19 @@ def _classifier(api_key: str, model: str, timeout: float) -> Classifier | None:
 def build_summarizer(settings: Settings | None = None) -> Summarizer | None:
     s = settings or get_settings()
     return _summarizer(s.openai_api_key, s.openai_model, s.openai_base_url, s.openai_timeout_seconds)
+
+
+@lru_cache
+def _agent_model(api_key: str, model: str, base_url: str, timeout: float) -> OpenAIAgentModel | None:
+    if not api_key or not model:
+        log.warning("The assistant is off: set OPENAI_API_KEY and OPENAI_MODEL to enable it")
+        return None
+    return OpenAIAgentModel(api_key, model, base_url or None, max(timeout, 90.0))
+
+
+def build_agent_model(settings: Settings | None = None) -> OpenAIAgentModel | None:
+    s = settings or get_settings()
+    return _agent_model(s.openai_api_key, s.openai_model, s.openai_base_url, s.openai_timeout_seconds)
 
 
 def build_classifier(settings: Settings | None = None) -> Classifier | None:

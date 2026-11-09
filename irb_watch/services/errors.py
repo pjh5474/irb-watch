@@ -7,6 +7,15 @@ class ServiceError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+        self.headers: dict[str, str] | None = None  # extra response headers, if any
+
+
+class UnauthorizedError(ServiceError):
+    status_code = 401
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.headers = {"WWW-Authenticate": "Bearer"}
 
 
 class ForbiddenError(ServiceError):
@@ -27,6 +36,14 @@ class ValidationError(ServiceError):
 
 class TooManyRequestsError(ServiceError):
     status_code = 429
+
+
+class RateLimitedError(TooManyRequestsError):
+    """Too many wrong attempts; the answer says how long to wait."""
+
+    def __init__(self, message: str, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.headers = {"Retry-After": str(max(1, retry_after_seconds))}
 
 
 class UpstreamError(ServiceError):

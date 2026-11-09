@@ -35,12 +35,14 @@ class ScanScheduler:
         timezone: str,
         weekly: Callable[[], object] | None = None,
         weekly_cron: str = "0 7 * * mon",
+        purge_chats: Callable[[], object] | None = None,
     ) -> None:
         self._runner = runner
         self._tz = ZoneInfo(timezone)
         self._cron = cron
         self._weekly = weekly  # the weekly stats mail, if mail is set up
         self._weekly_cron = weekly_cron
+        self._purge_chats = purge_chats  # deletes assistant conversations older than 30 days
         self._scheduler = BackgroundScheduler(timezone=self._tz)
 
     def start(self) -> None:
@@ -67,6 +69,16 @@ class ScanScheduler:
                 self._weekly,
                 CronTrigger.from_crontab(self._weekly_cron, timezone=self._tz),
                 id="weekly-stats",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=MISFIRE_GRACE_SECONDS,
+                replace_existing=True,
+            )
+        if self._purge_chats is not None:
+            self._scheduler.add_job(
+                self._purge_chats,
+                CronTrigger(hour=3, minute=30, timezone=self._tz),
+                id="chat-purge",
                 max_instances=1,
                 coalesce=True,
                 misfire_grace_time=MISFIRE_GRACE_SECONDS,
