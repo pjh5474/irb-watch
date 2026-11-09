@@ -148,6 +148,17 @@ result (after the 06:00 run). Off until all three settings exist.
    setting is missing, 502 with Resend's reason if the send is refused).
 Mail problems never stop a scan. Look for `mail.sent` / `mail.failed` entries in the audit log.
 
+**The daily digest for users** (new and updated documents, one mail per user per day) needs two
+more settings besides the three above, or it stays off:
+- `UNSUBSCRIBE_KEY`: a long random secret that signs the unsubscribe links. Create it on your own
+  PC, for example `python -c "import secrets; print(secrets.token_hex(32))"`, and store it as a
+  `SecureString` parameter. Do not paste it into chats. Changing it later switches every old
+  unsubscribe link off.
+- `API_DOMAIN`: the public hostname of this API (already set for Docker, for example
+  `irb-api.warwarsn.online`); the one-click unsubscribe link points at it.
+The digest runs right after the 06:00 scan report. Users switch it off in the app's settings page
+or with the link in each mail.
+
 ## 11. Settings in AWS Parameter Store (written 2026-11-09, not run yet)
 So you can change a setting in the AWS console instead of editing `.env` over SSH. The server
 reads the parameters with its own IAM role (no AWS keys on the server) and rewrites `.env`

@@ -18,6 +18,7 @@ from irb_watch.crawlers.snuh_reader import SnuhSourceReader
 from irb_watch.db.alerts import SupabaseAlertStore
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.credentials import DatabaseCredentialStore
+from irb_watch.db.digest import SupabaseDigestStore
 from irb_watch.db.documents import (
     SupabaseFileStorage,
     SupabaseScanRepo,
@@ -29,6 +30,7 @@ from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.mail.client import ResendMailer
 from irb_watch.services.alerts import AlertService
+from irb_watch.services.digest import DigestService
 from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.members import MemberService
@@ -159,22 +161,41 @@ retry_hook: list[Callable[[int, datetime], None]] = [
 ]
 
 
+def get_digest_store() -> SupabaseDigestStore:
+    return SupabaseDigestStore(get_supabase_client())
+
+
 def get_alert_service() -> AlertService:
-    """Email alarms and the daily report. Without RESEND_API_KEY, MAIL_FROM and APP_URL the
-    service is built without a mailer and does nothing."""
+    """Email alarms, the daily admin report and (when its extra settings exist) the daily digest
+    for users. Without RESEND_API_KEY, MAIL_FROM and APP_URL the service is built without a
+    mailer and does nothing."""
     client = get_supabase_client()
     settings = get_settings()
     sources = SupabaseSourceStore(client)
     on = settings.mail_enabled
+    mailer = ResendMailer(settings.resend_api_key.strip(), settings.mail_from.strip()) if on else None
+    audit = SupabaseAuditSink(client)
+    digest = None
+    if mailer is not None and settings.digest_enabled:
+        digest = DigestService(
+            SupabaseDigestStore(client),
+            mailer,
+            audit,
+            app_url=settings.app_url.strip(),
+            api_domain=settings.api_domain,
+            unsubscribe_key=settings.unsubscribe_key.strip(),
+            timezone=settings.scan_timezone,
+        )
     return AlertService(
         SupabaseAlertStore(client),
-        ResendMailer(settings.resend_api_key.strip(), settings.mail_from.strip()) if on else None,
-        SupabaseAuditSink(client),
+        mailer,
+        audit,
         sources.list,
         sources.get,
         app_url=settings.app_url.strip() if on else "",
         stale_hours=settings.alert_stale_hours,
         timezone=settings.scan_timezone,
+        digest=digest,
     )
 
 

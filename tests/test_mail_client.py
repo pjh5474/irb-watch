@@ -35,6 +35,26 @@ def test_sends_one_request_with_the_key_in_the_header_and_returns_the_id():
     assert (body["subject"], body["text"], body["html"]) == ("Subject", "text body", "<p>html body</p>")
 
 
+def test_extra_headers_are_sent_only_when_given():
+    bodies = []
+
+    def handler(request: httpx.Request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "m"})
+
+    mailer(handler).send(MAIL)
+    with_headers = Mail(
+        ("a@example.com",), "S", "t", "h",
+        (("List-Unsubscribe", "<https://x.example/u?token=t>"), ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click")),
+    )
+    mailer(handler).send(with_headers)
+    assert "headers" not in bodies[0]
+    assert bodies[1]["headers"] == {
+        "List-Unsubscribe": "<https://x.example/u?token=t>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+
+
 def test_a_timeout_or_server_error_is_retried_once_then_succeeds():
     calls, sleeps = [], []
 

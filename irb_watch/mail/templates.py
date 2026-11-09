@@ -102,6 +102,109 @@ def recovery_mail(to: tuple[str, ...], source_id: int, name: str, members_only: 
     return Mail(to, subject, text, page)
 
 
+KIND_KO = {"new": "새 문서", "updated": "수정됨", "reappeared": "다시 게시됨"}
+KIND_EN = {"new": "New", "updated": "Updated", "reappeared": "Reappeared"}
+
+
+@dataclass(frozen=True)
+class DigestItem:
+    document_id: int
+    title: str
+    kind: str  # new | updated | reappeared
+
+
+@dataclass(frozen=True)
+class DigestSource:
+    source_id: int
+    name: str
+    members_only: bool
+    count: int  # all changes of this source in the window, also the ones not listed
+    items: tuple[DigestItem, ...] = ()  # listed items; always empty for a members-only source
+
+
+def digest_mail(
+    to: tuple[str, ...],
+    day: str,
+    sources: list[DigestSource],
+    app_url: str,
+    unsubscribe_page: str,
+    unsubscribe_post: str,
+) -> Mail:
+    """The daily digest of one user. Members-only sources (studies) are shown as a count only:
+    their titles and names never go into a mail. One recipient per mail."""
+    total = sum(s.count for s in sources)
+    listed = sum(len(s.items) for s in sources)
+    more = total - listed - sum(s.count for s in sources if s.members_only)
+    settings_url = f"{app_url}/ko/settings"
+
+    def block(korean: bool) -> tuple[list[str], list[str]]:
+        kinds = KIND_KO if korean else KIND_EN
+        head = (
+            f"새 문서와 수정된 문서 ({day}): 모두 {total}건"
+            if korean
+            else f"New and updated documents ({day}): {total} in all"
+        )
+        text_lines, html_parts = [head], []
+        for s in sources:
+            label = source_label(s.source_id, s.name, s.members_only, korean=korean)
+            if s.members_only:
+                line = (
+                    f"{label}: 볼 수 있는 회원 전용 출처에 변경 {s.count}건. 앱에서 확인하세요."
+                    if korean
+                    else f"{label}: {s.count} change(s) in a members-only source you can read. Open the app to see them."
+                )
+                text_lines.append(f"- {line}")
+                html_parts.append(f"<p>{html.escape(line)}</p>")
+                continue
+            text_lines.append(f"{label} ({s.count})")
+            rows = []
+            for item in s.items:
+                url = f"{app_url}/ko/documents/{item.document_id}"
+                title = one_line(item.title, 200) or f"#{item.document_id}"
+                text_lines.append(f"- [{kinds.get(item.kind, item.kind)}] {title} {url}")
+                rows.append(
+                    f"<li>[{html.escape(kinds.get(item.kind, item.kind))}] "
+                    f'<a href="{html.escape(url, quote=True)}">{html.escape(title)}</a></li>'
+                )
+            html_parts.append(f"<p><strong>{html.escape(label)}</strong> ({s.count})</p><ul>{''.join(rows)}</ul>")
+        if more > 0:
+            tail = f"그 밖에 {more}건이 더 있습니다. 앱에서 확인하세요." if korean else f"{more} more. Open the app to see them."
+            text_lines.append(tail)
+            html_parts.append(f"<p>{html.escape(tail)}</p>")
+        return text_lines, [f"<h2 style=\"font-size:16px\">{html.escape(head)}</h2>", *html_parts]
+
+    ko_text, ko_html = block(True)
+    en_text, en_html = block(False)
+    foot_ko = "이 메일을 그만 받으려면:"
+    foot_en = "To stop these emails:"
+    text = "\n".join(
+        [
+            *ko_text, "", f"{foot_ko} {unsubscribe_page}", f"설정: {settings_url}",
+            "", "---", "",
+            *en_text, "", f"{foot_en} {unsubscribe_page}", f"Settings: {settings_url}",
+        ]
+    )
+    foot_html = (
+        f'<p style="font-size:12px;color:#666">{html.escape(foot_ko)} '
+        f'<a href="{html.escape(unsubscribe_page, quote=True)}">수신 중지 / Unsubscribe</a> · '
+        f'<a href="{html.escape(settings_url, quote=True)}">설정 / Settings</a></p>'
+    )
+    page = (
+        '<div style="font-family:sans-serif;font-size:14px;line-height:1.5;max-width:560px">'
+        + "".join(ko_html)
+        + "<hr>"
+        + "".join(en_html)
+        + foot_html
+        + "</div>"
+    )
+    subject = one_line(f"[IRB Watch] 새 문서·수정 {total}건 / {total} new or updated documents")
+    headers = (
+        ("List-Unsubscribe", f"<{unsubscribe_post}>"),
+        ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+    )
+    return Mail(to, subject, text, page, headers)
+
+
 def test_mail(to: tuple[str, ...], admin_url: str) -> Mail:
     ko = "이 메일은 IRB Watch의 메일 설정 확인용입니다. 받으셨다면 메일 발송이 정상입니다."
     en = "This mail checks the IRB Watch mail settings. If you can read it, sending works."

@@ -28,6 +28,8 @@ class Mail:
     subject: str
     text: str
     html: str
+    # Extra mail headers, for example the one-click unsubscribe headers of the daily digest.
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 class Mailer(Protocol):
@@ -78,6 +80,8 @@ class ResendMailer:
             "text": mail.text,
             "html": mail.html,
         }
+        if mail.headers:
+            payload["headers"] = dict(mail.headers)
         headers = {"Authorization": f"Bearer {self._key}"}
         problem = "mail service did not answer"
         for attempt in (1, 2):  # one retry, for a timeout or a 5xx

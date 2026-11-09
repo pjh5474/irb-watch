@@ -267,6 +267,50 @@ def test_alarm_and_report_can_both_go_out_after_the_scheduled_run():
     assert sorted(env.kinds()) == ["alarm", "daily_report"]
 
 
+# ---- the daily digest runs after the scheduled run only -------------------------------------
+
+
+class FakeDigest:
+    def __init__(self, fail=False):
+        self.calls = 0
+        self.fail = fail
+
+    def send_all(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("digest exploded")
+        return {}
+
+
+def with_digest(env, digest):
+    env.service._digest = digest
+    return env
+
+
+def test_the_digest_runs_after_the_scheduled_run_but_not_after_other_runs():
+    digest = FakeDigest()
+    env = with_digest(Env([healthy()]), digest)
+    for trigger in (MANUAL, "retry", "catch_up"):
+        env.run(trigger, scanned={1: "ok"}, summaries={1: summary(1)})
+    assert digest.calls == 0
+    env.run(SCHEDULED, scanned={1: "ok"}, summaries={1: summary(1)})
+    assert digest.calls == 1
+
+
+def test_a_failing_digest_never_breaks_the_admin_report_or_the_run():
+    digest = FakeDigest(fail=True)
+    env = with_digest(Env([healthy()]), digest)
+    env.run(SCHEDULED, scanned={1: "ok"}, summaries={1: summary(1)})  # must not raise
+    assert digest.calls == 1 and env.kinds() == ["daily_report"]
+
+
+def test_without_mail_the_digest_does_not_run_either():
+    digest = FakeDigest()
+    env = with_digest(Env([healthy()], enabled=False), digest)
+    env.run(SCHEDULED, scanned={1: "ok"}, summaries={1: summary(1)})
+    assert digest.calls == 0
+
+
 # ---- the test mail ----------------------------------------------------------------------------
 
 

@@ -1,7 +1,13 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_scan_service, get_source_service, get_user_store, get_verifier
+from irb_watch.api.deps import (
+    get_alert_service,
+    get_scan_service,
+    get_source_service,
+    get_user_store,
+    get_verifier,
+)
 from irb_watch.main import app
 from irb_watch.services.errors import ConflictError, NotFoundError
 from irb_watch.services.sources import SourceService
@@ -10,6 +16,19 @@ from tests.fakes_scan import FakeSourceStore, make_source
 from tests.test_admin_users_api import FakeVerifier
 
 URL = "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277029"
+
+
+class StubAlerts:
+    """Stands in for the mail alarms: records which sources were looked at after a scan."""
+
+    def __init__(self):
+        self.evaluated: list[int] = []
+        self.error: Exception | None = None
+
+    def evaluate_source(self, source_id):
+        if self.error:
+            raise self.error
+        self.evaluated.append(source_id)
 
 
 class StubScanService:
@@ -35,10 +54,12 @@ def api():
     users.add("user-1", "plain@example.com")
     sources = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url)
     scans = StubScanService()
+    scans.alerts = StubAlerts()
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: users
     app.dependency_overrides[get_source_service] = lambda: sources
     app.dependency_overrides[get_scan_service] = lambda: scans
+    app.dependency_overrides[get_alert_service] = lambda: scans.alerts
     yield TestClient(app), scans
     app.dependency_overrides.clear()
 
@@ -85,6 +106,19 @@ def test_scan_returns_202_and_runs_in_the_background(api):
     r = client.post("/admin/sources/1/scan", headers=ADMIN)
     assert r.status_code == 202 and r.json() == {"status": "started", "source_id": 1}
     assert scans.begun == [1] and scans.ran == [(1, "admin-1")]
+
+
+def test_after_a_manual_scan_the_source_is_checked_for_a_mail_alarm(api):
+    client, scans = api
+    client.post("/admin/sources/1/scan", headers=ADMIN)
+    assert scans.alerts.evaluated == [1]
+
+
+def test_a_failing_alarm_check_never_turns_a_good_scan_into_an_error(api):
+    client, scans = api
+    scans.alerts.error = RuntimeError("mail service exploded")
+    r = client.post("/admin/sources/1/scan", headers=ADMIN)
+    assert r.status_code == 202 and scans.ran == [(1, "admin-1")]
 
 
 @pytest.mark.parametrize("error, status", [(NotFoundError("no"), 404), (ConflictError("busy"), 409)])

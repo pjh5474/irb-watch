@@ -15,6 +15,7 @@ from irb_watch.api import (
     documents,
     files,
     health,
+    unsubscribe,
 )
 from irb_watch.config import get_settings
 from irb_watch.services.errors import ServiceError
@@ -64,3 +65,4 @@ app.include_router(admin_members.router)
 app.include_router(admin_mail.router)
 app.include_router(documents.router)
 app.include_router(files.router)
+app.include_router(unsubscribe.router)

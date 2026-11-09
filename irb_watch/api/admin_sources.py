@@ -10,6 +10,7 @@ from irb_watch.api.deps import (
     require_admin,
 )
 from irb_watch.auth.jwt import AuthUser
+from irb_watch.services.alerts import AlertService
 from irb_watch.services.scan import ScanService
 from irb_watch.services.sources import Source, SourceService
 
@@ -110,18 +111,21 @@ def start_scan(
     background: BackgroundTasks,
     admin: AuthUser = Depends(require_admin),
     scans: ScanService = Depends(get_scan_service),
+    alerts: AlertService = Depends(get_alert_service),
 ) -> dict:
     """Starts a scan in the background. Poll GET /admin/sources for the result."""
     source = scans.begin_scan(source_id)  # 404 / 409 are raised here, before 202
-    background.add_task(_scan_then_alert, scans, source, admin.id)
+    background.add_task(_scan_then_alert, scans, alerts, source, admin.id)
     return {"status": "started", "source_id": source.id}
 
 
-def _scan_then_alert(scans: ScanService, source: Source, actor_id: str | None) -> None:
+def _scan_then_alert(
+    scans: ScanService, alerts: AlertService, source: Source, actor_id: str | None
+) -> None:
     """A manual scan, then look at this source's health so admins are mailed if it changed.
     A mail problem never turns into a scan problem."""
     scans.run_scan(source, actor_id)
     try:
-        get_alert_service().evaluate_source(source.id)
+        alerts.evaluate_source(source.id)
     except Exception:
         log.exception("alarm check after a manual scan of source %s failed", source.id)

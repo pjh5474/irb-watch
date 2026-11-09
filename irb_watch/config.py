@@ -82,10 +82,19 @@ class Settings(BaseSettings):
     app_url: str = ""  # the frontend address used for links in mails, no trailing slash
     # A source with no good scan for this long counts as out of date (amber).
     alert_stale_hours: int = 36
+    # The daily digest for users also needs a secret that signs the unsubscribe links (any long
+    # random string, for example Python: secrets.token_hex(32); keep it ONLY in env vars) and the
+    # public hostname of this API (the same API_DOMAIN the deploy uses) for the one-click link.
+    unsubscribe_key: str = ""
+    api_domain: str = ""
 
     @property
     def mail_enabled(self) -> bool:
         return bool(self.resend_api_key.strip() and self.mail_from.strip() and self.app_url.strip())
+
+    @property
+    def digest_enabled(self) -> bool:
+        return bool(self.mail_enabled and self.unsubscribe_key.strip() and self.api_domain.strip())
 
     @property
     def fetch_retry_waits(self) -> tuple[float, ...]:

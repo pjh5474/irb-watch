@@ -28,6 +28,10 @@ from irb_watch.services.users import AuditSink
 log = logging.getLogger(__name__)
 
 
+class DigestSender(Protocol):
+    def send_all(self) -> dict[str, int]: ...
+
+
 class AlertStore(Protocol):
     def get_levels(self) -> dict[int, str]: ...
     def set_level(self, source_id: int, level: str, reason: str | None, at: str) -> None: ...
@@ -50,7 +54,9 @@ class AlertService:
         stale_hours: int = 36,
         timezone: str = "Asia/Seoul",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        digest: DigestSender | None = None,
     ) -> None:
+        self._digest = digest
         self._store = store
         self._mailer = mailer
         self._audit = audit
@@ -75,6 +81,11 @@ class AlertService:
         self._evaluate_many(sources)
         if report.trigger == SCHEDULED:
             self._send_daily_report(report, sources)
+            if self._digest is not None:
+                try:
+                    self._digest.send_all()
+                except Exception:  # the digest must never fail a run or the admin report
+                    log.exception("the daily digest failed")
 
     def evaluate_source(self, source_id: int) -> None:
         """After one scan of one source (a manual scan or a planned retry)."""
