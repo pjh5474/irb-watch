@@ -2,36 +2,45 @@
 
 [English](README.md) | **한국어**
 
-임상연구코디네이터를 위해 병원 IRB(임상연구윤리심의위원회, 연구윤리 부서) 게시판을 감시하는 서버입니다. 요청이 있을 때 게시판을 읽어 어떤 문서가 새로 올라왔는지, 바뀌었는지, 사라졌는지를 알아내고, 모든 버전을 원본 파일과 함께 보관하며, AI 요약과 우선순위가 붙은 뉴스 카드를 기록합니다. 코디네이터가 병원마다 사이트를 열어 버전을 일일이 비교하지 않아도 됩니다.
+임상연구코디네이터를 위해 병원 IRB(임상연구윤리심의위원회, 연구윤리 부서) 게시판을 감시하는 서버입니다. 매일 게시판을 읽어 어떤 문서가 새로 올라왔는지, 바뀌었는지, 사라졌는지를 알아내고, 모든 버전을 원본 파일과 함께 보관하며, AI 요약과 우선순위가 붙은 뉴스 카드를 기록합니다. 확인이 필요한 일이 생기면 이메일로 알려 줍니다. 코디네이터가 병원마다 사이트를 열어 버전을 일일이 비교하지 않아도 됩니다.
 
-이 저장소에는 **서버**와 **데이터베이스 스키마**가 들어 있습니다. 웹 대시보드는 별도의 Next.js 프로젝트이며, 같은 Supabase 데이터베이스를 행 수준 보안(RLS) 아래에서 직접 읽습니다.
+| | |
+|---|---|
+| **이 저장소** | **서버**(FastAPI)와 **데이터베이스 스키마**(Supabase 마이그레이션) |
+| **프론트엔드 저장소** | [pjh5474/irb-watch-frontend](https://github.com/pjh5474/irb-watch-frontend). Next.js 웹 앱이며, 같은 Supabase 데이터베이스를 행 수준 보안(RLS) 아래에서 직접 읽고, 동작이 필요할 때 이 서버를 호출합니다 |
+| **운영 중인 앱** | 웹 앱: <https://irb-watch-frontend.vercel.app> · API: <https://irb-api.warwarsn.online> (OpenAPI 설명은 `/openapi.json`) |
 
-> 현재 상태: 스캔, 이력 관리, 요약, 관리자 API는 동작하며 실제 병원 사이트로 검증했습니다. 스캔은 아직 수동으로 시작하고, 매일 자동으로 도는 스케줄러와 대시보드는 아직 없습니다. [docs/plan.md](docs/plan.md)를 보세요.
+> **현재 상태 (2026-11-09).** 구현하고 테스트한 것: 버전 이력이 있는 스캔, AI 요약, 회원 전용 연구(study) 게시판, 매일 06:00(Asia/Seoul) 스케줄러, 관리자 API, 출처 상태 신호, 이메일(알림, 일일 수집 결과, 사용자 일일 요약, 관리자 주간 보고). AWS 서버 한 대에 배포되어 있고 자동 배포가 됩니다. **아직 실제로 검증하지 못한 것:** 처음으로 실제 06:00 자동 실행이 도는 것과 그에 따른 메일(일일 수집 결과, 일일 요약, 주간 보고. 테스트 메일은 실제로 도착했습니다), 일반 사용자의 실제 로그인으로 모든 엔드포인트를 호출하는 것, 실제 연구 계정 로그인. 남은 일은 [docs/plan.md](docs/plan.md)에 있습니다.
 
 ## 동작 방식
 
 ```
-관리자가 게시판 URL 등록 ──► 스캔 (지금은 수동)
-                                │
-   게시판 목록과 모든 게시글 페이지를 읽고 첨부파일을 내려받음
-                                │
+관리자가 게시판 URL 등록 (공개 게시판, 또는 자체 계정을 저장해 두는 회원 전용 "연구")
+                                   │
+        매일 06:00 (그리고 요청할 때): 게시판 목록과 모든 게시글 페이지를 읽고,
+        첨부파일을 내려받음
+                                   │
    원본 파일 ──► 비공개 Supabase Storage 버킷 (파일 해시당 한 번만 저장)
    본문과 파일 텍스트 (PDF, HWP, HWPX, DOCX) ──► 추출 · 정규화 · 해시
-                                │
+                                   │
    저장된 상태와 비교 ──► 신규 / 수정 / 삭제(2번 연속 안 보일 때) / 재등장
-                                │
+                                   │
    Jev (분류): 우선순위, 실질적 변경인지 단순 수정인지, 카테고리
-   OpenAI (요약): 1~3문장, 문서와 같은 언어
-                                │
+   OpenAI (요약): 몇 개의 항목, 문서와 같은 언어   (관리자가 AI를 끈 출처는 사용하지 않음)
+                                   │
    모든 버전을 전체 텍스트와 함께 저장 ──► 뉴스 카드를 감사 로그에 기록
+                                   │
+   출처 상태 확인 ──► 이메일 알림 · 일일 수집 결과 · 사용자 일일 요약 · 주간 보고
 ```
 
-- **버전 이력.** 변경이 있을 때마다 새 버전이 만들어지고, 본문 전체와 각 파일에서 추출한 텍스트가 함께 저장됩니다. 그래서 어떤 두 버전이든 (버전 번호나 날짜로 골라) 단어 단위 차이로 비교할 수 있습니다.
-- **게시판의 첫 스캔은 조용한 기준선입니다.** 현재 게시글을 저장하기만 하고 카드는 만들지 않습니다.
-- **실패에는 이유가 보입니다.** 게시글을 읽을 수 없거나 첨부파일이 손상됐거나 암호가 걸려 있으면 문서에 `needs_review` 표시와 이유가 붙고, 구독자는 이유를 설명하는 카드를 봅니다. 실패한 스캔은 아무것도 바꾸지 않으며 "변경 없음"처럼 보이지 않습니다.
-- **AI는 선택 사항이고 비용을 아끼도록 설계했습니다.** 제목만 바뀌었거나 명백히 단순한 수정은 OpenAI를 부르지 않고 정해진 문장으로 설명합니다. 문서 전체가 아니라 바뀐 부분만 외부로 보내며, OpenAI 쪽에는 아무것도 저장하지 않습니다. 키가 없거나 서비스가 멈춰도 스캔은 계속 동작합니다.
-- **사용자가 문서 전체의 요약을 요청할 수 있습니다** (`POST /documents/{id}/summary`). 첫 요청 이후에는 저장된 결과를 돌려주고, 사용자별 하루 요청 횟수에 제한이 있습니다.
-- **접근 권한.** 계정은 관리자만 만들 수 있습니다. 로그인한 사용자는 구독한 데이터만 Supabase 행 수준 보안을 통해 읽고, 모든 쓰기는 이 서버를 거칩니다.
+- **버전 이력.** 변경이 있을 때마다 본문 전체와 각 파일에서 추출한 텍스트를 담은 새 버전이 만들어져서, 어떤 두 버전이든 단어 단위 차이로 비교할 수 있습니다.
+- **게시판의 첫 스캔은 조용한 기준선입니다.** 게시글을 저장하기만 하고 카드는 만들지 않습니다.
+- **실패에는 이유가 보입니다.** 읽을 수 없는 게시글이나 손상되었거나 암호가 걸린 첨부파일은 이유와 함께 `needs_review`로 표시됩니다. 실패한 스캔은 아무것도 바꾸지 않으며 "변경 없음"처럼 보이지 않습니다. 로그인이 거부되면 병원 계정이 잠기지 않도록 그 출처의 스캔을 멈춥니다.
+- **접근 권한.** 계정은 관리자가 만듭니다. 로그인한 사용자는 모든 공개 출처를 읽습니다. **회원 전용 출처(연구)**는 관리자와 관리자가 지정한 사용자만 읽을 수 있고, 지정되지 않은 사용자는 그런 출처가 있다는 사실도 볼 수 없습니다. 모든 쓰기는 이 서버를 거칩니다.
+- **AI는 선택 사항입니다.** 바뀐 부분만(온디맨드 요약은 문서 텍스트) 외부로 보내고, OpenAI 쪽에는 아무것도 저장하지 않으며, 관리자가 출처별로 AI를 끌 수 있습니다(연구 출처는 문서가 기밀일 수 있어 꺼진 상태로 시작합니다). 키가 없거나 서비스가 멈춰도 스캔은 계속 동작합니다.
+- **요약.** 사용자는 문서 전체의 요약을 요청할 수 있고, 짧은 README 형식(제목, 항목, 날짜 표)으로 작성되며, 첫 요청 이후에는 저장된 결과를 돌려주고 사용자별 하루 횟수에 제한이 있습니다. 관리자는 다시 작성할 수 있습니다.
+- **이메일(Resend).** 관리자는 출처가 노란색이나 빨간색이 되면 알림을, 복구되면 복구 알림을, 매일 수집 결과를, 매주 이용 현황을 받습니다. 사용자는 새 문서와 수정된 문서의 일일 요약을 하루에 한 통 받으며 한 번 클릭으로 수신을 중지할 수 있습니다. 연구 출처는 "회원 전용 출처 #번호"와 건수로만 표시되고 이름이나 제목은 나오지 않습니다. 메일은 일반 서버 코드이며 AI 모델이 쓰거나 보내지 않습니다.
+- **다운로드.** 원본 파일은 60초짜리 서명 링크로 내주고, 모두 기록합니다.
 
 현재 지원하는 게시판: SNUH HRPP 게시판(`hrpp.snuh.org`). 새 사이트를 추가하려면 작은 어댑터가 필요합니다 ([docs/decisions.md](docs/decisions.md) 참고).
 
@@ -40,10 +49,9 @@
 - [uv](https://docs.astral.sh/uv/) (고정된 Python 3.12를 대신 설치해 줍니다)
 - Node.js (Supabase CLI를 `npx`로 실행합니다)
 - Supabase 프로젝트 (데이터베이스, 인증, 스토리지)
-- 요약용 OpenAI API 키와 모델 이름 (선택)
-- 분류용 TypeSafe(Jev) API 키 (선택)
+- 선택: OpenAI API 키와 모델 이름(요약), TypeSafe(Jev) API 키(분류), 발신 도메인을 인증한 Resend 계정(이메일)
 
-## 설치
+## 설치 (로컬)
 
 명령어는 PowerShell 기준이며 저장소 루트에서 실행합니다.
 
@@ -53,18 +61,23 @@ uv sync
 
 # 2. 설정 파일 만들기. APP_ENV가 파일을 고릅니다: dev는 .env.dev, prod는 .env.prod를 읽습니다.
 Copy-Item .env.example .env.dev
-# .env.dev를 채우세요. 절대 커밋하지 마세요 (.gitignore가 .env.*를 이미 제외합니다).
+# .env.dev를 채우세요. 절대 커밋하지 마세요 (.gitignore가 .env.*를 제외합니다). 값을 채팅에 붙여넣지 마세요.
 ```
 
-변수 목록 (이름만):
+변수 목록 (이름만. 모두 `.env.example`에 설명이 있습니다):
 
 | 변수 | 용도 |
 |---|---|
-| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | 모든 기능 (프로젝트의 service 또는 secret 키를 사용하며, 서버 안에서만 씁니다) |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | 모든 기능 (프로젝트의 service 또는 secret 키이며 서버 안에서만 씁니다) |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | AI 요약 (비우면 꺼짐, 기본 모델은 없음). `OPENAI_BASE_URL`은 OpenAI 호환 게이트웨이용이며, OpenAI에 직접 연결하려면 비워 두세요 |
-| `TYPESAFE_API_KEY`, `TYPESAFE_MODEL` | Jev 분류 (키를 비우면 꺼짐, 기본 모델은 `jev-latest`) |
-| `FRONTEND_ORIGINS` | API를 호출할 수 있는 브라우저 출처 (기본값 `http://localhost:3000`) |
-| `AI_SKIP_BELOW`, `AI_MIN_CONFIDENCE`, `SUMMARY_REQUESTS_PER_DAY` | AI 규칙 조정 |
+| `TYPESAFE_API_KEY`, `TYPESAFE_MODEL` | Jev 분류 (키를 비우면 꺼짐) |
+| `FRONTEND_ORIGINS` | API를 호출할 수 있는 브라우저 출처. 쉼표로 구분하고 끝에 슬래시를 붙이지 않습니다 (기본값 `http://localhost:3000`) |
+| `SCHEDULER_ENABLED`, `SCAN_CRON`, `SCAN_TIMEZONE` | 매일 스캔 (`SCHEDULER_ENABLED=true`일 때만 켜짐, 기본값은 `Asia/Seoul` 기준 `0 6 * * *`) |
+| `CREDENTIAL_STORE`, `CREDENTIALS_KEY` | 회원 전용 게시판의 병원 로그인 보관 위치 (Windows PC는 `keyring`, 서버는 `database` = 암호화된 테이블. 키는 직접 만들어 환경 변수에만 둡니다) |
+| `RESEND_API_KEY`, `MAIL_FROM`, `APP_URL` | 이메일. 세 가지가 모두 있어야 켜집니다 |
+| `UNSUBSCRIBE_KEY`, `API_DOMAIN` | 사용자 일일 요약 (수신 중지 링크 서명 키, API의 공개 호스트 이름) |
+| `WEEKLY_STATS_CRON`, `ALERT_STALE_HOURS` | 주간 보고 시각 (요일은 이름으로 씁니다. 예: `0 7 * * mon`)과 출처가 오래되었다고 보는 기준 (기본 36시간) |
+| `AI_SKIP_BELOW`, `AI_MIN_CONFIDENCE`, `SUMMARY_REQUESTS_PER_DAY`, `DOWNLOAD_LINKS_PER_DAY` | 조정값과 사용자별 제한 |
 
 서버는 프로젝트의 공개 서명 키로 로그인 토큰을 검증하므로 JWT 시크릿이 필요 없습니다.
 
@@ -72,7 +85,7 @@ Copy-Item .env.example .env.dev
 # 3. 데이터베이스 스키마 만들기 (마이그레이션이 기준입니다)
 npx supabase login
 npx supabase link --project-ref <프로젝트-ref>
-npx supabase db push --remote --dry-run      # 미리보기
+npx supabase db push --remote --dry-run      # 먼저 미리보기
 npx supabase db push --remote --yes          # 적용
 ```
 
@@ -87,12 +100,12 @@ uv run uvicorn irb_watch.main:app --reload
 # GET http://127.0.0.1:8000/health  ->  {"status":"ok"}
 ```
 
-그다음 관리자 API로 게시판을 등록하고 스캔을 시작합니다 (관리자의 로그인 토큰이 필요합니다). 이름과 게시판 URL로 `POST /admin/sources`를 호출한 뒤 `POST /admin/sources/{id}/scan`을 호출하세요. 게시판 하나를 스캔하는 데 약 2~3분이 걸립니다. 모든 엔드포인트, 상태값, 명령어는 [docs/runbook.md](docs/runbook.md)에 있습니다.
+그다음 [프론트엔드](https://github.com/pjh5474/irb-watch-frontend)를 실행하고(`npm run dev`) 관리자로 로그인해 관리자 출처 페이지에서 게시판을 추가하세요(또는 `POST /admin/sources` 후 `POST /admin/sources/{id}/scan`). 게시판 하나를 스캔하는 데 약 2~3분이 걸립니다.
 
-### 테스트
+## 테스트
 
 ```powershell
-uv run pytest -q                  # 오프라인, 약 10초
+uv run pytest -q                  # 오프라인, 약 30초
 uv run ruff check irb_watch tests
 ```
 
@@ -102,25 +115,34 @@ uv run ruff check irb_watch tests
 $env:RUN_LIVE=1; uv run pytest -m live -q
 ```
 
+## 배포
+
+우분투 서버 한 대(AWS EC2)에서 Docker Compose로 API(회원 로그인용 헤드리스 Chromium과 스케줄러 포함)와 HTTPS용 Caddy를 실행합니다. **`main`에 푸시하면 테스트를 돌린 뒤 배포**되며, GitHub Actions와 제한된 SSH 키를 씁니다. 설정은 **AWS Systems Manager Parameter Store**에 둘 수 있고 "refresh settings" 워크플로로 다시 불러올 수 있습니다. IAM 정책과 이메일 설정을 포함한 단계별 안내는 [docs/deploy-ec2.md](docs/deploy-ec2.md)에 있습니다. 데이터베이스 마이그레이션은 직접 적용하며(먼저 dry-run) 자동 배포에 포함되지 않습니다.
+
 ## 프로젝트 구조
 
 ```
 irb_watch/
-  main.py            FastAPI 앱, CORS, 오류 처리
-  config.py          환경 파일에서 읽는 설정
-  api/               라우트: health, 관리자 사용자, 관리자 소스, 문서 요약
-  auth/              로그인 토큰 검증
-  services/          업무 규칙: 사용자, 소스, 스캔, 요약
-  core/              변경 감지, 차이 비교, 해시: 네트워크나 DB 없는 순수 로직
-  crawlers/          예의 바른 수집기(robots.txt, 지연, 리디렉션 검사), SNUH 어댑터와 리더
+  main.py            FastAPI 앱, CORS, 오류 처리, 스케줄러 시작
+  config.py          환경에서 읽는 설정 (APP_ENV가 파일을 고름)
+  scheduler.py       APScheduler: 매일 스캔, 시작 시 보충 실행, 재시도, 주간 보고
+  api/               라우트: health, 관리자(사용자, 출처, 지정 사용자, 스캔, 로그인 정보, 메일,
+                     문서 재요약), 문서 요약, 파일 다운로드, 공개 수신 중지
+  auth/              프로젝트 공개 키로 로그인 토큰 검증
+  services/          업무 규칙: 사용자, 출처, 지정 사용자, 스캔, 실행기, 요약, 다운로드,
+                     알림, 일일 요약, 주간 보고
+  core/              변경 감지, 차이 비교, 해시, 출처 상태, 주간 수치: 순수 로직
+  crawlers/          예의 바른 수집기(robots.txt, 지연, SSRF 차단), SNUH 어댑터와 리더, 로그인
   parsers/           PDF, HWP, HWPX, DOCX 텍스트 리더
   ai/                Jev 분류기, OpenAI 요약기, 건너뛰기 규칙, 템플릿
+  mail/              Resend 클라이언트, 메일 템플릿(한국어 먼저), 수신 중지 토큰
   db/                저장소의 Supabase 구현
-  security/          URL 안전 검사(내부 주소 차단), 크기 제한
+  security/          URL 안전 검사(내부 주소 차단), 크기 제한, 저장된 로그인 암호화
   scripts/           일회성 도구 (첫 관리자)
 supabase/migrations/ 데이터베이스 스키마
+scripts/             deploy.sh, load-env.sh (서버에서 실행)
 tests/               인메모리 가짜 객체를 쓰는 오프라인 테스트, RUN_LIVE=1일 때만 라이브 테스트
-docs/                계획, 이유가 적힌 결정 기록, 운영 가이드, 일일 보고서
+docs/                계획, 이유가 적힌 결정 기록, 운영 가이드, 배포 안내, 일일 보고서
 ```
 
 수정하기 전에 알아 둘 설계 규칙:
@@ -128,9 +150,10 @@ docs/                계획, 이유가 적힌 결정 기록, 운영 가이드, �
 - 업무 로직은 작은 인터페이스에 맞춰 작성하고, `db/`가 Supabase용으로 구현하며, 테스트는 인메모리 가짜 객체를 씁니다.
 - `audit_logs` 테이블은 추가만 가능합니다. 카드는 기록한 뒤에는 수정할 수 없으므로 요약은 카드를 쓰기 전에 정합니다.
 - 적용한 마이그레이션은 절대 수정하지 않고 새 마이그레이션을 추가합니다. 프로젝트의 기본 권한이 넉넉하므로, 새 테이블은 권한을 부여하기 전에 먼저 `revoke all` 해야 합니다.
-- 페이지와 파일의 텍스트는 신뢰할 수 없는 입력입니다. 프롬프트에서 데이터로만 취급하고 크기를 제한하며, 어떤 모델 호출에도 외부에 영향을 주는 도구를 붙이지 않습니다.
+- 페이지와 파일의 텍스트는 신뢰할 수 없는 입력입니다. 프롬프트에서 데이터로만 취급하고, 크기를 제한하며, 메일에서는 이스케이프합니다. 어떤 모델 호출에도 외부에 영향을 주는 도구를 붙이지 않으며, 모델에 이메일 도구를 주지 않습니다.
+- 비밀 값은 환경 파일, 서버의 Parameter Store, 소유자의 터미널에만 둡니다. 커밋하거나 로그로 남기거나 출력하지 않습니다.
 
-각 선택의 이유는 [docs/decisions.md](docs/decisions.md)에, 날짜별 진행 상황은 [docs/reports/](docs/reports/)에 있습니다.
+각 선택의 이유는 [docs/decisions.md](docs/decisions.md)에, 명령어는 [docs/runbook.md](docs/runbook.md)에, 날짜별 진행 상황은 [docs/reports/](docs/reports/)에 있습니다.
 
 ## 라이선스
 
