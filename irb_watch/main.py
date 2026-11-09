@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from irb_watch.api import (
     admin_credentials,
     admin_documents,
+    admin_mail,
     admin_members,
     admin_scans,
     admin_sources,
@@ -60,5 +61,6 @@ app.include_router(admin_scans.router)
 app.include_router(admin_credentials.router)
 app.include_router(admin_documents.router)
 app.include_router(admin_members.router)
+app.include_router(admin_mail.router)
 app.include_router(documents.router)
 app.include_router(files.router)

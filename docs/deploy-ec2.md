@@ -132,6 +132,22 @@ Notes:
 - The server's `.env` is never touched; it stays only on the server.
 - Roll back: push a revert commit (the script only moves forward).
 
+## 10. Email alarms (Resend; written 2026-11-09, not run yet)
+Admins are mailed when a source turns amber or red, when it recovers, and with the daily scan
+result (after the 06:00 run). Off until all three settings exist.
+1. Create a Resend account and an API key (resend.com). Keep the key out of chats and the repo.
+2. In Resend, add your sending domain and add the DNS records it shows in Cloudflare (record
+   type as shown, proxy status **DNS only**). Wait until the domain says verified. Until then
+   Resend only delivers to your own account address.
+3. On the server, in `~/irb-watch/.env` (typed by you, mode 600):
+   - `RESEND_API_KEY=` the key
+   - `MAIL_FROM=IRB Watch <alerts@your-domain>` (an address on the verified domain)
+   - `APP_URL=https://your-frontend-address` (no trailing slash; used for the links)
+   Then `docker compose up -d`.
+4. Check: as an admin, `POST /admin/mail/test` sends a test mail to your own address (409 if a
+   setting is missing, 502 with Resend's reason if the send is refused).
+Mail problems never stop a scan. Look for `mail.sent` / `mail.failed` entries in the audit log.
+
 ## 8. Security notes
 - SSH only from your IP (update the rule when your home IP changes). Never open port 8000.
 - `.env` has mode 600 and is not in the repository. The `.pem` key file stays on your PC.

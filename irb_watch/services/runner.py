@@ -48,6 +48,14 @@ class RunReport:
     scanned: dict[int, str] = field(default_factory=dict)  # source id -> final status
     skipped: dict[int, str] = field(default_factory=dict)  # source id -> reason
     retries_planned: list[int] = field(default_factory=list)
+    summaries: dict[int, ScanSummary] = field(default_factory=dict)  # counts, for the report
+
+
+class AlertHooks(Protocol):
+    """Called after a run so admins can be mailed. Must never be allowed to fail the run."""
+
+    def after_run(self, report: RunReport) -> None: ...
+    def evaluate_source(self, source_id: int) -> None: ...
 
 
 def site_of(source: Source) -> str:
@@ -63,7 +71,9 @@ class ScanRunner:
         audit: AuditSink,
         schedule_retry: Callable[[int, datetime], None],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        alerts: AlertHooks | None = None,
     ) -> None:
+        self._alerts = alerts
         self._list_sources = list_sources
         self._get_source = get_source
         self._scans = scans
@@ -130,6 +140,7 @@ class ScanRunner:
                     "retries_planned": len(report.retries_planned),
                 },
             )
+            self._after_run(report)
             return report
         finally:
             self._run_lock.release()
@@ -152,7 +163,17 @@ class ScanRunner:
                 payload={"error": "the planned retry hit an unexpected error; see server log"},
                 source_id=source_id,
             )
+        self._after_run(report)
         return report
+
+    def _after_run(self, report: RunReport) -> None:
+        """Mail admins about problems and the daily result. A mail problem never fails a run."""
+        if self._alerts is None:
+            return
+        try:
+            self._alerts.after_run(report)
+        except Exception:
+            log.exception("sending the alerts after a run failed")
 
     # -- decisions ---------------------------------------------------------------------
 
@@ -220,6 +241,7 @@ class ScanRunner:
 
         summary = self._scans.run_scan(claimed, actor_id)
         report.scanned[source.id] = summary.status
+        report.summaries[source.id] = summary
         if summary.status != OK and summary.retryable and trigger != RETRY:
             due = self._clock() + RETRY_AFTER
             self._schedule_retry(source.id, due)

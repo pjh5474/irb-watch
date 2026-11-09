@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     fetch_retry_budget: int = 10
     request_timeout_seconds: float = 30.0
 
+    # Email (Resend): alarms when a source turns amber or red, recovery notices and the daily
+    # scan report for admins. Mail is on only when all three are set; without them every mail
+    # call is a logged no-op and scans are not affected. The key is typed by the owner on the
+    # server and never printed or logged.
+    resend_api_key: str = ""
+    mail_from: str = ""  # for example: IRB Watch <alerts@your-domain>
+    app_url: str = ""  # the frontend address used for links in mails, no trailing slash
+    # A source with no good scan for this long counts as out of date (amber).
+    alert_stale_hours: int = 36
+
+    @property
+    def mail_enabled(self) -> bool:
+        return bool(self.resend_api_key.strip() and self.mail_from.strip() and self.app_url.strip())
+
     @property
     def fetch_retry_waits(self) -> tuple[float, ...]:
         return tuple(float(x) for x in self.fetch_retry_waits_seconds.split(",") if x.strip())

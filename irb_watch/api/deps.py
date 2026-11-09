@@ -15,6 +15,7 @@ from irb_watch.crawlers.credentials import CredentialStore, KeyringCredentialSto
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
+from irb_watch.db.alerts import SupabaseAlertStore
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.credentials import DatabaseCredentialStore
 from irb_watch.db.documents import (
@@ -26,6 +27,8 @@ from irb_watch.db.documents import (
 from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
 from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
+from irb_watch.mail.client import ResendMailer
+from irb_watch.services.alerts import AlertService
 from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.members import MemberService
@@ -156,6 +159,25 @@ retry_hook: list[Callable[[int, datetime], None]] = [
 ]
 
 
+def get_alert_service() -> AlertService:
+    """Email alarms and the daily report. Without RESEND_API_KEY, MAIL_FROM and APP_URL the
+    service is built without a mailer and does nothing."""
+    client = get_supabase_client()
+    settings = get_settings()
+    sources = SupabaseSourceStore(client)
+    on = settings.mail_enabled
+    return AlertService(
+        SupabaseAlertStore(client),
+        ResendMailer(settings.resend_api_key.strip(), settings.mail_from.strip()) if on else None,
+        SupabaseAuditSink(client),
+        sources.list,
+        sources.get,
+        app_url=settings.app_url.strip() if on else "",
+        stale_hours=settings.alert_stale_hours,
+        timezone=settings.scan_timezone,
+    )
+
+
 @lru_cache
 def get_runner() -> ScanRunner:
     """One runner per process, so the daily run and "run all now" never overlap."""
@@ -167,6 +189,7 @@ def get_runner() -> ScanRunner:
         get_scan_service(),
         SupabaseAuditSink(client),
         lambda source_id, due: retry_hook[0](source_id, due),
+        alerts=get_alert_service(),
     )
 
 

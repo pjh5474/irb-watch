@@ -1,10 +1,19 @@
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
-from irb_watch.api.deps import get_scan_service, get_source_service, require_admin
+from irb_watch.api.deps import (
+    get_alert_service,
+    get_scan_service,
+    get_source_service,
+    require_admin,
+)
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.services.scan import ScanService
 from irb_watch.services.sources import Source, SourceService
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/sources", tags=["admin-sources"])
 
@@ -104,5 +113,15 @@ def start_scan(
 ) -> dict:
     """Starts a scan in the background. Poll GET /admin/sources for the result."""
     source = scans.begin_scan(source_id)  # 404 / 409 are raised here, before 202
-    background.add_task(scans.run_scan, source, admin.id)
+    background.add_task(_scan_then_alert, scans, source, admin.id)
     return {"status": "started", "source_id": source.id}
+
+
+def _scan_then_alert(scans: ScanService, source: Source, actor_id: str | None) -> None:
+    """A manual scan, then look at this source's health so admins are mailed if it changed.
+    A mail problem never turns into a scan problem."""
+    scans.run_scan(source, actor_id)
+    try:
+        get_alert_service().evaluate_source(source.id)
+    except Exception:
+        log.exception("alarm check after a manual scan of source %s failed", source.id)
