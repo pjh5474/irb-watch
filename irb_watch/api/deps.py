@@ -28,6 +28,7 @@ from irb_watch.db.documents import (
 from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
 from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
+from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
 from irb_watch.services.alerts import AlertService
 from irb_watch.services.digest import DigestService
@@ -40,6 +41,7 @@ from irb_watch.services.source_login import cookies_for_source
 from irb_watch.services.sources import Source, SourceService
 from irb_watch.services.summaries import SummaryService
 from irb_watch.services.users import UserService, UserStore
+from irb_watch.services.weekly import WeeklyStatsService
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +165,23 @@ retry_hook: list[Callable[[int, datetime], None]] = [
 
 def get_digest_store() -> SupabaseDigestStore:
     return SupabaseDigestStore(get_supabase_client())
+
+
+def get_weekly_service() -> WeeklyStatsService:
+    """The weekly usage report for admins. Without mail settings it is built without a mailer
+    and does nothing."""
+    client = get_supabase_client()
+    settings = get_settings()
+    on = settings.mail_enabled
+    return WeeklyStatsService(
+        SupabaseWeeklyStore(client),
+        ResendMailer(settings.resend_api_key.strip(), settings.mail_from.strip()) if on else None,
+        SupabaseAuditSink(client),
+        SupabaseSourceStore(client).list,
+        app_url=settings.app_url.strip() if on else "",
+        stale_hours=settings.alert_stale_hours,
+        timezone=settings.scan_timezone,
+    )
 
 
 def get_alert_service() -> AlertService:

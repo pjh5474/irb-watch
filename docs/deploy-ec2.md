@@ -159,6 +159,13 @@ more settings besides the three above, or it stays off:
 The digest runs right after the 06:00 scan report. Users switch it off in the app's settings page
 or with the link in each mail.
 
+**The weekly usage report for admins** (Mondays 07:00 Seoul time, the last 7 days) needs no extra
+setting: it uses the mail settings above and starts with the scheduler. To change the time, set
+`WEEKLY_STATS_CRON` (crontab syntax; write the weekday as a name, for example `0 8 * * fri`,
+because numbers are counted from Monday = 0 by the scheduler). To see the report before Monday,
+call `POST /admin/mail/weekly-preview` as an admin: it sends it to your own address only. The
+report lists account emails with their usage; it goes to admins only.
+
 ## 11. Settings in AWS Parameter Store (written 2026-11-09, not run yet)
 So you can change a setting in the AWS console instead of editing `.env` over SSH. The server
 reads the parameters with its own IAM role (no AWS keys on the server) and rewrites `.env`

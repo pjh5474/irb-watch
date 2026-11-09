@@ -61,6 +61,37 @@ class FakeDigestStore:
         self.claims.discard(key)
 
 
+class FakeWeeklyStore:
+    """Audit events and accounts for the weekly report, in memory."""
+
+    def __init__(self, admins: tuple[str, ...] = ("admin@example.com",)) -> None:
+        self.event_list = []
+        self.user_list = []
+        self.admins = admins
+        self.claims: set[str] = set()
+        self.fail_events = False
+
+    def events(self, types, start, end):
+        if self.fail_events:
+            raise RuntimeError("database down")
+        return [e for e in self.event_list if e.type in types and start <= e.at < end]
+
+    def users(self):
+        return list(self.user_list)
+
+    def claim(self, key):
+        if key in self.claims:
+            return False
+        self.claims.add(key)
+        return True
+
+    def release(self, key):
+        self.claims.discard(key)
+
+    def admin_emails(self):
+        return self.admins
+
+
 class FakeAlertStore:
     def __init__(self, admins: tuple[str, ...] = ("admin@example.com",)) -> None:
         self.levels: dict[int, str] = {}

@@ -11,6 +11,7 @@ others skip, with the reason recorded.
 """
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,10 +28,19 @@ MISFIRE_GRACE_SECONDS = 3600
 
 
 class ScanScheduler:
-    def __init__(self, runner: ScanRunner, cron: str, timezone: str) -> None:
+    def __init__(
+        self,
+        runner: ScanRunner,
+        cron: str,
+        timezone: str,
+        weekly: Callable[[], object] | None = None,
+        weekly_cron: str = "0 7 * * mon",
+    ) -> None:
         self._runner = runner
         self._tz = ZoneInfo(timezone)
         self._cron = cron
+        self._weekly = weekly  # the weekly stats mail, if mail is set up
+        self._weekly_cron = weekly_cron
         self._scheduler = BackgroundScheduler(timezone=self._tz)
 
     def start(self) -> None:
@@ -52,6 +62,16 @@ class ScanScheduler:
             max_instances=1,
             replace_existing=True,
         )
+        if self._weekly is not None:
+            self._scheduler.add_job(
+                self._weekly,
+                CronTrigger.from_crontab(self._weekly_cron, timezone=self._tz),
+                id="weekly-stats",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=MISFIRE_GRACE_SECONDS,
+                replace_existing=True,
+            )
         self._scheduler.start()
         log.info("scan scheduler started: cron %r in %s", self._cron, self._tz.key)
 

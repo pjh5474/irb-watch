@@ -205,6 +205,122 @@ def digest_mail(
     return Mail(to, subject, text, page, headers)
 
 
+@dataclass(frozen=True)
+class WeeklySource:
+    source_id: int
+    name: str
+    members_only: bool
+
+
+@dataclass(frozen=True)
+class WeeklyUser:
+    email: str
+    last_sign_in: str  # a date text or "-"
+    summaries: int
+    downloads: int
+
+
+@dataclass(frozen=True)
+class WeeklyReport:
+    period_text: str  # for example "2026-11-03 ~ 2026-11-09"
+    signed_in: int
+    new_accounts: int
+    summaries: int
+    summaries_before: int
+    downloads: int
+    downloads_before: int
+    users: tuple[WeeklyUser, ...]
+    users_hidden: int
+    docs: tuple[tuple[WeeklySource, int, int], ...]  # source, new, updated
+    scan_runs: int
+    scans: int
+    scans_failed: int
+    scans_skipped: int
+    unhealthy: tuple[tuple[WeeklySource, str], ...]  # source and its level (attention | problem)
+    downloads_by_source: tuple[tuple[WeeklySource, int], ...] = ()
+
+
+def _trend(now: int, before: int) -> str:
+    diff = now - before
+    sign = "+" if diff > 0 else ""
+    return f"{now} ({sign}{diff})"
+
+
+def weekly_mail(to: tuple[str, ...], r: WeeklyReport, admin_url: str, *, preview: bool = False) -> Mail:
+    """The weekly stats mail for admins. Korean first, English below. It names accounts by email
+    (admin-only, the owner's choice); members-only sources are only ever "source #id"."""
+
+    def label(s: WeeklySource, korean: bool) -> str:
+        return source_label(s.source_id, s.name, s.members_only, korean=korean)
+
+    def block(korean: bool) -> tuple[list[str], list[str]]:
+        head = (
+            f"주간 이용 현황 ({r.period_text})" if korean else f"Weekly usage report ({r.period_text})"
+        )
+        lines = [head]
+        if preview:
+            lines.append("(미리보기: 나에게만 보냈습니다)" if korean else "(Preview: sent only to you)")
+        def k(ko: str, en: str) -> str:
+            return ko if korean else en
+
+        scans = (
+            f"일일 실행 {r.scan_runs}회, 출처 수집 {r.scans}건, 실패 {r.scans_failed}건, 건너뜀 {r.scans_skipped}건"
+            if korean
+            else f"{r.scan_runs} daily runs, {r.scans} source scans, {r.scans_failed} failed, {r.scans_skipped} skipped"
+        )
+        compare = k("(지난 7일 대비)", "(vs the previous 7 days)")
+        lines += [
+            f"- {k('기간 중 로그인한 계정', 'Accounts that signed in')}: {r.signed_in}",
+            f"- {k('새 계정', 'New accounts')}: {r.new_accounts}",
+            f"- {k('AI 요약 요청', 'AI summaries requested')}: {_trend(r.summaries, r.summaries_before)} {compare}",
+            f"- {k('파일 다운로드', 'File downloads')}: {_trend(r.downloads, r.downloads_before)} {compare}",
+            f"- {k('수집', 'Scans')}: {scans}",
+        ]
+        if r.unhealthy:
+            lines.append(k("지금 확인이 필요한 출처:", "Sources that need attention now:"))
+            for s, level in r.unhealthy:
+                tag = k("문제", "Problem") if level == "problem" else k("확인 필요", "Needs attention")
+                lines.append(f"  - {label(s, korean)}: {tag}")
+        if r.docs:
+            lines.append(k("새 문서 / 수정된 문서 (출처별):", "New / updated documents per source:"))
+            for s, new, updated in r.docs:
+                lines.append(f"  - {label(s, korean)}: {new} / {updated}")
+        if r.downloads_by_source:
+            lines.append(k("다운로드 (출처별):", "Downloads per source:"))
+            for s, count in r.downloads_by_source:
+                lines.append(f"  - {label(s, korean)}: {count}")
+        lines.append(k("이용한 계정:", "Accounts with activity:"))
+        if r.users:
+            for u in r.users:
+                lines.append(
+                    f"  - {one_line(u.email, 120)} | {k('마지막 로그인', 'last sign-in')} {u.last_sign_in} | "
+                    f"{k('요약', 'summaries')} {u.summaries} | {k('다운로드', 'downloads')} {u.downloads}"
+                )
+            if r.users_hidden:
+                lines.append(k(f"  그 밖에 {r.users_hidden}명", f"  and {r.users_hidden} more"))
+        else:
+            lines.append(k("  없음", "  none"))
+        html_parts = [f"<h2 style=\"font-size:16px\">{html.escape(head)}</h2>"]
+        html_parts += [f"<p>{html.escape(line.strip())}</p>" for line in lines[1:]]
+        return lines, html_parts
+
+    ko_text, ko_html = block(True)
+    en_text, en_html = block(False)
+    text = "\n".join([*ko_text, admin_url, "", "---", "", *en_text, admin_url])
+    page = (
+        '<div style="font-family:sans-serif;font-size:14px;line-height:1.5;max-width:640px">'
+        + "".join(ko_html)
+        + "<hr>"
+        + "".join(en_html)
+        + f'<p><a href="{html.escape(admin_url, quote=True)}">Admin page</a></p></div>'
+    )
+    subject = one_line(
+        f"[IRB Watch] 주간 현황 · 로그인 {r.signed_in} · 요약 {r.summaries} · 다운로드 {r.downloads}"
+        f" / Weekly report"
+    )
+    return Mail(to, subject, text, page)
+
+
 def test_mail(to: tuple[str, ...], admin_url: str) -> Mail:
     ko = "이 메일은 IRB Watch의 메일 설정 확인용입니다. 받으셨다면 메일 발송이 정상입니다."
     en = "This mail checks the IRB Watch mail settings. If you can read it, sending works."

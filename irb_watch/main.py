@@ -30,7 +30,15 @@ async def lifespan(_: FastAPI):
         from irb_watch.api import deps
         from irb_watch.scheduler import ScanScheduler
 
-        scheduler = ScanScheduler(deps.get_runner(), settings.scan_cron, settings.scan_timezone)
+        weekly = deps.get_weekly_service()
+        scheduler = ScanScheduler(
+            deps.get_runner(),
+            settings.scan_cron,
+            settings.scan_timezone,
+            # The weekly stats mail only exists when mail is set up.
+            weekly=weekly.send_scheduled if weekly.enabled else None,
+            weekly_cron=settings.weekly_stats_cron,
+        )
         deps.retry_hook[0] = scheduler.schedule_retry
         scheduler.start()
     try:

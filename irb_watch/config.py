@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # public hostname of this API (the same API_DOMAIN the deploy uses) for the one-click link.
     unsubscribe_key: str = ""
     api_domain: str = ""
+    # The weekly stats mail for admins: Mondays 07:00 in SCAN_TIMEZONE (crontab syntax). Write the
+    # weekday as a NAME (mon, tue, ...): the scheduler counts weekday numbers from Monday = 0,
+    # so "1" would mean Tuesday.
+    weekly_stats_cron: str = "0 7 * * mon"
 
     @property
     def mail_enabled(self) -> bool:
