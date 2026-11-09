@@ -148,6 +148,67 @@ result (after the 06:00 run). Off until all three settings exist.
    setting is missing, 502 with Resend's reason if the send is refused).
 Mail problems never stop a scan. Look for `mail.sent` / `mail.failed` entries in the audit log.
 
+## 11. Settings in AWS Parameter Store (written 2026-11-09, not run yet)
+So you can change a setting in the AWS console instead of editing `.env` over SSH. The server
+reads the parameters with its own IAM role (no AWS keys on the server) and rewrites `.env`
+(`scripts/load-env.sh`, run by `scripts/deploy.sh`). Until you create the file `.ssm-path` on the
+server, nothing changes: the hand-made `.env` keeps working.
+
+**Costs and limits** (general knowledge, check AWS's pricing page): standard parameters are free;
+`SecureString` with the AWS-managed key `aws/ssm` has no extra charge. A parameter cannot be
+empty, so simply leave unused settings out. A value must not contain a newline or a single quote.
+
+**1. Create the parameters** (console: Systems Manager, Parameter Store, Create parameter). Name
+them `/irb-watch/prod/<SETTING>`, for example `/irb-watch/prod/OPENAI_API_KEY`. Use type
+`SecureString` for every secret (`SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`,
+`TYPESAFE_API_KEY`, `CREDENTIALS_KEY`, `RESEND_API_KEY`) and `String` for the rest
+(`SUPABASE_URL`, `FRONTEND_ORIGINS`, `APP_URL`, `MAIL_FROM`, `OPENAI_MODEL`, `API_DOMAIN`,
+`SCHEDULER_ENABLED`, ...). The names are exactly the names in `.env.example`.
+Copy the real values from the current server `.env` once; never paste them into chats.
+
+**2. Give the server permission.** IAM, Roles, create a role for EC2 (trusted entity: EC2) with
+this inline policy, then attach the role to the instance (EC2, Actions, Security, Modify IAM
+role). Replace `ACCOUNT_ID`; the region is Seoul:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["ssm:GetParametersByPath", "ssm:GetParameter", "ssm:GetParameters"],
+    "Resource": [
+      "arn:aws:ssm:ap-northeast-2:ACCOUNT_ID:parameter/irb-watch/prod",
+      "arn:aws:ssm:ap-northeast-2:ACCOUNT_ID:parameter/irb-watch/prod/*"
+    ]
+  }]
+}
+```
+If you encrypt with your own KMS key instead of `aws/ssm`, also allow `kms:Decrypt` on that key.
+
+**3. Install the AWS CLI on the server** if `aws --version` does not work (Ubuntu 24.04:
+`sudo snap install aws-cli --classic`).
+
+**4. Try it by hand, then switch on:**
+```bash
+cd ~/irb-watch
+git pull                               # or wait for the next deploy
+cp .env .env.backup                    # keep the working file until you trust the new one
+SSM_PATH=/irb-watch/prod bash scripts/load-env.sh   # prints "wrote N settings", no values
+diff <(sed 's/=.*//' .env.backup | sort) <(sed 's/=.*//' .env | sort)   # same setting names?
+echo /irb-watch/prod > .ssm-path       # from now on every deploy and refresh loads Parameter Store
+docker compose up -d
+```
+If anything is wrong: `cp .env.backup .env` and delete `.ssm-path`.
+
+**5. Change a setting later:** edit the parameter in the console, then on GitHub: Actions,
+"refresh-settings", Run workflow. The server reloads the settings and restarts the API (about a
+minute). A normal code deploy also reloads them. This needs the first deploy that contains
+`scripts/deploy.sh` with the `refresh` command to have run once.
+
+**Security notes:** the generated `.env` is mode 600 and still sits on the server, so the exposure
+is the same as before; what changes is who edits it. Access is controlled by IAM and logged in
+CloudTrail. Do not widen the policy to `*`. The refresh workflow uses the same locked SSH key as
+the deploy: it can only run `deploy.sh refresh` or a commit deploy.
+
 ## 8. Security notes
 - SSH only from your IP (update the rule when your home IP changes). Never open port 8000.
 - `.env` has mode 600 and is not in the repository. The `.pem` key file stays on your PC.

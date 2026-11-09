@@ -4,6 +4,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# Server only: the Parameter Store path used by scripts/load-env.sh (docs/deploy-ec2.md section 11)
+.ssm-path
 .claude/settings.local.json
 data/
 *.db

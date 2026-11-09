@@ -1,0 +1,34 @@
+# A button on GitHub (Actions, "refresh-settings", Run workflow): the server loads its settings
+# from AWS Parameter Store again and restarts the API. No code changes, no tests: use it after
+# you changed a parameter in the AWS console. Needs the same four secrets as the deploy.
+# Setup: docs/deploy-ec2.md section 11.
+name: refresh-settings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    # Never at the same time as a deploy.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    steps:
+      - name: Ask the server to reload its settings
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 "$USER_NAME@$HOST" "refresh"
