@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
+      # Some offline tests start a real headless Chromium against a local fake site.
+      - run: uv run playwright install --with-deps chromium
       - run: uv run ruff check irb_watch tests
       - run: uv run pytest -q   # offline tests only: live tests need RUN_LIVE=1 and are never run here
 
