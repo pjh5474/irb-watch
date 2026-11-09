@@ -39,11 +39,20 @@ class SummaryOut(BaseModel):
     summary: str
 
 
+OPENAI_DIRECT_URL = "https://api.openai.com/v1"
+
+
 class OpenAISummarizer:
     def __init__(
         self, api_key: str, model: str, base_url: str | None = None, timeout: float = 60.0
     ) -> None:
-        self._client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
+        # Always pass an explicit address. With base_url=None the SDK reads the process
+        # environment variable OPENAI_BASE_URL, and Docker's env_file exports an empty
+        # "OPENAI_BASE_URL=" from .env as an empty string, which the SDK takes as the address
+        # (httpx then fails with UnsupportedProtocol, reported as APIConnectionError).
+        self._client = OpenAI(
+            api_key=api_key, base_url=base_url or OPENAI_DIRECT_URL, timeout=timeout
+        )
         self.model = model
 
     def summarize(self, kind: str, text: str, *, truncated: bool) -> str:
