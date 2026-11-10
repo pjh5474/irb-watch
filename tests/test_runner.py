@@ -110,6 +110,16 @@ def test_sites_run_in_parallel_but_boards_of_one_site_run_one_by_one():
     assert scans.order.index(1) < scans.order.index(2) < scans.order.index(3)
 
 
+def test_scan_selected_runs_only_those_and_keeps_one_site_sequential():
+    sources = [src(1), src(2), src(3), src(4, host="other.example.org"), src(5, is_active=False)]
+    runner, scans, audit, _ = make_runner(sources)
+    report = runner.run_all(MANUAL, "admin-1", only=frozenset({1, 2, 4, 5}))
+    assert set(report.scanned) == {1, 2, 4}  # 3 not chosen, 5 inactive
+    assert scans.max_active["hrpp.snuh.org"] == 1
+    finished = [e for e in audit.entries if e["event_type"] == "scan.run_finished"][-1]
+    assert finished["payload"]["selected"] == 4
+
+
 def test_inactive_sources_are_ignored():
     sources = [src(1), src(2, is_active=False)]
     runner, scans, _, _ = make_runner(sources)
@@ -387,8 +397,8 @@ class StubRunner:
     def is_running(self):
         return self.running
 
-    def run_all(self, trigger, actor_id=None):
-        self.calls.append((trigger, actor_id))
+    def run_all(self, trigger, actor_id=None, only=None):
+        self.calls.append((trigger, actor_id) if only is None else (trigger, actor_id, only))
 
 
 @pytest.fixture
@@ -418,6 +428,19 @@ def test_run_all_endpoint_starts_a_manual_run_as_the_admin(api):
     r = client.post("/admin/scans/run-all", headers={"Authorization": "Bearer tok-admin-1"})
     assert r.status_code == 202 and r.json() == {"status": "started"}
     assert runner.calls == [(MANUAL, "admin-1")]
+
+
+def test_run_selected_endpoint_runs_only_the_chosen_sources(api):
+    client, runner = api
+    admin = {"Authorization": "Bearer tok-admin-1"}
+    r = client.post("/admin/scans/run-selected", json={"source_ids": [3, 1, 3]}, headers=admin)
+    assert r.status_code == 202 and r.json() == {"status": "started", "count": 2}
+    assert runner.calls == [(MANUAL, "admin-1", frozenset({1, 3}))]
+    assert client.post("/admin/scans/run-selected", json={"source_ids": []}, headers=admin).status_code == 422
+    user = {"Authorization": "Bearer tok-user-1"}
+    assert client.post("/admin/scans/run-selected", json={"source_ids": [1]}, headers=user).status_code == 403
+    runner.running = True
+    assert client.post("/admin/scans/run-selected", json={"source_ids": [1]}, headers=admin).status_code == 409
 
 
 def test_run_all_endpoint_refuses_while_a_run_is_in_progress(api):

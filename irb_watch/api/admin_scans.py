@@ -1,4 +1,5 @@
 from fastapi import APIRouter, BackgroundTasks, Depends
+from pydantic import BaseModel, Field
 
 from irb_watch.api.deps import get_runner, require_admin
 from irb_watch.auth.jwt import AuthUser
@@ -24,3 +25,23 @@ def run_all(
         raise ConflictError("a full run is already in progress")
     background.add_task(runner.run_all, MANUAL, admin.id)
     return {"status": "started"}
+
+
+class SelectedIn(BaseModel):
+    source_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+@router.post("/run-selected", status_code=202)
+def run_selected(
+    body: SelectedIn,
+    background: BackgroundTasks,
+    admin: AuthUser = Depends(require_admin),
+    runner: ScanRunner = Depends(get_runner),
+) -> dict:
+    """Scan the chosen sources now, with the daily run's rules: one worker per site (a site's
+    boards one after another, never in parallel), inactive, running and paused sources skipped
+    with the reason recorded. Refused while another full run is going."""
+    if runner.is_running():
+        raise ConflictError("a full run is already in progress")
+    background.add_task(runner.run_all, MANUAL, admin.id, frozenset(body.source_ids))
+    return {"status": "started", "count": len(set(body.source_ids))}

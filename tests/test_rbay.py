@@ -605,6 +605,14 @@ def test_an_rbay_board_address_becomes_a_source():
     assert url == f"https://www.r-bay.co.kr/agency/main/{AGENCY}?board=REGLA"
     assert config == {"agency": AGENCY, "board": "REGLA"}
     assert agency_key("https://www.r-bay.co.kr/main") is None
+    # Copied from the browser after clicking a link on R-BAY: "#" before "?board=".
+    for copied in (
+        "https://r-bay.co.kr/agency/main/WXlVK2E3RVp3L3loZ2JRYXFTMjRWQT09#?board=NOTI",
+        "https://r-bay.co.kr/agency/main/WXlVK2E3RVp3L3loZ2JRYXFTMjRWQT09#board=NOTI",
+        "https://r-bay.co.kr/agency/main/WXlVK2E3RVp3L3loZ2JRYXFTMjRWQT09?board=NOTI#",
+    ):
+        _, url, _ = detect_adapter(copied)
+        assert url == "https://www.r-bay.co.kr/agency/main/WXlVK2E3RVp3L3loZ2JRYXFTMjRWQT09?board=NOTI"
     # Hospitals also link the address without www; it is stored with www.
     _, url, _ = detect_adapter("https://r-bay.co.kr/agency/main/b1ZKS1VGblAvTU1hMU5Rb0xWcUp4UT09?board=NOTI")
     assert url == "https://www.r-bay.co.kr/agency/main/b1ZKS1VGblAvTU1hMU5Rb0xWcUp4UT09?board=NOTI"

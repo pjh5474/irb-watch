@@ -79,7 +79,12 @@ def detect_adapter(url: str) -> tuple[str, str, dict]:
     if (parts.hostname or "").lower() in RBAY_HOSTS:
         # One source per board: the hospital's R-BAY address plus ?board=<code>.
         agency = rbay_agency_key(f"https://{RBAY_HOST}{parts.path}")
-        board = (parse_qs(parts.query).get("board") or [""])[0].strip().upper()
+        # Addresses copied from R-BAY often end in "#" (its links are href="#"), so
+        # "...#?board=NOTI" puts the board after the fragment mark: read it from there too.
+        fragment_query = parts.fragment.lstrip("?")
+        board = (
+            parse_qs(parts.query).get("board") or parse_qs(fragment_query).get("board") or [""]
+        )[0].strip().upper()
         if agency is None:
             raise ValidationError(
                 "an R-BAY source needs the hospital's address, https://www.r-bay.co.kr/agency/main/<code>"

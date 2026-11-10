@@ -87,8 +87,15 @@ class ScanRunner:
     def is_running(self) -> bool:
         return self._run_lock.locked()
 
-    def run_all(self, trigger: str = SCHEDULED, actor_id: str | None = None) -> RunReport:
-        """Scan every active source (or, for CATCH_UP, the overdue ones).
+    def run_all(
+        self,
+        trigger: str = SCHEDULED,
+        actor_id: str | None = None,
+        only: frozenset[int] | None = None,
+    ) -> RunReport:
+        """Scan every active source (or, for CATCH_UP, the overdue ones; with `only`, just
+        those sources, which is how an admin's "scan selected" runs: same rules, one worker
+        per site, so one site is never scanned in parallel).
 
         One run at a time: if another full run is going, this one is skipped and recorded.
         """
@@ -107,6 +114,8 @@ class ScanRunner:
             now = self._clock()
             by_site: dict[str, list[Source]] = defaultdict(list)
             for source in self._list_sources():
+                if only is not None and source.id not in only:
+                    continue
                 if not source.is_active:
                     continue
                 if trigger == CATCH_UP and not self._is_overdue(source, now):
@@ -134,6 +143,7 @@ class ScanRunner:
                 title=f"Scan run finished ({trigger})",
                 payload={
                     "trigger": trigger,
+                    "selected": len(only) if only is not None else None,
                     "scanned": len(report.scanned),
                     "failed": sum(1 for s in report.scanned.values() if s == FAILED),
                     "skipped": len(report.skipped),
