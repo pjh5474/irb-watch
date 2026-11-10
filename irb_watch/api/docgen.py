@@ -145,6 +145,8 @@ class DraftIn(BaseModel):
 
 class MarkdownIn(BaseModel):
     markdown: str = Field(max_length=500_000)
+    # The version the edit started from; a newer one on the server answers 409.
+    base_version_no: int | None = None
 
 
 class ReviseIn(BaseModel):
@@ -214,7 +216,9 @@ def save_edit(
     service: DocgenService = Depends(get_docgen_service),
 ) -> VersionOut:
     """Saves a hand edit as a new version (no AI, not counted)."""
-    return VersionOut.of(service.save_edit(user.id, str(draft_id), body.markdown))
+    return VersionOut.of(
+        service.save_edit(user.id, str(draft_id), body.markdown, body.base_version_no)
+    )
 
 
 @router.post("/drafts/{draft_id}/revise", response_model=VersionOut)

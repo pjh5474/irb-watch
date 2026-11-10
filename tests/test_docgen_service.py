@@ -246,6 +246,16 @@ def test_ai_switched_off_after_the_draft_needs_the_box_again_on_revise(env):
     assert audit.entries[-1]["payload"]["ai_override_source_ids"] == [PUBLIC]
 
 
+def test_an_edit_built_on_an_old_version_is_refused(env):
+    service, store, *_ = env
+    draft = make(service).draft
+    service.revise("user-1", draft.id, "shorter")  # version 2, e.g. from another tab
+    with pytest.raises(ConflictError, match="newer version"):
+        service.save_edit("user-1", draft.id, "# Mine", base_version_no=1)
+    assert len(store.draft_versions[draft.id]) == 2
+    assert service.save_edit("user-1", draft.id, "# Mine", base_version_no=2).version_no == 3
+
+
 def test_two_saves_at_once_give_a_reason_not_a_crash(env):
     service, store, *_ = env
     draft = make(service).draft

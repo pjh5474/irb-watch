@@ -382,7 +382,12 @@ class DocgenService:
             )
         return versions
 
-    def save_edit(self, user_id: str, draft_id: str, markdown: str) -> DraftVersion:
+    def save_edit(
+        self, user_id: str, draft_id: str, markdown: str, base_version_no: int | None = None
+    ) -> DraftVersion:
+        """base_version_no: the version the user's edit started from. When a newer version
+        exists (another tab, or an AI revision), the save is refused instead of silently
+        building on old text."""
         self._profile(user_id)
         draft = self._own(user_id, draft_id)
         text = (markdown or "").strip()
@@ -391,6 +396,11 @@ class DocgenService:
         if len(text) > MAX_MARKDOWN_CHARS:
             raise ValidationError(f"the draft is too long (at most {MAX_MARKDOWN_CHARS} characters)")
         versions = self._latest(draft_id)
+        if base_version_no is not None and base_version_no != versions[-1].version_no:
+            raise ConflictError(
+                f"the draft has a newer version ({versions[-1].version_no}) than the one you "
+                f"edited ({base_version_no}); reload it and save again"
+            )
         if versions[-1].markdown == text:
             return versions[-1]
         try:
