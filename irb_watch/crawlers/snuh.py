@@ -140,8 +140,10 @@ class SnuhAdapter:
             raise self._login_expired(response)
         return response
 
-    def list_board(self, board_key: str, max_posts: int = 200) -> tuple[int, list[PostSummary]]:
-        """Read every list page. Raises IncompleteScanError if fewer posts than declared."""
+    def list_board(self, board_key: str) -> tuple[int, list[PostSummary]]:
+        """Read every list page (the whole list, so removals can be told apart from posts that
+        are only outside the tracked window). Raises IncompleteScanError if fewer posts than
+        declared."""
         seen: dict[str, PostSummary] = {}
         declared_total = 0
         for page in range(1, MAX_PAGES + 1):
@@ -172,8 +174,6 @@ class SnuhAdapter:
             raise IncompleteScanError(
                 f"board {board_key}: read {len(seen)} posts, site declares {declared_total}"
             )
-        if len(seen) > max_posts:
-            raise IncompleteScanError(f"board {board_key}: {len(seen)} posts exceeds cap {max_posts}")
         return declared_total, list(seen.values())
 
     def check_board_access(self, board_key: str) -> int:
@@ -203,8 +203,8 @@ class SnuhAdapter:
                 raise self._login_expired(response) from None
             raise
 
-    def scan_board(self, board_key: str, max_posts: int = 200) -> BoardSnapshot:
-        declared_total, summaries = self.list_board(board_key, max_posts)
+    def scan_board(self, board_key: str) -> BoardSnapshot:
+        declared_total, summaries = self.list_board(board_key)
         details = [self.fetch_post(s) for s in summaries if not s.is_secret]
         secrets = [s for s in summaries if s.is_secret]
         return BoardSnapshot(board_key, declared_total, details, secrets)

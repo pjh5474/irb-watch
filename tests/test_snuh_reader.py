@@ -19,7 +19,7 @@ class FakeAdapter:
         self.list_error = list_error
         self.closed = False
 
-    def list_board(self, board_key, max_posts):
+    def list_board(self, board_key):
         if self.list_error:
             raise self.list_error
         return len(self.summaries), self.summaries
@@ -54,8 +54,31 @@ class Sink:
         return f"stored/{sha[:8]}"
 
 
-def reader(adapter):
-    return SnuhSourceReader(adapter, "K", max_posts=50, max_file_bytes=1_000_000)
+def reader(adapter, max_posts=50):
+    return SnuhSourceReader(adapter, "K", max_posts=max_posts, max_file_bytes=1_000_000)
+
+
+def test_only_the_newest_posts_are_opened_and_the_rest_are_not_missing():
+    posts = [
+        summary("10", date="2026.01.05"),
+        summary("11", date="2026.03.01"),  # newest
+        summary("9", date="2025.12.30"),
+        summary("12", date="2026.03.01", secret=True),  # secret: never opened, never counted
+        summary("8", date="2026.02.10"),
+    ]
+    adapter = FakeAdapter(posts, {p.post_id: detail(p) for p in posts}, {})
+    reading = reader(adapter, max_posts=2).read(Sink())
+    assert [o.external_id for o in reading.observations] == ["11", "8"]
+    assert reading.unreadable_ids == {"12", "10", "9"}  # neither seen nor missing
+    assert reading.outside_window == 2 and reading.declared_total == 5
+
+
+def test_a_pinned_old_notice_at_the_top_does_not_take_a_place():
+    pinned_old = summary("1", date="2020.01.01")
+    posts = [pinned_old, summary("50", date="2026.10.01"), summary("49", date="2026.09.01")]
+    adapter = FakeAdapter(posts, {p.post_id: detail(p) for p in posts}, {})
+    reading = reader(adapter, max_posts=2).read(Sink())
+    assert [o.external_id for o in reading.observations] == ["50", "49"]
 
 
 def test_reads_a_post_with_a_text_pdf():

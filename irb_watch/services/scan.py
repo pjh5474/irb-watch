@@ -323,6 +323,9 @@ class ScanService:
                 payload={
                     "baseline": summary.baseline,
                     "posts": len(reading.observations),
+                    # On the list but older than the newest MAX_DOCS_PER_URL: not opened.
+                    "outside_window": getattr(reading, "outside_window", 0),
+                    "listed": reading.declared_total,
                     "new": summary.new,
                     "updated": summary.updated,
                     "removed": summary.removed,

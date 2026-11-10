@@ -17,7 +17,7 @@ from irb_watch.crawlers.errors import CrawlError, LoginExpiredError, SiteUnavail
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.rbay import RbayAdapter
 from irb_watch.crawlers.rbay_login import RbaySession, RbaySessionPool
-from irb_watch.crawlers.snuh_reader import ScanReading
+from irb_watch.crawlers.snuh_reader import ScanReading, pick_window
 from irb_watch.parsers.errors import ParseError
 
 
@@ -79,9 +79,9 @@ class RbaySourceReader:
             self._pool.release(session)
 
     def _read(self, adapter: RbayAdapter, file_sink: FileSink) -> ScanReading:
-        declared, summaries = adapter.list_board(self._board, self._max_posts)
+        declared, summaries = adapter.list_board(self._board)
         reading = ScanReading(declared_total=declared)
-        for summary in summaries:
+        for summary in pick_window(summaries, self._max_posts, reading):
             try:
                 reading.observations.append(self._observe(adapter, summary, file_sink))
             except (LoginExpiredError, SiteUnavailableError):

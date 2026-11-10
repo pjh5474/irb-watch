@@ -238,7 +238,7 @@ class RbayAdapter:
         self._check_session(response)
         return response
 
-    def list_board(self, code: str, max_posts: int = 200) -> tuple[int, list[PostSummary]]:
+    def list_board(self, code: str) -> tuple[int, list[PostSummary]]:
         menu = self.menu(code)
         seen: dict[str, PostSummary] = {}
         declared = 0
@@ -256,8 +256,6 @@ class RbayAdapter:
                 break
         if len(seen) != declared:
             raise IncompleteScanError(f"board {code}: read {len(seen)} posts, site declares {declared}")
-        if len(seen) > max_posts:
-            raise IncompleteScanError(f"board {code}: {len(seen)} posts exceeds cap {max_posts}")
         return declared, list(seen.values())
 
     def fetch_post(self, summary: PostSummary) -> PostDetail:

@@ -67,7 +67,9 @@ class Settings(BaseSettings):
     scan_cron: str = "0 6 * * *"
     scan_timezone: str = "Asia/Seoul"
     max_file_bytes: int = 20_000_000
-    max_docs_per_url: int = 200
+    # Each scan opens only the newest this-many posts of a board (the whole list is still read,
+    # so removals are found); older posts stay stored, frozen. Owner, 2026-11-10.
+    max_docs_per_url: int = 50
     # A scan is saved in one database call; refuse (needs_review) above this JSON size.
     # The largest real board so far is about 2 MB of text.
     max_scan_payload_bytes: int = 20_000_000

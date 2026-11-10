@@ -17,6 +17,7 @@ from irb_watch.core.state import VersionContent
 from irb_watch.crawlers.attachments import FileSink, observe_files
 from irb_watch.crawlers.errors import CrawlError, LoginExpiredError, SiteUnavailableError
 from irb_watch.crawlers.snuh import SnuhAdapter
+from irb_watch.crawlers.window import newest
 from irb_watch.parsers.errors import ParseError
 
 __all__ = ["FileSink", "ScanReading", "SnuhSourceReader", "iso_date"]
@@ -28,6 +29,26 @@ class ScanReading:
     failures: dict[str, str] = field(default_factory=dict)
     unreadable_ids: set[str] = field(default_factory=set)
     declared_total: int = 0
+    # Posts on the list that were not opened because they are older than the newest
+    # MAX_DOCS_PER_URL (crawlers/window.py). Also in unreadable_ids, so never "missing".
+    outside_window: int = 0
+
+
+def pick_window(
+    summaries: list, limit: int, reading: "ScanReading"
+) -> list:
+    """The posts to open: secret posts are skipped, then the newest `limit` of the rest. The
+    others are marked unreadable on `reading` (neither seen nor missing)."""
+    readable = []
+    for summary in summaries:
+        if summary.is_secret:
+            reading.unreadable_ids.add(summary.post_id)
+        else:
+            readable.append(summary)
+    chosen, rest = newest(readable, limit)
+    reading.unreadable_ids.update(s.post_id for s in rest)
+    reading.outside_window = len(rest)
+    return chosen
 
 
 def iso_date(site_date: str) -> str | None:
@@ -52,12 +73,9 @@ class SnuhSourceReader:
 
     def read(self, file_sink: FileSink) -> ScanReading:
         """List errors (layout change, incomplete list, network) propagate: the whole scan fails."""
-        declared_total, summaries = self._adapter.list_board(self._board_key, self._max_posts)
+        declared_total, summaries = self._adapter.list_board(self._board_key)
         reading = ScanReading(declared_total=declared_total)
-        for summary in summaries:
-            if summary.is_secret:
-                reading.unreadable_ids.add(summary.post_id)
-                continue
+        for summary in pick_window(summaries, self._max_posts, reading):
             try:
                 reading.observations.append(self._observe(summary, file_sink))
             except (LoginExpiredError, SiteUnavailableError):
