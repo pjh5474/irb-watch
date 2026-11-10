@@ -14,8 +14,8 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       # Some offline tests start a real headless Chromium against a local fake site.
       - run: uv run playwright install --with-deps chromium
