@@ -36,6 +36,18 @@ class FileContent:
         return sha256_hex(self.text.encode("utf-8")) if self.text is not None else None
 
 
+# File reasons that come with a warning (an admin can mark them OK): unreadable files and
+# attachments too big to download. Same strings as parsers/errors.py.
+FLAGGED_REASONS = ("unreadable", "too_large")
+
+
+def warning_key(reason: str, files: tuple["FileContent", ...]) -> str:
+    """What an admin's OK is tied to: the warning text and the hashes of the flagged files.
+    The same text about a replaced file (new hash) is a new problem and asks again."""
+    shas = sorted(f.sha256 for f in files if f.hash_only_reason in FLAGGED_REASONS)
+    return f"{reason}\n{','.join(shas)}"
+
+
 @dataclass(frozen=True)
 class VersionContent:
     title: str
@@ -76,6 +88,9 @@ class StoredDocument:
     removed_at: datetime | None = None
     review_reason: str | None = None  # why the status is needs_review, for users to read
     versions: list[StoredVersion] = field(default_factory=list)
+    # File warnings an admin marked OK (warning_key of what they saw): while a scan produces
+    # the same key the document stays current. From the admin-only table document_reviews.
+    acknowledged_key: str | None = None
 
     @property
     def latest(self) -> StoredVersion:

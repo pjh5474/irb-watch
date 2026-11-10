@@ -119,6 +119,17 @@ def test_a_zip_becomes_itself_plus_each_file_inside():
     assert len({r.sha256 for r in records}) == 3
 
 
+def test_file_notes_never_contain_the_warning_separator():
+    # "the zip is password-protected; its files cannot be read" -> no ";" in the stored note,
+    # so a post's warnings ("a; b") can be split back exactly.
+    data = bytearray(make_zip({"a.txt": b"x"}))
+    central = data.rfind(b"PK\x01\x02")
+    data[central + 8] |= 0x1
+    records, warnings = read_attachment("pack.zip", "1KB", bytes(data), "z" * 64, sink([]), 10_000)
+    assert ";" not in records[0].note and ";" not in warnings[0]
+    assert "password-protected, its files cannot be read" in records[0].note
+
+
 def test_a_zip_that_cannot_be_unpacked_is_kept_and_flagged():
     records, warnings = read_attachment("pack.zip", "1KB", b"PK\x03\x04 broken", "z" * 64, sink([]), 10_000)
     assert len(records) == 1 and records[0].hash_only_reason == UNREADABLE

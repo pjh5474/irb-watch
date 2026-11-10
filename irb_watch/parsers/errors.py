@@ -20,6 +20,8 @@ NO_TEXT_LAYER = "no_text_layer"
 UNSUPPORTED_FORMAT = "unsupported_format"
 DISTRIBUTION_PROTECTED = "distribution_protected"
 UNREADABLE = "unreadable"
+TOO_LARGE = "too_large"  # an attachment over the size limit: listed, not downloaded
+# (core/state.py FLAGGED_REASONS lists UNREADABLE and TOO_LARGE by value; keep them equal.)
 
 
 class ParseError(Exception):

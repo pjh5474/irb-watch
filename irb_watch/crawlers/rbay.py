@@ -23,6 +23,7 @@ from irb_watch.core.hashing import collapse_whitespace, sha256_hex
 from irb_watch.core.models import AttachmentRef, DownloadedFile, PostDetail, PostSummary
 from irb_watch.crawlers.errors import (
     FetchError,
+    FileTooLargeError,
     IncompleteScanError,
     LayoutChangedError,
     LoginExpiredError,
@@ -37,6 +38,7 @@ AGENCY_PATH = re.compile(r"^/agency/main/([A-Za-z0-9_\-=]{8,128})$")
 # board codes outside this list are refused so the adapter never opens an unknown page.
 BOARDS = {"REGLA": "관련규정", "FORM_BOX": "양식함", "NOTI": "공지"}
 ROWS_PER_PAGE = 200  # the largest page size the site offers
+CHECK_MAX_BYTES = 64_000  # the file check answers a few dozen bytes of JSON
 MAX_PAGES = 20
 
 _BOARD_LINK = re.compile(r"^/mng/board/([A-Za-z_]+)/([A-Za-z]+)/selectBoardList$")
@@ -194,6 +196,7 @@ def parse_detail(html: str, summary: PostSummary) -> PostDetail:
                     filename=collapse_whitespace(link.get_text(" ")),
                     size_label=size_el.get_text(strip=True) if size_el else "",
                     url=key,  # the download key, re-read from the post before every download
+                    stable_id=key,  # the same file keeps its key across sessions (seen live)
                 )
             )
     if not body and not attachments:
@@ -284,7 +287,14 @@ class RbayAdapter:
         key = attachment.url
         if not _KEY.match(key):
             raise FetchError(f"bad download key for {attachment.filename}")
-        check = self._fetcher.post(f"{BASE_URL}/v1/file/fileExistChk", json={"downloadKey": key})
+        try:
+            check = self._fetcher.post(
+                f"{BASE_URL}/v1/file/fileExistChk", json={"downloadKey": key}, max_bytes=CHECK_MAX_BYTES
+            )
+        except FileTooLargeError:
+            # A short JSON answer is expected; anything this big is a site or session problem,
+            # never "the file is too large" (only the download itself may say that).
+            raise FetchError(f"R-BAY's file check for {attachment.filename} gave an unexpected answer") from None
         self._check_session(check)
         if '"0000"' not in check.text:
             raise FetchError(f"R-BAY says {attachment.filename} is not available: {check.text[:120]}")

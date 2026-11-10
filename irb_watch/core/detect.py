@@ -28,6 +28,7 @@ from irb_watch.core.state import (
     StoredDocument,
     StoredVersion,
     VersionContent,
+    warning_key,
 )
 
 REMOVAL_AFTER_MISSES = 2
@@ -142,11 +143,16 @@ def _update_existing(
 
 
 def _apply_warnings(doc: StoredDocument, obs: Observation, result: DetectionResult) -> None:
-    """A post seen this scan is `current`, or `needs_review` with the reasons if it has warnings."""
-    if obs.warnings:
+    """A post seen this scan is `current`, or `needs_review` with the reasons if it has warnings.
+
+    File warnings an admin already marked OK (the same text about the same files) keep it
+    `current`: the files still show their notes, but nobody is asked again. Other text, or a
+    replaced file with the same problem, flags it again."""
+    reason = "; ".join(obs.warnings) if obs.warnings else None
+    if reason is not None and warning_key(reason, obs.content.files) != doc.acknowledged_key:
         doc.status = NEEDS_REVIEW
-        doc.review_reason = "; ".join(obs.warnings)
-        result.needs_review[obs.external_id] = doc.review_reason
+        doc.review_reason = reason
+        result.needs_review[obs.external_id] = reason
     else:
         doc.status = CURRENT
         doc.review_reason = None

@@ -6,6 +6,11 @@ class FetchError(CrawlError):
     """Network, HTTP status, redirect, size or URL-safety failure."""
 
 
+class FileTooLargeError(FetchError):
+    """A response is bigger than the size limit. For an attachment this skips only that file:
+    the post is kept and the file is listed with this reason."""
+
+
 class TransientFetchError(FetchError):
     """One request kept failing temporarily (502/503/504, timeouts) through all its tries.
 

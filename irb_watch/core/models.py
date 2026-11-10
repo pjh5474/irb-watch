@@ -18,6 +18,9 @@ class AttachmentRef:
     filename: str
     size_label: str  # as shown by the site, e.g. "66 KB"
     url: str  # re-read from the detail page before every download; do not persist
+    # An id the site keeps for this very file across sessions (R-BAY's download key), if any.
+    # Lets a file that is never downloaded (too large) still be told apart from a replacement.
+    stable_id: str | None = None
 
 
 @dataclass(frozen=True)

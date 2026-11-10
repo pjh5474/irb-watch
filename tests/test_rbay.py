@@ -12,6 +12,7 @@ from irb_watch.core.models import AttachmentRef, PostSummary
 from irb_watch.crawlers.credentials import Credentials
 from irb_watch.crawlers.errors import (
     FetchError,
+    FileTooLargeError,
     IncompleteScanError,
     LayoutChangedError,
     LoginExpiredError,
@@ -231,6 +232,23 @@ def test_an_html_page_instead_of_a_file_is_an_error():
     a = RbayAdapter(fetcher(handler), AGENCY, parse_gate_menus(GATE))
     with pytest.raises(FetchError, match="HTML page"):
         a.download(AttachmentRef("a.pdf", "1KB", PDF_KEY))
+
+
+def test_an_oversized_file_check_answer_is_a_site_problem_not_a_big_file():
+    def handler(request):
+        if request.url.path == "/v1/file/fileExistChk":
+            return httpx.Response(200, text="<html>" + "x" * 100_000, headers={"content-type": "text/html"})
+        return fake_site([])(request)
+
+    a = RbayAdapter(fetcher(handler), AGENCY, parse_gate_menus(GATE))
+    with pytest.raises(FetchError, match="unexpected answer") as caught:
+        a.download(AttachmentRef("a.pdf", "1KB", PDF_KEY))
+    assert not isinstance(caught.value, FileTooLargeError)
+
+
+def test_rbay_files_carry_their_download_key_as_a_stable_id():
+    detail = parse_detail(DETAIL, summary())
+    assert detail.attachments[0].stable_id == PDF_KEY
 
 
 def test_a_file_the_site_says_is_missing_is_not_downloaded():

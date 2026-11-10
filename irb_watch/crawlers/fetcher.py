@@ -14,6 +14,7 @@ import httpx
 
 from irb_watch.crawlers.errors import (
     FetchError,
+    FileTooLargeError,
     RobotsDisallowedError,
     SiteUnavailableError,
     TransientFetchError,
@@ -237,7 +238,7 @@ class SafeFetcher:
                     content = stream_with_cap(r.iter_bytes(), max_bytes)
                     return FetchedResponse(url, r.status_code, r.headers, content)
             except TooLargeError as exc:
-                raise FetchError(f"too large: {url}: {exc}") from exc
+                raise FileTooLargeError(f"too large: {url}: {exc}") from exc
             except httpx.TransportError as exc:  # connect errors, timeouts, dropped connections
                 raise _Transient(f"request failed: {url}: {exc}") from exc
             except httpx.HTTPError as exc:

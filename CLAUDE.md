@@ -58,7 +58,7 @@ Supabase CLI v3 targets the local stack by default; hosted needs `--remote`. The
 - Keep `docs/decisions.md` and `docs/plan.md` current when a decision changes.
 
 ## Where things stand (2026-11-10)
-**All 20 migrations are applied** (on 2026-11-10: `user_projects`, private per-user folders of sites, see decisions.md "User projects"; `rbay_adapter`, see "R-BAY boards") (checked with `npx supabase migration list --remote` on 2026-11-10). Each feature below has its backend and frontend built and committed. The frontend is the separate repo `irb-watch-frontend`.
+**All 22 migrations are applied** (on 2026-11-10: `user_projects`, private per-user folders of sites, see decisions.md "User projects"; `rbay_adapter`, see "R-BAY boards"; `file_warnings_review` and `document_reviews_table`, see "File warnings and big files") (checked with `npx supabase migration list --remote` on 2026-11-10). Each feature below has its backend and frontend built and committed. The frontend is the separate repo `irb-watch-frontend`.
 
 Working and verified live: login and admin API, sources, manual scans of two SNUH boards (data stored in the project: sources 4 and 5), PDF/HWP/HWPX/DOCX text, change detection with version history, AI summaries (OpenAI `gpt-6-luna` + Jev), on-demand whole-document summaries, a Docker deploy to an AWS server (`docs/deploy-ec2.md`; `https://irb-api.warwarsn.online`).
 

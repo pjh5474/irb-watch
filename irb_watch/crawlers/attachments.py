@@ -15,8 +15,9 @@ from collections.abc import Callable, Iterable
 from irb_watch.core.hashing import sha256_hex
 from irb_watch.core.models import AttachmentRef, DownloadedFile
 from irb_watch.core.state import FileContent
+from irb_watch.crawlers.errors import FileTooLargeError
 from irb_watch.parsers.archive import ArchiveError, is_zip, iter_zip
-from irb_watch.parsers.errors import UNREADABLE, UNSUPPORTED_FORMAT, ParseError
+from irb_watch.parsers.errors import TOO_LARGE, UNREADABLE, UNSUPPORTED_FORMAT, ParseError
 from irb_watch.parsers.formats import extract_text
 
 # file_sink(sha256, filename, content) stores the original and returns its storage path.
@@ -31,6 +32,12 @@ def size_label(n: int) -> str:
     return f"{n}B"
 
 
+def plain_note(note: str | None) -> str | None:
+    """A file note never contains ";": a post's warnings are joined with "; ", and keeping
+    that separator out of the notes lets them be split back exactly (services/reviews.py)."""
+    return note.replace(";", ",") if note else note
+
+
 def _record(name: str, label: str, sha: str, content: bytes, file_sink: FileSink) -> FileContent:
     """Read first, store second. Raises ParseError (nothing stored) when the bytes are not
     what the name promises."""
@@ -42,7 +49,7 @@ def _record(name: str, label: str, sha: str, content: bytes, file_sink: FileSink
         text=extracted.document.text if extracted.document else None,
         hash_only_reason=extracted.hash_only_reason,
         storage_path=file_sink(sha, name, content),
-        note=extracted.note,
+        note=plain_note(extracted.note),
     )
 
 
@@ -71,7 +78,7 @@ def read_attachment(
                 # Inside a zip this is a property of the archive's content, not a download
                 # error: keep the file (downloadable) and flag it.
                 # The parser's message starts with the file name; the warning adds it once.
-                reason = str(exc).removeprefix(f"{inner}: ")
+                reason = plain_note(str(exc).removeprefix(f"{inner}: "))
                 record = FileContent(
                     inner, inner_label, inner_sha, None, UNREADABLE,
                     file_sink(inner_sha, inner, member.content), note=reason,
@@ -82,9 +89,10 @@ def read_attachment(
     except ArchiveError as exc:
         # Files already stored stay in storage (hash-named, harmless); the version lists only
         # the zip, with the reason.
+        note = plain_note(str(exc))
         return (
-            [FileContent(name, label, sha, None, UNREADABLE, file_sink(sha, name, content), note=str(exc))],
-            [f"{name}: {exc}"],
+            [FileContent(name, label, sha, None, UNREADABLE, file_sink(sha, name, content), note=note)],
+            [f"{name}: {note}"],
         )
 
     original = FileContent(
@@ -92,6 +100,30 @@ def read_attachment(
         note=f"zip archive with {len(inner_records)} files, each listed separately",
     )
     return [original, *inner_records], warnings
+
+
+def too_large_record(
+    name: str, label: str, max_file_bytes: int, stable_id: str | None = None
+) -> FileContent:
+    """An attachment over the size limit, listed but not downloaded. Nothing is stored for it.
+
+    Its stand-in hash comes from what the site tells about the file without downloading it:
+    the name, the size shown, and the site's own id for the file when it has one (R-BAY's
+    download key; a replaced file gets a new key even at the same size). The same big file is
+    then "unchanged" on the next scan and a replacement counts as a change. Known limit: if
+    MAX_FILE_BYTES is later raised above the file's size, the next scan downloads it and its
+    real hash replaces the stand-in, which shows once as a replaced file."""
+    limit = f"{max_file_bytes / 1_000_000:.0f} MB"
+    shown = f" (the site says {label})" if label else ""
+    return FileContent(
+        filename=name,
+        size_label=label,
+        sha256=sha256_hex(f"too-large\0{name}\0{label}\0{stable_id or ''}".encode()),
+        text=None,
+        hash_only_reason=TOO_LARGE,
+        storage_path=None,
+        note=f"not downloaded: larger than {limit}{shown}, open it on the hospital site",
+    )
 
 
 def observe_files(
@@ -106,10 +138,19 @@ def observe_files(
     warnings: list[str] = []
     seen: dict[str, int] = {}
     for ref in refs:
-        downloaded = download(ref, max_file_bytes)
         count = seen.get(ref.filename, 0) + 1
         seen[ref.filename] = count
         name = ref.filename if count == 1 else f"{ref.filename} ({count})"
+        try:
+            downloaded = download(ref, max_file_bytes)
+        except FileTooLargeError:
+            # Only the file body can say "too large" here: adapters turn an oversized answer
+            # to any other request (a check, a login page) into a plain FetchError, which fails
+            # the post with its reason. Only this file is skipped; the post is kept.
+            record = too_large_record(name, ref.size_label, max_file_bytes, ref.stable_id)
+            files.append(record)
+            warnings.append(f"{name}: {record.note}")
+            continue
         records, problems = read_attachment(
             name, ref.size_label, downloaded.content, downloaded.sha256, file_sink, max_file_bytes
         )

@@ -40,6 +40,7 @@ from irb_watch.db.documents import (
 )
 from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
 from irb_watch.db.members import SupabaseMemberStore
+from irb_watch.db.reviews import SupabaseReviewStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
@@ -57,6 +58,7 @@ from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.members import MemberService
+from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
 from irb_watch.services.source_login import cookies_for_source, login_site
@@ -195,6 +197,11 @@ def get_scan_service() -> ScanService:
         SupabaseAuditSink(client),
         enricher=build_enricher(extra=_extra("summary")),
     )
+
+
+def get_review_service() -> ReviewService:
+    client = get_supabase_client()
+    return ReviewService(SupabaseReviewStore(client), SupabaseAuditSink(client))
 
 
 def get_download_service() -> DownloadService:

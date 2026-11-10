@@ -22,6 +22,49 @@ def _dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def version_files(client: Client, version_ids: list[int]) -> dict[int, tuple[FileContent, ...]]:
+    """The files of these versions, in the order they were saved: the one query every reader
+    of stored files uses (scan comparison, summaries, file-warning reviews)."""
+    found: dict[int, list[FileContent]] = {}
+    if not version_ids:
+        return {}
+    rows = (
+        client.table("document_version_files")
+        .select("version_id, filename, size_label, sha256, text_content, hash_only_reason, storage_path, extract_note")
+        .in_("version_id", version_ids)
+        .order("id")
+        .execute()
+        .data
+    )
+    for f in rows:
+        found.setdefault(f["version_id"], []).append(
+            FileContent(
+                filename=f["filename"],
+                size_label=f["size_label"] or "",
+                sha256=f["sha256"],
+                text=f["text_content"],
+                hash_only_reason=f["hash_only_reason"],
+                storage_path=f["storage_path"],
+                note=f["extract_note"],
+            )
+        )
+    return {vid: tuple(files) for vid, files in found.items()}
+
+
+def acknowledged_keys(client: Client, document_ids: list[int]) -> dict[int, str]:
+    """File warnings an admin marked OK, per document (admin-only table document_reviews)."""
+    if not document_ids:
+        return {}
+    rows = (
+        client.table("document_reviews")
+        .select("document_id, ack_key")
+        .in_("document_id", document_ids)
+        .execute()
+        .data
+    )
+    return {r["document_id"]: r["ack_key"] for r in rows}
+
+
 def _source(row: dict) -> Source:
     return Source(
         id=row["id"],
@@ -159,20 +202,13 @@ class SupabaseScanRepo:
         docs = self._c.table("documents").select("*").eq("source_id", source_id).execute().data
         version_ids = [d["latest_version_id"] for d in docs if d["latest_version_id"]]
         versions = {}
-        files_by_version: dict[int, list[dict]] = {}
         if version_ids:
             for row in (
                 self._c.table("document_versions").select("*").in_("id", version_ids).execute().data
             ):
                 versions[row["id"]] = row
-            for row in (
-                self._c.table("document_version_files")
-                .select("*")
-                .in_("version_id", version_ids)
-                .execute()
-                .data
-            ):
-                files_by_version.setdefault(row["version_id"], []).append(row)
+        files_by_version = version_files(self._c, version_ids)
+        acks = acknowledged_keys(self._c, [d["id"] for d in docs])
 
         for d in docs:
             doc = StoredDocument(
@@ -184,22 +220,12 @@ class SupabaseScanRepo:
                 miss_count=d["miss_count"],
                 removed_at=_dt(d["removed_at"]),
                 review_reason=d.get("review_reason"),
+                acknowledged_key=acks.get(d["id"]),
             )
             v = versions.get(d["latest_version_id"])
             if v is None:
                 continue  # a document without a version cannot be compared; skip it
-            files = tuple(
-                FileContent(
-                    filename=f["filename"],
-                    size_label=f["size_label"] or "",
-                    sha256=f["sha256"],
-                    text=f["text_content"],
-                    hash_only_reason=f["hash_only_reason"],
-                    storage_path=f["storage_path"],
-                    note=f["extract_note"],
-                )
-                for f in files_by_version.get(v["id"], [])
-            )
+            files = files_by_version.get(v["id"], ())
             doc.versions.append(
                 StoredVersion(
                     v["version_no"],
@@ -382,25 +408,7 @@ class SupabaseSummaryRepo:
             .execute()
             .data[0]
         )
-        rows = (
-            self._c.table("document_version_files")
-            .select("filename, size_label, sha256, text_content, hash_only_reason, extract_note")
-            .eq("version_id", version["id"])
-            .order("id")
-            .execute()
-            .data
-        )
-        files = tuple(
-            FileContent(
-                filename=f["filename"],
-                size_label=f["size_label"] or "",
-                sha256=f["sha256"],
-                text=f["text_content"],
-                hash_only_reason=f["hash_only_reason"],
-                note=f["extract_note"],
-            )
-            for f in rows
-        )
+        files = version_files(self._c, [version["id"]]).get(version["id"], ())
         return DocumentForSummary(
             document_id=doc["id"],
             source_id=doc["source_id"],
