@@ -42,7 +42,10 @@ MAX_PAGES = 20
 _BOARD_LINK = re.compile(r"^/mng/board/([A-Za-z_]+)/([A-Za-z]+)/selectBoardList$")
 _TOTAL = re.compile(r"총\s*([\d,]+)\s*건")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_KEY = re.compile(r"^[0-9a-f]{32,128}$")
+# Download keys come in two forms (both seen live 2026-11-10): newer posts use 64 hex
+# characters, posts from 2022 and earlier use base64 (44 characters with + / =). Anything else
+# is refused, so nothing unexpected is ever sent back to the site.
+_KEY = re.compile(r"^(?:[0-9a-f]{32,128}|[A-Za-z0-9+/]{16,172}={0,2})$")
 # A session that is gone answers with the login page or the site's 403 page.
 _SESSION_GONE = re.compile(r"/login|/403\.html|/error", re.IGNORECASE)
 
@@ -165,11 +168,12 @@ def parse_detail(html: str, summary: PostSummary) -> PostDetail:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("div.write_table table")
     if table is None:
-        raise LayoutChangedError(f"post {summary.post_id}: post table not found")
+        # The scan summary puts "post <id>:" in front of these reasons.
+        raise LayoutChangedError("post table not found")
     fields = _fields(table)
     title_td, body_td = fields.get("제목"), fields.get("내용")
     if title_td is None or body_td is None:
-        raise LayoutChangedError(f"post {summary.post_id}: title or body row not found")
+        raise LayoutChangedError("title or body row not found")
     editor = body_td.select_one(".editor_read") or body_td
     # Only the post's own text: author, phone and view counts stay out (personal data, and
     # they would make every view look like a change).
@@ -181,7 +185,9 @@ def parse_detail(html: str, summary: PostSummary) -> PostDetail:
         for link in files_td.select("a[data-download-key]"):
             key = link.get("data-download-key", "")
             if not _KEY.match(key):
-                raise LayoutChangedError(f"post {summary.post_id}: unexpected download key")
+                raise LayoutChangedError(
+                    f"unexpected download key format for {collapse_whitespace(link.get_text(' '))}"
+                )
             size_el = link.find_next_sibling("em")
             attachments.append(
                 AttachmentRef(
@@ -191,7 +197,7 @@ def parse_detail(html: str, summary: PostSummary) -> PostDetail:
                 )
             )
     if not body and not attachments:
-        raise LayoutChangedError(f"post {summary.post_id}: empty post")
+        raise LayoutChangedError("empty post (no text and no files)")
     return PostDetail(
         summary=summary,
         body_text=body,

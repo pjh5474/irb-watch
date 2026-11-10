@@ -126,6 +126,26 @@ def test_detail_keeps_only_the_post_text_and_its_files():
     ]
 
 
+OLD_KEY = "jO78xr5/vh5HV1CzUjGsRvpT+8/rgULdK+BP7dQrjA=="  # base64, as on posts from 2022
+
+
+def test_older_posts_use_base64_download_keys():
+    detail = parse_detail(DETAIL.replace(PDF_KEY, OLD_KEY), summary())
+    assert detail.attachments[0].url == OLD_KEY
+    requests = []
+    adapter(requests).download(detail.attachments[0])
+    assert json.loads(requests[-2][2]) == {"downloadKey": OLD_KEY}
+    # "+", "/" and "=" survive the form encoding unchanged.
+    assert parse_qs(requests[-1][2], keep_blank_values=True)["downloadKey"] == [OLD_KEY]
+
+
+def test_reasons_do_not_repeat_the_post_id():
+    # The scan summary already writes "post <id>: <reason>".
+    with pytest.raises(LayoutChangedError) as caught:
+        parse_detail(DETAIL.replace(PDF_KEY, "../../etc"), summary())
+    assert "1842962" not in str(caught.value) and "(공문)" in str(caught.value)
+
+
 def test_detail_changes_are_layout_changes():
     with pytest.raises(LayoutChangedError):
         parse_detail(DETAIL.replace("write_table", "other"), summary())

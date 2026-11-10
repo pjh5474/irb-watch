@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--keyring", action="store_true", help="read the login from Credential Manager"
     )
+    parser.add_argument("--post", help="check this post id instead of the first with files")
     args = parser.parse_args(argv)
 
     _, _, config = detect_adapter(args.url)
@@ -52,7 +53,10 @@ def main(argv: list[str] | None = None) -> int:
         declared, posts = adapter.list_board(config["board"])
         print(f"2. board {config['board']}: {declared} posts declared, {len(posts)} read")
         with_files = None
-        for post in posts[:10]:
+        chosen = [p for p in posts if p.post_id == args.post] if args.post else posts[:10]
+        if args.post and not chosen:
+            print(f"3. post {args.post} is not on this board")
+        for post in chosen:
             detail = adapter.fetch_post(post)
             if detail.attachments:
                 with_files = detail
