@@ -2,6 +2,19 @@
 # irb-api.warwarsn.online). Caddy gets and renews a free certificate by itself; ports 80
 # and 443 must be open to the internet and the DNS record must point at this server.
 {$API_DOMAIN} {
-	encode zstd gzip
-	reverse_proxy api:8000
+	# The assistant's streamed answers (server-sent events): no compression and no buffering,
+	# otherwise the text arrives all at once at the end.
+	@stream {
+		method POST
+		path /agent/conversations/*/messages
+	}
+	handle @stream {
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+	handle {
+		encode zstd gzip
+		reverse_proxy api:8000
+	}
 }
