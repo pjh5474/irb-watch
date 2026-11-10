@@ -59,7 +59,7 @@ from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.members import MemberService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
-from irb_watch.services.source_login import cookies_for_source
+from irb_watch.services.source_login import cookies_for_source, login_site
 from irb_watch.services.sources import RBAY_ADAPTER, Source, SourceService
 from irb_watch.services.summaries import SummaryService
 from irb_watch.services.token_login import FailureLimiter, TokenLoginService
@@ -141,6 +141,7 @@ def build_reader(source: Source) -> SourceReader:
             get_credential_store(),
             source.config["login_user"],
             source.config["agency"],
+            login_site(source),
             source.config["board"],
             settings.max_docs_per_url,
             settings.max_file_bytes,

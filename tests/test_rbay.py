@@ -16,6 +16,7 @@ from irb_watch.crawlers.errors import (
     LayoutChangedError,
     LoginExpiredError,
     LoginRejectedError,
+    MissingLoginError,
     SiteUnavailableError,
 )
 from irb_watch.crawlers.fetcher import SafeFetcher
@@ -37,8 +38,10 @@ from irb_watch.crawlers.rbay_login import (
     RbaySession,
     RbaySessionPool,
     logout,
+    rbay_site_name,
 )
 from irb_watch.crawlers.rbay_reader import RbaySourceReader
+from irb_watch.crawlers.sessions import valid_name
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.sources import RBAY_ADAPTER, SourceService, detect_adapter
 from tests.fakes import FakeAudit
@@ -52,6 +55,7 @@ AGENCY = "emNyaVJpcTBZT0RnUmVvL2d6Qlordz09"
 REGLA = BoardMenu("REGLA", "N", "2604000000")
 PDF_KEY = "aeef8f7775d19902fcff2da70cf41f58294474d8083663cbd1e07efb2f5039e8"
 ZIP_KEY = "bbbb8f7775d19902fcff2da70cf41f58294474d8083663cbd1e07efb2f5039e8"
+SITE = f"rbay-{AGENCY}"
 
 
 def summary(post_id="1842962"):
@@ -262,13 +266,23 @@ def test_post_before_list_is_refused():
 DEFAULT_CREDS = Credentials("id", "pw")
 
 
+HOSPITALS = (AGENCY, "OTHERHOSPITAL", "A", "B")
+
+
 class Store:
-    def __init__(self, creds=DEFAULT_CREDS):
+    """Answers only under the exact per-hospital site names (so a wrong name fails the test),
+    with the same login for each hospital unless `per_site` says otherwise."""
+
+    def __init__(self, creds=DEFAULT_CREDS, per_site=None):
         self.creds = creds
+        self.per_site = per_site
+        self.asked = []
 
     def get(self, user, site):
-        assert site == "rbay"
-        return self.creds
+        self.asked.append(site)
+        if self.per_site is not None:
+            return self.per_site.get(site)
+        return self.creds if site in {rbay_site_name(h) for h in HOSPITALS} else None
 
     def set(self, user, site, credentials):
         self.creds = credentials
@@ -313,7 +327,20 @@ def make_pool(outcome=None):
         return new_session(agency)
 
     pool = RbaySessionPool(login, lambda s: logouts.append(s) or True, lambda: now[0], timers)
-    return pool, now, logins, logouts, timers
+    return Pool(pool), now, logins, logouts, timers
+
+
+class Pool:
+    """The pool, with the site name worked out the way scans do it."""
+
+    def __init__(self, pool):
+        self.pool = pool
+
+    def acquire(self, user, agency, store, **kw):
+        return self.pool.acquire(user, agency, rbay_site_name(agency), store, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self.pool, name)
 
 
 def test_the_boards_of_one_hospital_share_one_login():
@@ -397,10 +424,37 @@ def test_site_trouble_is_not_remembered_as_a_rejection():
     assert pool.acquire("owner", AGENCY, Store()).fresh  # tried again at once
 
 
-def test_missing_credentials_are_a_rejection_with_a_reason():
-    pool, *_ = make_pool()
-    with pytest.raises(LoginRejectedError, match="no stored R-BAY login"):
+def test_a_missing_login_is_a_setup_gap_not_a_refusal():
+    pool, now, logins, _, _ = make_pool()
+    with pytest.raises(MissingLoginError, match=f"site 'rbay-{AGENCY}'.*admin page") as caught:
         pool.acquire("owner", AGENCY, Store(None))
+    # Not a LoginRejectedError, so the scan service flags the source without pausing it.
+    assert not isinstance(caught.value, LoginRejectedError) and logins == []
+
+
+def test_each_hospital_uses_its_own_stored_login():
+    pool, now, logins, _, _ = make_pool()
+    store = Store(per_site={rbay_site_name("A"): Credentials("a-id", "pw-a")})
+    pool.acquire("owner", "A", store)
+    with pytest.raises(MissingLoginError, match="at this hospital"):
+        pool.acquire("owner", "B", store)  # A's login is never tried at B
+    assert logins == [("A", "pw-a")]
+    assert store.asked == ["rbay-A", "rbay-B", "rbay"]  # B's own name, then the old shared one
+
+
+def test_a_login_saved_under_the_old_shared_name_still_works():
+    pool, now, logins, _, _ = make_pool()
+    store = Store(per_site={"rbay": Credentials("old-id", "old-pw")})
+    assert pool.acquire("owner", AGENCY, store).fresh
+    assert logins == [(AGENCY, "old-pw")]
+
+
+def test_site_names_are_valid_store_names():
+    assert rbay_site_name(AGENCY) == f"rbay-{AGENCY}"
+    padded = rbay_site_name("abc==")  # base64 padding: not allowed in a store name
+    long_code = rbay_site_name("x" * 100)
+    assert padded.startswith("rbay-") and len(padded) == 29 and valid_name(padded)
+    assert len(long_code) == 29 and long_code == rbay_site_name("x" * 100)  # stable
 
 
 def test_a_discarded_session_is_never_handed_out_again():
@@ -438,7 +492,8 @@ class FakePool:
         self.released, self.discarded, self.person = [], [], []
         self._fresh = list(fresh)
 
-    def acquire(self, user, agency, credentials, person_started=False):
+    def acquire(self, user, agency, site, credentials, person_started=False):
+        assert site == rbay_site_name(agency)
         self.person.append(person_started)
         return Lease(self.session, self._fresh.pop(0) if self._fresh else True)
 
@@ -470,7 +525,7 @@ def test_reader_turns_a_board_into_observations_and_unpacks_zips():
 
     pool = FakePool()
     stored = []
-    reader = RbaySourceReader(pool, Store(), "owner", AGENCY, "REGLA", 200, 10_000_000, lambda s: fetcher(handler))
+    reader = RbaySourceReader(pool, Store(), "owner", AGENCY, SITE, "REGLA", 200, 10_000_000, lambda s: fetcher(handler))
     reading = reader.read(lambda sha, name, content: stored.append(name) or sha)
     assert reading.declared_total == 2 and len(reading.observations) == 2
     obs = reading.observations[0]
@@ -485,7 +540,8 @@ def test_reader_turns_a_board_into_observations_and_unpacks_zips():
 def test_reader_drops_a_session_that_ended():
     pool = FakePool()
     reader = RbaySourceReader(
-        pool, Store(), "owner", AGENCY, "REGLA", 200, 10_000_000, lambda s: fetcher(fake_site([], session_gone=True))
+        pool, Store(), "owner", AGENCY, SITE, "REGLA", 200, 10_000_000,
+        lambda s: fetcher(fake_site([], session_gone=True)),
     )
     with pytest.raises(LoginExpiredError):
         reader.read(lambda sha, name, content: sha)
@@ -502,7 +558,7 @@ def test_reader_logs_in_again_when_a_handed_over_session_had_expired():
         return fetcher(fake_site([], session_gone=len(calls) == 1))
 
     pool = FakePool(fresh=(False, True))
-    reader = RbaySourceReader(pool, Store(), "owner", AGENCY, "REGLA", 200, 10_000_000, make)
+    reader = RbaySourceReader(pool, Store(), "owner", AGENCY, SITE, "REGLA", 200, 10_000_000, make)
     reader.person_started()
     reading = reader.read(lambda sha, name, content: sha)
     assert len(reading.observations) == 2
@@ -543,6 +599,18 @@ def test_an_rbay_source_always_has_a_login():
     assert source.requires_login and source.ai_enabled and source.adapter == RBAY_ADAPTER
     with pytest.raises(ValidationError, match="without a login"):
         service.update("admin", source.id, login_user="")
+
+
+def test_the_admin_api_tells_where_each_source_login_is_stored():
+    from irb_watch.api.admin_sources import SourceOut
+
+    service = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url)
+    rbay = service.create("admin", "공지", f"https://www.r-bay.co.kr/agency/main/{AGENCY}?board=NOTI", "owner")
+    snuh = service.create("admin", "SNUH", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277029")
+    study = service.create("admin", "Study", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277031", "s1")
+    assert SourceOut.from_source(rbay).login_site == f"rbay-{AGENCY}"
+    assert SourceOut.from_source(study).login_site == "snuh-2605277031"
+    assert SourceOut.from_source(snuh).login_site is None  # a public board needs no login
 
 
 def test_post_follows_a_redirect_as_a_get_and_tls_checks_stay_on():

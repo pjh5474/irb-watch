@@ -33,7 +33,12 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
 from irb_watch.crawlers.credentials import Credentials, CredentialStore
-from irb_watch.crawlers.errors import LayoutChangedError, LoginRejectedError, SiteUnavailableError
+from irb_watch.crawlers.errors import (
+    LayoutChangedError,
+    LoginRejectedError,
+    MissingLoginError,
+    SiteUnavailableError,
+)
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.rbay import (
     BASE_URL,
@@ -43,16 +48,45 @@ from irb_watch.crawlers.rbay import (
     logout_form,
     parse_gate_menus,
 )
+from irb_watch.crawlers.sessions import valid_name
 from irb_watch.crawlers.tls import rbay_ssl_context
 from irb_watch.security.url_guard import validate_url
 
 log = logging.getLogger(__name__)
 
-CREDENTIAL_SITE = "rbay"  # one R-BAY account works for every hospital it is registered with
 SESSION_REUSE = 15 * 60.0  # seconds a session is handed to the next board of the same hospital
 IDLE_LOGOUT = 90.0  # seconds after the last board before logging out
 REJECTED_FOR = 60 * 60.0
 _ACCOUNT = "*"  # rejection scope: the password, for every hospital
+
+
+# The single site name used before logins were per hospital (2026-11-10). Read only as a
+# fallback, so a login saved under it keeps working until it is saved per hospital.
+LEGACY_SITE = "rbay"
+
+
+def rbay_site_name(agency: str) -> str:
+    """The naming rule for a hospital's R-BAY login: rbay-<hospital code>. Per hospital, because
+    an R-BAY account can enter only the hospitals it is registered with (owner, 2026-11-10);
+    the boards of one hospital share it. A code the store cannot use as a name (base64 '='
+    padding, too long) becomes a stable hash. Callers use services.source_login.login_site,
+    which the admin page shows, so nobody has to work this out by hand."""
+    name = f"rbay-{agency}"
+    if valid_name(name):
+        return name
+    return f"rbay-{hashlib.sha256(agency.encode()).hexdigest()[:24]}"
+
+
+def stored_login(store: CredentialStore, user: str, site: str) -> tuple[Credentials | None, str]:
+    """(the login, the site it was found under): the hospital's own site, else the legacy one."""
+    found = store.get(user, site)
+    if found is not None or site == LEGACY_SITE:
+        return found, site
+    legacy = store.get(user, LEGACY_SITE)
+    if legacy is not None:
+        log.warning("R-BAY login for %s read from the old shared site %r; save it as %r", user, LEGACY_SITE, site)
+        return legacy, LEGACY_SITE
+    return None, site
 
 
 class EntryRefusedError(LoginRejectedError):
@@ -215,9 +249,15 @@ class RbaySessionPool:
             return self._key_locks.setdefault(key, threading.Lock())
 
     def acquire(
-        self, user: str, agency: str, credentials: CredentialStore, person_started: bool = False
+        self,
+        user: str,
+        agency: str,
+        site: str,
+        credentials: CredentialStore,
+        person_started: bool = False,
     ) -> Lease:
-        """A session for this hospital, logging in when needed. person_started: a scan a person
+        """A session for this hospital, logging in when needed. `site` is where the hospital's
+        login is stored (services.source_login.login_site). person_started: a scan a person
         started may send a remembered (rejected) login once more."""
         key = (user, agency)
         with self._key_lock(key):
@@ -237,9 +277,13 @@ class RbaySessionPool:
             if stale is not None:
                 self._end(stale)
 
-            stored = credentials.get(user, CREDENTIAL_SITE)
+            stored, _ = stored_login(credentials, user, site)
             if stored is None:
-                raise LoginRejectedError(f"no stored R-BAY login for '{user}' (site '{CREDENTIAL_SITE}')")
+                # A setup gap: flagged, not paused, so saving the login is enough.
+                raise MissingLoginError(
+                    f"no R-BAY login is stored for '{user}' at this hospital (site '{site}'); "
+                    "save it on the source's admin page"
+                )
             # Remembered per stored login (a hash, never the password): after an admin saves a
             # new password it is tried at once.
             fingerprint = hashlib.sha256(f"{user}\0{stored.login_id}\0{stored.password}".encode()).hexdigest()

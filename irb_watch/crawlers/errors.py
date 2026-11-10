@@ -43,6 +43,12 @@ class CredentialStoreError(CrawlError):
     """
 
 
+class MissingLoginError(CredentialStoreError):
+    """No login is stored for this source yet (a setup gap, not a refusal). Nothing was sent to
+    the site, so the source becomes needs_review with this reason and is NOT paused: once the
+    login is saved, the next scheduled scan simply works."""
+
+
 class ScanTooLargeError(CrawlError):
     """The scan's data is too big to save in one transaction; nothing was saved."""
 

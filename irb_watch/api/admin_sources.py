@@ -12,6 +12,7 @@ from irb_watch.api.deps import (
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.services.alerts import AlertService
 from irb_watch.services.scan import ScanService
+from irb_watch.services.source_login import login_site
 from irb_watch.services.sources import Source, SourceService
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,9 @@ class SourceOut(BaseModel):
     requires_login: bool = False  # members-only (a study): readable only by assigned users
     scans_paused_reason: str | None = None  # why daily scans skip this source, if they do
     ai_enabled: bool = True  # False: no text of this source goes to the AI services
+    # The site name its stored login is filed under (PUT /admin/credentials/{label}/{site}):
+    # snuh-<board key>, or rbay-<hospital code> (one login per R-BAY hospital).
+    login_site: str | None = None
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -54,6 +58,7 @@ class SourceOut(BaseModel):
             requires_login=s.requires_login,
             scans_paused_reason=s.scans_paused_reason,
             ai_enabled=s.ai_enabled,
+            login_site=login_site(s),
         )
 
 

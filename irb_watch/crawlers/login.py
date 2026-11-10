@@ -18,7 +18,12 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
 from irb_watch.crawlers.credentials import Credentials, CredentialStore
-from irb_watch.crawlers.errors import FetchError, LoginRejectedError, SiteUnavailableError
+from irb_watch.crawlers.errors import (
+    FetchError,
+    LoginRejectedError,
+    MissingLoginError,
+    SiteUnavailableError,
+)
 from irb_watch.crawlers.fetcher import DEFAULT_RETRY_WAITS, RETRYABLE_STATUS
 from irb_watch.crawlers.sessions import SessionStore, cookies_from_state
 from irb_watch.security.url_guard import validate_url
@@ -141,7 +146,11 @@ def fresh_login(
     """
     credentials = credential_store.get(user, site)
     if credentials is None:
-        raise LoginRejectedError(f"no stored credentials for user '{user}' on site '{site}'")
+        # A setup gap, not a refusal: nothing was sent, so the source is flagged, not paused.
+        raise MissingLoginError(
+            f"no stored credentials for user '{user}' on site '{site}'; "
+            "save the login on the source's admin page"
+        )
     state = login(login_url, credentials)
     session_store.save(user, site, state)
     return cookies_from_state(state)

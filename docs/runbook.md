@@ -98,7 +98,7 @@ Role changes are logged by a database trigger without an actor (the server uses 
 5. The same board can be added again with a different label (different study account); the pair URL + label must be unique.
 
 ## R-BAY boards (hospital e-IRBs on www.r-bay.co.kr)
-1. Store the R-BAY login once under site `rbay` (one account works for every hospital it is registered with): server `PUT /admin/credentials/<label>/rbay`; this PC `uv run python -m irb_watch.scripts.save_credentials --user <label> --site rbay`.
+1. Store the R-BAY login **per hospital** (an account can enter only the hospitals it is registered with): site `rbay-<hospital code>` (a hash for codes with `=` padding), shown as `login_site` in `GET /admin/sources` and on the source's admin page, where the login can be saved; use that exact name. Without a stored login a scan flags the source with the reason but does not pause it. The 3 boards of one hospital share it. Server `PUT /admin/credentials/<label>/rbay-<hospital code>`; this PC `uv run python -m irb_watch.scripts.save_credentials --user <label> --site rbay-<hospital code>`.
 2. Add one source per board: URL `https://www.r-bay.co.kr/agency/main/<hospital code>?board=REGLA` (관련규정), `FORM_BOX` (양식함) or `NOTI` (공지), with `login_user: <label>`. A login is required. AI starts off for members-only sources; `PATCH ai_enabled: true` if allowed (owner: yes for these boards).
 3. Assign readers with `PUT /admin/sources/{id}/members`.
 4. Read-only check without touching the database (one login, list, one post, one download, logout):

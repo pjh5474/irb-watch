@@ -3,10 +3,11 @@
     uv run python -m irb_watch.scripts.live_rbay_check --user owner \
         --url "https://www.r-bay.co.kr/agency/main/<code>?board=REGLA"
 
-Uses the stored login (Credential Manager, or the database store when CREDENTIAL_STORE=database)
-under site 'rbay'. One login: lists the board, opens its first post, downloads that post's first
-file, reads its text, then logs out with the e-IRB's own logout and checks that it worked.
-Prints counts and names only, never the password.
+Uses the stored login (Credential Manager with --keyring, else the server's store) for the
+hospital, found the same way scans find it (login_site, then the old shared 'rbay' name).
+One login: lists the board, opens its first post, downloads that post's first file, reads its
+text, then logs out with the e-IRB's own logout and checks that it worked. Prints counts and
+names only, never the password.
 """
 
 import argparse
@@ -17,7 +18,7 @@ from irb_watch.crawlers.attachments import read_attachment
 from irb_watch.crawlers.credentials import KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.rbay import BASE_URL, RbayAdapter
-from irb_watch.crawlers.rbay_login import CREDENTIAL_SITE, browser_enter, logout
+from irb_watch.crawlers.rbay_login import browser_enter, logout, rbay_site_name, stored_login
 from irb_watch.crawlers.tls import rbay_ssl_context
 from irb_watch.services.sources import detect_adapter
 
@@ -26,15 +27,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only live check of one R-BAY board.")
     parser.add_argument("--user", required=True, help="login label, e.g. owner")
     parser.add_argument("--url", required=True, help="hospital R-BAY address with ?board=<code>")
-    parser.add_argument("--keyring", action="store_true", help="read the login from Credential Manager")
+    parser.add_argument(
+        "--keyring", action="store_true", help="read the login from Credential Manager"
+    )
     args = parser.parse_args(argv)
 
     _, _, config = detect_adapter(args.url)
     store = KeyringCredentialStore() if args.keyring else get_credential_store()
-    credentials = store.get(args.user, CREDENTIAL_SITE)
+    credentials, site = stored_login(store, args.user, rbay_site_name(config["agency"]))
     if credentials is None:
-        print(f"No stored login for '{args.user}' under site '{CREDENTIAL_SITE}'.")
+        print(f"No stored login for '{args.user}' under site '{site}'.")
         return 1
+    print(f"0. using the login stored under site '{site}'")
 
     session = browser_enter(config["agency"], credentials)
     print(f"1. logged in and entered the e-IRB; boards in its menu: {sorted(session.menus)}")

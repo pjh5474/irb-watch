@@ -129,7 +129,8 @@ class SourceService:
         elif adapter == RBAY_ADAPTER:
             raise ValidationError(
                 "an R-BAY board can only be read with a login: give login_user "
-                "(its password is stored under site 'rbay')"
+                "(after creating it, save the password on the source's admin page; one login "
+                "per hospital)"
             )
         try:
             self._check_url(canonical)

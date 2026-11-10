@@ -7,7 +7,7 @@ from urllib.parse import parse_qs
 import pytest
 
 from irb_watch.crawlers.credentials import Credentials
-from irb_watch.crawlers.errors import LoginRejectedError
+from irb_watch.crawlers.errors import LoginRejectedError, MissingLoginError
 from irb_watch.crawlers.login import browser_login, fresh_login, snuh_login_url
 from irb_watch.crawlers.sessions import FileSessionStore
 from tests.fakes_scan import MemCreds
@@ -101,8 +101,9 @@ def test_fresh_login_saves_session_and_returns_cookies(tmp_path):
     assert sessions.load("owner", "s1") == state
 
 
-def test_fresh_login_without_stored_credentials_is_rejected_with_reason(tmp_path):
-    with pytest.raises(LoginRejectedError, match="no stored credentials"):
+def test_fresh_login_without_stored_credentials_is_a_setup_gap_with_reason(tmp_path):
+    # Not a refusal: nothing was sent, so the source is flagged but not paused.
+    with pytest.raises(MissingLoginError, match="no stored credentials.*admin page"):
         fresh_login(MemCreds(None), FileSessionStore(tmp_path), "owner", "s1", "https://x/y")
 
 

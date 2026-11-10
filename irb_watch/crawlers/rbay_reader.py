@@ -28,6 +28,7 @@ class RbaySourceReader:
         credentials: CredentialStore,
         user: str,
         agency: str,
+        site: str,
         board: str,
         max_posts: int,
         max_file_bytes: int,
@@ -37,6 +38,7 @@ class RbaySourceReader:
         self._credentials = credentials
         self._user = user
         self._agency = agency
+        self._site = site  # where this hospital's login is stored
         self._board = board
         self._max_posts = max_posts
         self._max_file_bytes = max_file_bytes
@@ -50,16 +52,20 @@ class RbaySourceReader:
     def close(self) -> None:
         """Nothing to close: read() returns the session to the pool when it ends."""
 
+    def _acquire(self):
+        return self._pool.acquire(
+            self._user, self._agency, self._site, self._credentials, self._person_started
+        )
+
     def read(self, file_sink: FileSink) -> ScanReading:
-        lease = self._pool.acquire(self._user, self._agency, self._credentials, self._person_started)
+        lease = self._acquire()
         try:
             return self._read_with(lease.session, file_sink)
         except LoginExpiredError:
             if lease.fresh:
                 raise  # a session from this very login stopped working: report it
             # Handed over from an earlier board and already ended at R-BAY: log in once more.
-            lease = self._pool.acquire(self._user, self._agency, self._credentials, self._person_started)
-            return self._read_with(lease.session, file_sink)
+            return self._read_with(self._acquire().session, file_sink)
 
     def _read_with(self, session: RbaySession, file_sink: FileSink) -> ScanReading:
         adapter = RbayAdapter(self._make_fetcher(session), self._agency, session.menus)

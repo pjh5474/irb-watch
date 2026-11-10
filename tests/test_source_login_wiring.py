@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from irb_watch.crawlers.credentials import Credentials
-from irb_watch.crawlers.errors import LoginExpiredError, LoginRejectedError
+from irb_watch.crawlers.errors import LoginExpiredError, LoginRejectedError, MissingLoginError
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.scan import ScanService
@@ -143,10 +143,19 @@ def test_login_source_logs_in_once_with_the_derived_site_name():
     assert url.startswith("https://hrpp.snuh.org/hrpp/lgn/form.do?returnUrl=")
 
 
-def test_login_source_without_stored_credentials_is_rejected_with_reason():
+def test_login_source_without_stored_credentials_is_flagged_with_reason():
     source = make_source(1, config={"board_key": "1", "login_user": "owner"})
-    with pytest.raises(LoginRejectedError, match="no stored credentials"):
+    with pytest.raises(MissingLoginError, match="no stored credentials"):
         cookies_for_source(source, MemCreds(None))
+
+
+def test_a_missing_login_flags_the_source_but_does_not_pause_it():
+    def factory(source):
+        raise MissingLoginError("no stored credentials for user 'owner' on site 'snuh-1'")
+
+    result, _ = scan_once(factory=factory)
+    assert result.status == "needs_review" and "no stored credentials" in result.error
+    assert result.paused_reason is None  # saving the login is enough; no manual scan needed
 
 
 # ---- failures stay with this source and show a reason --------------------------------------
