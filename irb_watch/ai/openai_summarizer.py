@@ -3,6 +3,8 @@
 from openai import OpenAI
 from pydantic import BaseModel
 
+from irb_watch.ai.admin_text import with_admin_text
+from irb_watch.ai.tags import wrap
 from irb_watch.ai.types import CHANGE, DOCUMENT, NEW
 
 _COMMON = (
@@ -65,12 +67,13 @@ class OpenAISummarizer:
         )
         self.model = model
 
-    def summarize(self, kind: str, text: str, *, truncated: bool) -> str:
-        instructions = INSTRUCTIONS[kind] + (CUT_NOTE if truncated else "")
+    def summarize(self, kind: str, text: str, *, truncated: bool, extra: str = "") -> str:
+        """extra: the admins' added instructions (appended after the fixed rules)."""
+        instructions = with_admin_text(INSTRUCTIONS[kind] + (CUT_NOTE if truncated else ""), extra)
         response = self._client.responses.parse(
             model=self.model,
             instructions=instructions,
-            input=f"<document>\n{text}\n</document>",
+            input=wrap(text, "document"),
             text_format=SummaryOut,
             store=False,  # do not keep the request or answer on OpenAI's side
             # A sectioned whole-document summary is longer (Korean uses many tokens); a cut-off

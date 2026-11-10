@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 from irb_watch.agent.data import AgentData, SourceInfo
 from irb_watch.ai.digest import change_digest, document_digest
+from irb_watch.ai.tags import wrap
 from irb_watch.core.diff import describe_change
 
 ACTION_KINDS = ("scan_source", "scan_all", "resummarize", "test_mail", "weekly_preview")
@@ -29,8 +30,7 @@ class ToolArgError(ValueError):
 
 
 def _wrap(text: str) -> str:
-    safe = text.replace("</document>", "</ document>")
-    return f"<document>\n{safe}\n</document>"
+    return wrap(text, "document")
 
 
 def _int(args: dict, key: str, lo: int, hi: int, default: int | None = None) -> int:

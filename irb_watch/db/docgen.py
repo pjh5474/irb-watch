@@ -1,0 +1,358 @@
+"""Supabase-backed storage for the docs generator."""
+
+from datetime import datetime
+
+from postgrest.exceptions import APIError
+from supabase import Client
+
+from irb_watch.db.agent import SupabaseAgentData
+from irb_watch.docgen.types import (
+    DocRef,
+    DocVersion,
+    Draft,
+    DraftVersion,
+    ExtraGuide,
+    Guide,
+    NewDraft,
+    SourceRef,
+    VersionConflictError,
+)
+
+UNIQUE_VIOLATION = "23505"
+_GUIDE_COLUMNS = "id, title, filename, body_text, created_at, archived_at"
+
+
+def _draft(row: dict) -> Draft:
+    return Draft(
+        id=row["id"],
+        user_id=row["user_id"],
+        title=row["title"] or "",
+        instruction=row["instruction"] or "",
+        document_refs=tuple(
+            DocRef(int(r["document_id"]), int(r["version_no"]), int(r["source_id"]))
+            for r in row.get("document_refs") or []
+        ),
+        guide_ids=tuple(int(g) for g in row.get("guide_ids") or []),
+        extra_guides=tuple(
+            ExtraGuide(e.get("filename", ""), e.get("text", "")) for e in row.get("extra_guides") or []
+        ),
+        ai_override_source_ids=tuple(int(s) for s in row.get("ai_override_source_ids") or []),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _version(row: dict) -> DraftVersion:
+    return DraftVersion(
+        draft_id=row["draft_id"],
+        version_no=row["version_no"],
+        markdown=row["markdown"],
+        origin=row["origin"],
+        instruction=row.get("instruction") or "",
+        created_at=row["created_at"],
+    )
+
+
+class SupabaseDocgenStore:
+    def __init__(self, client: Client) -> None:
+        self._c = client
+        self._reads = SupabaseAgentData(client)
+
+    # -- what a user may read ------------------------------------------------------
+
+    def readable_sources(self, user_id: str, is_admin: bool) -> dict[int, SourceRef]:
+        """Same rule as private.can_read_source; AI-off sources are included."""
+        rows = (
+            self._c.table("sources")
+            .select("id, name, requires_login, ai_enabled")
+            .order("id")
+            .execute()
+            .data
+        )
+        member_of: set[int] = set()
+        if not is_admin and any(r["requires_login"] for r in rows):
+            member_rows = (
+                self._c.table("source_members")
+                .select("source_id")
+                .eq("user_id", user_id)
+                .execute()
+                .data
+            )
+            member_of = {m["source_id"] for m in member_rows}
+        return {
+            r["id"]: SourceRef(r["id"], r["name"], bool(r["ai_enabled"]))
+            for r in rows
+            if is_admin or not r["requires_login"] or r["id"] in member_of
+        }
+
+    def get_source(self, source_id: int) -> SourceRef | None:
+        rows = (
+            self._c.table("sources")
+            .select("id, name, ai_enabled")
+            .eq("id", source_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return SourceRef(rows[0]["id"], rows[0]["name"], bool(rows[0]["ai_enabled"])) if rows else None
+
+    def get_doc_version(self, document_id: int, version_no: int | None) -> DocVersion | None:
+        docs = (
+            self._c.table("documents")
+            .select("id, source_id, title")
+            .eq("id", document_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not docs:
+            return None
+        query = self._c.table("document_versions").select("version_no").eq("document_id", document_id)
+        if version_no is None:
+            query = query.order("version_no", desc=True)
+        else:
+            query = query.eq("version_no", version_no)
+        rows = query.limit(1).execute().data
+        if not rows:
+            return None
+        number = rows[0]["version_no"]
+        content = self._reads.get_version(document_id, number)
+        if content is None:
+            return None
+        previous = self._reads.get_version(document_id, number - 1) if number > 1 else None
+        return DocVersion(
+            document_id=document_id,
+            source_id=docs[0]["source_id"],
+            title=docs[0]["title"],
+            version_no=number,
+            content=content,
+            previous=previous,
+        )
+
+    # -- guides ----------------------------------------------------------------------
+
+    def _links(self, guide_ids: list[int]) -> dict[int, tuple[int, ...]]:
+        if not guide_ids:
+            return {}
+        rows = (
+            self._c.table("source_guides")
+            .select("source_id, guide_id")
+            .in_("guide_id", guide_ids)
+            .execute()
+            .data
+        )
+        out: dict[int, list[int]] = {}
+        for r in rows:
+            out.setdefault(r["guide_id"], []).append(r["source_id"])
+        return {g: tuple(sorted(s)) for g, s in out.items()}
+
+    def _guides(self, rows: list[dict]) -> list[Guide]:
+        links = self._links([r["id"] for r in rows])
+        return [
+            Guide(
+                id=r["id"],
+                title=r["title"],
+                filename=r["filename"] or "",
+                body_text=r["body_text"],
+                created_at=r["created_at"],
+                archived_at=r.get("archived_at"),
+                source_ids=links.get(r["id"], ()),
+            )
+            for r in rows
+        ]
+
+    def create_guide(self, title, filename, body_text, sha256, created_by, now) -> Guide:
+        rows = (
+            self._c.table("guides")
+            .insert(
+                {
+                    "title": title,
+                    "filename": filename,
+                    "body_text": body_text,
+                    "sha256": sha256,
+                    "created_by": created_by,
+                    "created_at": now.isoformat(),
+                }
+            )
+            .execute()
+            .data
+        )
+        return self._guides(rows)[0]
+
+    def list_guides(self, include_archived: bool) -> list[Guide]:
+        query = self._c.table("guides").select(_GUIDE_COLUMNS)
+        if not include_archived:
+            query = query.is_("archived_at", "null")
+        return self._guides(query.order("id", desc=True).execute().data)
+
+    def get_guides(self, guide_ids: list[int]) -> list[Guide]:
+        if not guide_ids:
+            return []
+        rows = self._c.table("guides").select(_GUIDE_COLUMNS).in_("id", guide_ids).execute().data
+        by_id = {g.id: g for g in self._guides(rows)}
+        return [by_id[g] for g in guide_ids if g in by_id]
+
+    def guides_for_sources(self, source_ids: list[int]) -> list[Guide]:
+        if not source_ids:
+            return []
+        links = (
+            self._c.table("source_guides")
+            .select("guide_id")
+            .in_("source_id", source_ids)
+            .execute()
+            .data
+        )
+        ids = sorted({r["guide_id"] for r in links})
+        if not ids:
+            return []
+        rows = (
+            self._c.table("guides")
+            .select(_GUIDE_COLUMNS)
+            .in_("id", ids)
+            .is_("archived_at", "null")
+            .order("id")
+            .execute()
+            .data
+        )
+        return self._guides(rows)
+
+    def archive_guide(self, guide_id: int, now: datetime) -> None:
+        self._c.table("guides").update({"archived_at": now.isoformat()}).eq("id", guide_id).execute()
+        self._c.table("source_guides").delete().eq("guide_id", guide_id).execute()
+
+    def link_guide(self, source_id: int, guide_id: int, now: datetime) -> None:
+        self._c.table("source_guides").upsert(
+            {"source_id": source_id, "guide_id": guide_id, "created_at": now.isoformat()},
+            on_conflict="source_id,guide_id",
+            ignore_duplicates=True,
+        ).execute()
+
+    def unlink_guide(self, source_id: int, guide_id: int) -> None:
+        self._c.table("source_guides").delete().eq("source_id", source_id).eq(
+            "guide_id", guide_id
+        ).execute()
+
+    # -- drafts ----------------------------------------------------------------------
+
+    def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft:
+        rows = (
+            self._c.table("drafts")
+            .insert(
+                {
+                    "user_id": new.user_id,
+                    "title": new.title,
+                    "instruction": new.instruction,
+                    "document_refs": [
+                        {"document_id": r.document_id, "version_no": r.version_no, "source_id": r.source_id}
+                        for r in new.document_refs
+                    ],
+                    "guide_ids": list(new.guide_ids),
+                    "extra_guides": [{"filename": e.filename, "text": e.text} for e in new.extra_guides],
+                    "ai_override_source_ids": list(new.ai_override_source_ids),
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                }
+            )
+            .execute()
+            .data
+        )
+        draft = _draft(rows[0])
+        try:
+            self._c.table("draft_versions").insert(
+                {
+                    "draft_id": draft.id,
+                    "user_id": new.user_id,
+                    "version_no": 1,
+                    "markdown": first.markdown,
+                    "origin": first.origin,
+                    "instruction": first.instruction,
+                    "created_at": now.isoformat(),
+                }
+            ).execute()
+        except Exception:
+            # Two requests, not one transaction: do not leave a draft without its text.
+            self.delete_draft(draft.id)
+            raise
+        return draft
+
+    def get_draft(self, draft_id: str) -> Draft | None:
+        rows = self._c.table("drafts").select("*").eq("id", draft_id).limit(1).execute().data
+        return _draft(rows[0]) if rows else None
+
+    def list_drafts(self, user_id: str, limit: int) -> list[Draft]:
+        rows = (
+            self._c.table("drafts")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+        )
+        return [_draft(r) for r in rows]
+
+    def list_versions(self, draft_id: str) -> list[DraftVersion]:
+        rows = (
+            self._c.table("draft_versions")
+            .select("*")
+            .eq("draft_id", draft_id)
+            .order("version_no")
+            .execute()
+            .data
+        )
+        return [_version(r) for r in rows]
+
+    def add_version(self, draft, markdown, origin, instruction, now) -> DraftVersion:
+        last = (
+            self._c.table("draft_versions")
+            .select("version_no")
+            .eq("draft_id", draft.id)
+            .order("version_no", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        number = (last[0]["version_no"] if last else 0) + 1
+        # unique (draft_id, version_no): of two saves at the same moment one fails, with a reason.
+        try:
+            rows = (
+                self._c.table("draft_versions")
+                .insert(
+                    {
+                        "draft_id": draft.id,
+                        "user_id": draft.user_id,
+                        "version_no": number,
+                        "markdown": markdown,
+                        "origin": origin,
+                        "instruction": instruction,
+                        "created_at": now.isoformat(),
+                    }
+                )
+                .execute()
+                .data
+            )
+        except APIError as exc:
+            if exc.code == UNIQUE_VIOLATION:
+                raise VersionConflictError from exc
+            raise
+        self._c.table("drafts").update({"updated_at": now.isoformat()}).eq("id", draft.id).execute()
+        return _version(rows[0])
+
+    def delete_draft(self, draft_id: str) -> None:
+        self._c.table("drafts").delete().eq("id", draft_id).execute()
+
+    def count_requests_since(self, user_id: str, since: datetime) -> int:
+        result = (
+            self._c.table("audit_logs")
+            .select("id", count="exact")
+            .eq("actor_id", user_id)
+            .in_("event_type", ["docgen.generate", "docgen.revise"])
+            .gte("created_at", since.isoformat())
+            .limit(1)
+            .execute()
+        )
+        return result.count or 0
+
+    def purge_before(self, cutoff: datetime) -> int:
+        rows = self._c.table("drafts").delete().lt("updated_at", cutoff.isoformat()).execute().data
+        return len(rows or [])

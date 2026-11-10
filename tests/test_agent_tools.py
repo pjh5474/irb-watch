@@ -102,7 +102,7 @@ def test_document_text_is_wrapped_as_data_and_cannot_close_the_wrapper(data):
     out, _ = run(box(d), "get_document_text", document_id=10)
     assert out.startswith("<document>\n")
     assert out.count("</document>") == 1
-    assert "</ document>" in out
+    assert "[/document]" in out
 
 
 def test_long_text_is_cut_and_says_so(data):

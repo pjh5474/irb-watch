@@ -6,8 +6,10 @@ from fastapi.responses import JSONResponse
 
 from irb_watch.api import (
     admin_agent,
+    admin_ai,
     admin_credentials,
     admin_documents,
+    admin_guides,
     admin_mail,
     admin_members,
     admin_scans,
@@ -15,6 +17,7 @@ from irb_watch.api import (
     admin_users,
     agent,
     auth_token,
+    docgen,
     documents,
     files,
     health,
@@ -34,6 +37,14 @@ async def lifespan(_: FastAPI):
         from irb_watch.scheduler import ScanScheduler
 
         weekly = deps.get_weekly_service()
+        agent_service = deps.get_agent_service()
+        docgen_service = deps.get_docgen_service()
+
+        def purge_old() -> None:
+            # Both run every time; each one logs and swallows its own failure.
+            agent_service.purge_old()
+            docgen_service.purge_old()
+
         scheduler = ScanScheduler(
             deps.get_runner(),
             settings.scan_cron,
@@ -41,8 +52,9 @@ async def lifespan(_: FastAPI):
             # The weekly stats mail only exists when mail is set up.
             weekly=weekly.send_scheduled if weekly.enabled else None,
             weekly_cron=settings.weekly_stats_cron,
-            # Old assistant conversations are deleted after 30 days (needs no model or mail).
-            purge_chats=deps.get_agent_service().purge_old,
+            # Old assistant conversations and drafts are deleted after 30 days (needs no model
+            # or mail).
+            purge_chats=purge_old,
         )
         deps.retry_hook[0] = scheduler.schedule_retry
         scheduler.start()
@@ -83,6 +95,9 @@ app.include_router(admin_members.router)
 app.include_router(admin_mail.router)
 app.include_router(admin_agent.router)
 app.include_router(agent.router)
+app.include_router(docgen.router)
+app.include_router(admin_guides.router)
+app.include_router(admin_ai.router)
 app.include_router(documents.router)
 app.include_router(files.router)
 app.include_router(unsubscribe.router)

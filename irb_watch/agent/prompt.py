@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from irb_watch.ai.admin_text import with_admin_text
+
 _BASE = (
     "You are the assistant of IRB Watch, a tool that watches hospital IRB (research ethics "
     "office) boards for clinical research coordinators. You answer questions about the "
@@ -29,8 +31,14 @@ _ADMIN = (
 
 
 def build_instructions(
-    *, is_admin: bool, now: datetime, page_kind: str | None, page_id: int | None
+    *,
+    is_admin: bool,
+    now: datetime,
+    page_kind: str | None,
+    page_id: int | None,
+    extra: str = "",
 ) -> str:
+    """extra: the admins' added instructions, placed after every fixed rule."""
     text = _BASE + (_ADMIN if is_admin else "")
     text += f" Today is {now.date().isoformat()}."
     if page_kind in ("source", "document") and page_id:
@@ -38,4 +46,4 @@ def build_instructions(
             f" The user is currently looking at {page_kind} #{page_id} in the app. 'This' or "
             f"'here' most likely means it, but check it with a tool; the hint may be wrong."
         )
-    return text
+    return with_admin_text(text, extra)

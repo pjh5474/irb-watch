@@ -8,7 +8,13 @@ from functools import lru_cache
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 
-from irb_watch.ai.factory import build_agent_model, build_enricher, build_summarizer
+from irb_watch.ai.factory import (
+    build_agent_model,
+    build_draft_writer,
+    build_enricher,
+    build_summarizer,
+)
+from irb_watch.ai.openai_summarizer import OpenAISummarizer
 from irb_watch.auth.jwt import AuthUnavailableError, AuthUser, InvalidTokenError, TokenVerifier
 from irb_watch.auth.password_login import SupabasePasswordLogin
 from irb_watch.config import get_settings
@@ -17,10 +23,12 @@ from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
 from irb_watch.db.agent import SupabaseAgentData, SupabaseAgentStore
+from irb_watch.db.ai_instructions import SupabaseInstructionsStore
 from irb_watch.db.alerts import SupabaseAlertStore
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.credentials import DatabaseCredentialStore
 from irb_watch.db.digest import SupabaseDigestStore
+from irb_watch.db.docgen import SupabaseDocgenStore
 from irb_watch.db.documents import (
     SupabaseFileStorage,
     SupabaseScanRepo,
@@ -33,8 +41,16 @@ from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, Su
 from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
 from irb_watch.services.agent import AgentService
+from irb_watch.services.ai_instructions import (
+    InstructionsCache,
+    InstructionsService,
+    Preview,
+    PreviewResult,
+    summary_preview,
+)
 from irb_watch.services.alerts import AlertService
 from irb_watch.services.digest import DigestService
+from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.members import MemberService
@@ -137,6 +153,16 @@ def get_member_service() -> MemberService:
     )
 
 
+@lru_cache
+def get_instructions_cache() -> InstructionsCache:
+    """One per process: the admins' added AI instructions, re-read at most every 30 seconds."""
+    return InstructionsCache(SupabaseInstructionsStore(get_supabase_client()))
+
+
+def _extra(feature: str) -> Callable[[], str]:
+    return get_instructions_cache().provider(feature)
+
+
 def get_scan_service() -> ScanService:
     client = get_supabase_client()
     return ScanService(
@@ -144,7 +170,7 @@ def get_scan_service() -> ScanService:
         SupabaseFileStorage(client),
         build_reader,
         SupabaseAuditSink(client),
-        enricher=build_enricher(),
+        enricher=build_enricher(extra=_extra("summary")),
     )
 
 
@@ -244,7 +270,7 @@ def get_summary_service() -> SummaryService:
     return SummaryService(
         SupabaseUserStore(client),
         SupabaseSummaryRepo(client),
-        build_summarizer(),
+        build_summarizer(extra=_extra("summary")),
         SupabaseAuditSink(client),
         get_settings().summary_requests_per_day,
     )
@@ -260,6 +286,58 @@ def get_agent_service() -> AgentService:
         SupabaseAgentData(client),
         build_agent_model(),
         SupabaseAuditSink(client),
+        extra_instructions=_extra("agent"),
+    )
+
+
+def get_docgen_service() -> DocgenService:
+    """The docs generator. Without OPENAI_API_KEY and OPENAI_MODEL drafts answer 503; guides,
+    hand edits and DOCX downloads still work."""
+    client = get_supabase_client()
+    return DocgenService(
+        SupabaseUserStore(client),
+        SupabaseDocgenStore(client),
+        build_draft_writer(),
+        SupabaseAuditSink(client),
+        get_settings().docgen_requests_per_day,
+        extra_instructions=_extra("docgen"),
+    )
+
+
+def get_instructions_service() -> InstructionsService:
+    """Admin editing of the added AI instructions. Test runs exist only for the parts that are
+    set up (OPENAI_API_KEY and OPENAI_MODEL)."""
+    client = get_supabase_client()
+    previews: dict[str, Preview] = {}
+    agent = get_agent_service()
+    if agent.enabled:
+
+        def agent_preview(admin_id, extra, document_id, question):
+            answer, tools = agent.preview(admin_id, extra, document_id, question)
+            return PreviewResult(answer, f"tools used: {', '.join(tools) or 'none'}")
+
+        previews["agent"] = Preview(
+            lambda admin_id, document_id, question: agent.check_preview(question), agent_preview
+        )
+    docgen = get_docgen_service()
+    if docgen.enabled:
+        previews["docgen"] = Preview(
+            lambda admin_id, document_id, request: docgen.check_preview(admin_id, document_id),
+            lambda admin_id, extra, document_id, request: PreviewResult(
+                docgen.preview(admin_id, extra, document_id, request)
+            ),
+        )
+    summarizer = build_summarizer()  # the plain one: the test passes the unsaved text itself
+    if isinstance(summarizer, OpenAISummarizer):
+        previews["summary"] = summary_preview(
+            summarizer, lambda document_id: SupabaseDocgenStore(client).get_doc_version(document_id, None)
+        )
+    return InstructionsService(
+        SupabaseUserStore(client),
+        SupabaseInstructionsStore(client),
+        get_instructions_cache(),
+        SupabaseAuditSink(client),
+        previews,
     )
 
 

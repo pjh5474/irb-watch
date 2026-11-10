@@ -111,6 +111,20 @@ Role changes are logged by a database trigger without an actor (the server uses 
 - Admin proposals (`action` events) do nothing by themselves: the browser runs the normal admin endpoint after the admin clicks Confirm.
 - Look at what happened: audit entries `agent.message`, `agent.settings_changed`, `agent.purged`; server logs say `assistant answer failed: <ErrorType>` (never the document text).
 
+## Docs generator
+- Needs `OPENAI_API_KEY` and `OPENAI_MODEL`; without them new drafts and revisions answer 503 (guides, hand edits and DOCX downloads still work). Limit: `DOCGEN_REQUESTS_PER_DAY` (default 10) AI drafts + revisions per user per 24 hours.
+- User routes (login token): `GET /docgen/status`, `GET /docgen/guides?source_id=1&source_id=2` (default guides), `POST /docgen/drafts` (`{"documents": [{"document_id": 10, "version_no": null}], "guide_ids": null, "extra_guides": [{"filename": "g.md", "content_base64": "..."}], "instruction": "...", "ai_override_source_ids": []}`; `guide_ids` null = all default guides, a list = exactly those), `GET /docgen/drafts`, `GET /docgen/drafts/{id}`, `PUT /docgen/drafts/{id}/markdown`, `POST /docgen/drafts/{id}/revise` (`{"instruction": "...", "ai_override_source_ids": []}`; the list is needed only if AI was switched off for a source after the draft was made), `POST /docgen/drafts/{id}/export?version_no=` (DOCX file), `DELETE /docgen/drafts/{id}`.
+- Admin routes: `GET /admin/guides?include_archived=`, `POST /admin/guides` (`{"title": "...", "file": {"filename": "...", "content_base64": "..."}}`; the answer shows the extracted text, check it), `DELETE /admin/guides/{id}` (archive + unlink), `GET /admin/sources/{id}/guides`, `PUT` / `DELETE /admin/sources/{id}/guides/{guide_id}`.
+- A source with AI off answers 409 naming it unless its id is in `ai_override_source_ids` (the screen's warning box). Every use is in the audit log.
+- Audit entries: `docgen.generate`, `docgen.revise`, `docgen.export`, `docgen.guide_created` / `_linked` / `_unlinked` / `_archived`, `docgen.purged`. Drafts are deleted 30 days after their last change (03:30 job, only when the scheduler runs).
+
+## AI instructions (admin-edited)
+- Admins add text after the fixed rules of each AI feature: `agent`, `docgen`, `summary`. Live on the next AI call (other server processes within 30 s); no restart. At most 4,000 characters.
+- Routes (admin login): `GET /admin/ai/instructions` (current text per feature), `GET /admin/ai/instructions/{feature}/history`, `PUT /admin/ai/instructions/{feature}` (`{"body": "..."}`), `POST .../{feature}/reset`, `POST .../{feature}/restore/{version_id}`, `POST .../{feature}/test` (`{"body": "unsaved text", "document_id": 10, "question": "..."}`; for `summary` the question is the kind: `change`, `new` or `document`).
+- Test runs save nothing, 30 per admin per 24 hours (a refused test, e.g. a missing document or a wrong kind, is not counted), and may use AI-off sources (the chat test cannot see them).
+- Audit entries: `ai_instructions.changed`, `.restored`, `.reset`, `.tested`.
+- A bad edit: restore an older version or reset. The safety rules are not editable, so an edit cannot switch off the protections.
+
 ## Email (Resend)
 - On only when `RESEND_API_KEY`, `MAIL_FROM` and `APP_URL` are all set; otherwise mail steps are skipped and logged, scans are unaffected. The digest also needs `UNSUBSCRIBE_KEY` and `API_DOMAIN`.
 - Admins get: an alarm when a source turns amber or red, a recovery notice, the daily scan result, and the weekly usage report. Users get one daily digest when something new or updated is in sources they can read; studies are a count only, never names or titles. Users switch it off in Settings or with the unsubscribe link (`GET /unsubscribe?token=` checks it and changes nothing; `POST /unsubscribe?token=` switches it off; no login).
@@ -124,7 +138,7 @@ Role changes are logged by a database trigger without an actor (the server uses 
 - Change the categories or the priority wording in `irb_watch/ai/categories.py`; change when AI is skipped with `AI_SKIP_BELOW` and `AI_MIN_CONFIDENCE`.
 - Users ask for a whole-document summary with `POST /documents/{id}/summary` (Authorization: Bearer <login token>). The summary is written as a short README (Markdown) and cached per version. 404 if the document does not exist or the user may not read its source, 429 after `SUMMARY_REQUESTS_PER_DAY` new summaries in 24 hours (cached ones do not count), 503 if AI is off for the server or for that source (`ai_enabled`), 502 if the summary service failed (the error type is in the message).
 - Files: `POST /files/{id}/download-url` returns a 60-second signed link and logs it; limited by `DOWNLOAD_LINKS_PER_DAY`.
-- Only the changes (or, for on-demand, the document text) are sent to OpenAI and Jev; nothing is stored on OpenAI's side (`store=False`).
+- Scans send only the changes to OpenAI and Jev. Whole document text goes out only on a user's action: the on-demand summary, the chat's document text and the docs generator (each capped). Nothing is stored on OpenAI's side (`store=False`).
 
 ## Tests
 - `uv run pytest -q` runs offline (nothing touches Supabase).

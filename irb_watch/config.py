@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     ai_min_confidence: float = 0.6
     # New summaries one user may request per day (cached ones are free).
     summary_requests_per_day: int = 20
+    # Docs generator: AI drafts plus AI revisions one user may make per rolling 24 hours
+    # (0 switches it off; hand edits and DOCX downloads are not counted).
+    docgen_requests_per_day: int = 10
 
     # Download links for original files: how long a signed link works, and how many links
     # one user may request per day (admins are not limited).

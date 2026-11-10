@@ -26,6 +26,7 @@ from irb_watch.services.errors import (
     NotFoundError,
     TooManyRequestsError,
     UnavailableError,
+    UpstreamError,
     ValidationError,
 )
 from irb_watch.services.users import AuditSink, UserStore, active_profile
@@ -123,6 +124,7 @@ class AgentService:
         model: AgentModel | None,
         audit: AuditSink,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        extra_instructions: Callable[[], str] = lambda: "",
     ) -> None:
         self._users = users
         self._store = store
@@ -130,6 +132,7 @@ class AgentService:
         self._model = model
         self._audit = audit
         self._clock = clock
+        self._extra = extra_instructions  # the admins' added instructions, read per answer
 
     @property
     def enabled(self) -> bool:
@@ -273,6 +276,91 @@ class AgentService:
 
         return Turn(run)
 
+    def _read_extra(self) -> str:
+        try:
+            return self._extra() or ""
+        except Exception as exc:  # noqa: BLE001  the fixed rules still apply without it
+            log.warning("could not read the admins' assistant instructions: %s", type(exc).__name__)
+            return ""
+
+    def _steps(
+        self,
+        user_id: str,
+        is_admin: bool,
+        instructions: str,
+        items: list[dict],
+        answer: list[str],
+        actions: list[dict],
+    ) -> Iterator[Event]:
+        """The model/tool loop. Appends the answer's text and any action cards to the lists."""
+        assert self._model is not None
+        toolbox = ToolBox(self._data, user_id, is_admin, self._clock)
+        for step in range(MAX_STEPS):
+            tools = toolbox.specs() if step < MAX_STEPS - 1 else []
+            end: StepEnd | None = None
+            for event in self._model.step(instructions, items, tools):
+                if isinstance(event, TextDelta):
+                    answer.append(event.text)
+                    yield Event("text", {"delta": event.text})
+                elif isinstance(event, StepEnd):
+                    end = event
+            if end is None:
+                raise AnswerError("the assistant's model stopped without finishing")
+            items.extend(end.items)
+            if not end.calls:
+                break
+            for call in end.calls:
+                yield Event("tool", {"name": call.name})
+                output, action = toolbox.run(call.name, call.arguments)
+                if action is not None:
+                    actions.append(action)
+                    yield Event("action", action)
+                items.append(
+                    {"type": "function_call_output", "call_id": call.call_id, "output": output}
+                )
+
+    def check_preview(self, question: str) -> str:
+        """Everything a test run can be refused for, checked before the run is counted."""
+        if self._model is None:
+            raise UnavailableError("the assistant is not set up on this server")
+        text = (question or "").strip()
+        if not text:
+            raise ValidationError("type a question to test with")
+        if len(text) > MAX_MESSAGE_CHARS:
+            raise ValidationError(f"the question is too long (at most {MAX_MESSAGE_CHARS} characters)")
+        return text
+
+    def preview(
+        self, admin_id: str, extra: str, document_id: int | None, question: str
+    ) -> tuple[str, list[str]]:
+        """Admin test run with UNSAVED instructions: one question, nothing saved or counted
+        (the caller limits and logs test runs). Tools behave as for this admin, so sources with
+        AI off stay invisible. Returns (answer, names of the tools used)."""
+        text = self.check_preview(question)
+        instructions = build_instructions(
+            is_admin=True,
+            now=self._clock(),
+            page_kind="document" if document_id else None,
+            page_id=document_id,
+            extra=extra,
+        )
+        answer: list[str] = []
+        actions: list[dict] = []
+        items: list[dict] = [{"role": "user", "content": text}]
+        try:
+            tools = [
+                e.data["name"]
+                for e in self._steps(admin_id, True, instructions, items, answer, actions)
+                if e.kind == "tool"
+            ]
+        except Exception as exc:  # shown to the admin with a reason
+            reason = str(exc) if isinstance(exc, AnswerError) else type(exc).__name__
+            raise UpstreamError(f"the test run failed ({reason})") from exc
+        final = "".join(answer).strip()
+        if not final:
+            raise UpstreamError("the test run failed (the assistant gave no answer)")
+        return final, tools
+
     def _answer(
         self,
         user_id: str,
@@ -284,38 +372,19 @@ class AgentService:
         page_id: int | None,
     ) -> Iterator[Event]:
         assert self._model is not None
-        toolbox = ToolBox(self._data, user_id, is_admin, self._clock)
         instructions = build_instructions(
-            is_admin=is_admin, now=self._clock(), page_kind=page_kind, page_id=page_id
+            is_admin=is_admin,
+            now=self._clock(),
+            page_kind=page_kind,
+            page_id=page_id,
+            extra=self._read_extra(),
         )
         items: list[dict] = [{"role": m.role, "content": m.content} for m in history]
         items.append({"role": "user", "content": text})
         answer: list[str] = []
         actions: list[dict] = []
         try:
-            for step in range(MAX_STEPS):
-                tools = toolbox.specs() if step < MAX_STEPS - 1 else []
-                end: StepEnd | None = None
-                for event in self._model.step(instructions, items, tools):
-                    if isinstance(event, TextDelta):
-                        answer.append(event.text)
-                        yield Event("text", {"delta": event.text})
-                    elif isinstance(event, StepEnd):
-                        end = event
-                if end is None:
-                    raise AnswerError("the assistant's model stopped without finishing")
-                items.extend(end.items)
-                if not end.calls:
-                    break
-                for call in end.calls:
-                    yield Event("tool", {"name": call.name})
-                    output, action = toolbox.run(call.name, call.arguments)
-                    if action is not None:
-                        actions.append(action)
-                        yield Event("action", action)
-                    items.append(
-                        {"type": "function_call_output", "call_id": call.call_id, "output": output}
-                    )
+            yield from self._steps(user_id, is_admin, instructions, items, answer, actions)
             final = "".join(answer).strip()
             if not final:
                 raise AnswerError("the assistant gave no answer; please ask again")
