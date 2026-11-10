@@ -374,7 +374,14 @@ class ScanService:
         )
 
 
-def _failure_text(failures: dict[str, str], limit: int = 5) -> str:
-    items = [f"post {post_id}: {reason}" for post_id, reason in list(failures.items())[:limit]]
+POST_PROBLEMS_PREFIX = "post "  # every per-post summary starts so; whole-scan errors never do
+
+
+def failure_text(failures: dict[str, str], limit: int = 5) -> str:
+    """The source's scan message for posts needing review: "post <id>: <reason>; ..."."""
+    items = [f"{POST_PROBLEMS_PREFIX}{post_id}: {reason}" for post_id, reason in list(failures.items())[:limit]]
     more = len(failures) - limit
     return "; ".join(items) + (f" (+{more} more)" if more > 0 else "")
+
+
+_failure_text = failure_text

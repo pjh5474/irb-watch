@@ -17,7 +17,13 @@ from irb_watch.crawlers.errors import FileTooLargeError
 from irb_watch.main import app
 from irb_watch.parsers.errors import TOO_LARGE, UNREADABLE
 from irb_watch.services.errors import AuditUnavailableError, ConflictError, NotFoundError
-from irb_watch.services.reviews import ReviewRow, ReviewService, is_file_warning
+from irb_watch.services.reviews import (
+    ReviewRow,
+    ReviewService,
+    is_file_warning,
+    settled_values,
+    settles,
+)
 from tests.fakes import FakeAudit, FakeStore
 from tests.test_admin_users_api import FakeVerifier
 
@@ -161,6 +167,38 @@ class Store:
     def undo(self, document_id, reason):
         self.undone.append((document_id, reason))
         self.rows[document_id] = replace(self.rows[document_id], status="needs_review", review_reason=reason)
+
+    def settle_source(self, source_id):
+        if getattr(self, "settle_error", None):
+            raise self.settle_error
+        self.settled = [*getattr(self, "settled", []), source_id]
+
+
+def test_after_an_ok_the_source_status_is_brought_up_to_date():
+    store = Store([row(f"big.pdf: {BIG.note}")])
+    ReviewService(store, FakeAudit()).acknowledge("admin-1", 1)
+    assert store.settled == [4]
+
+
+def test_a_failing_source_update_never_undoes_the_ok():
+    store = Store([row(f"big.pdf: {BIG.note}")])
+    store.settle_error = RuntimeError("database hiccup")
+    ReviewService(store, FakeAudit()).acknowledge("admin-1", 1)
+    assert store.acked and store.undone == []
+
+
+def test_which_source_results_an_ok_may_settle():
+    per_post = "post 1842962: big.pdf: not downloaded"
+    assert settles("needs_review", per_post, None)
+    assert not settles("needs_review", "R-BAY session ended (got /login)", None)  # whole scan
+    assert not settles("needs_review", "board REGLA: list table not found", None)
+    assert not settles("needs_review", per_post, "login rejected")  # paused
+    assert not settles("ok", None, None)
+
+
+def test_the_source_turns_green_when_nothing_is_left_or_lists_what_is():
+    assert settled_values([]) == {"last_scan_status": "ok", "last_scan_error": None}
+    assert settled_values([("53790", "layout changed")]) == {"last_scan_error": "post 53790: layout changed"}
 
 
 def test_an_admin_marks_file_warnings_ok_and_it_is_logged():

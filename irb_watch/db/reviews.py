@@ -5,7 +5,7 @@ from datetime import datetime
 from supabase import Client
 
 from irb_watch.db.documents import version_files
-from irb_watch.services.reviews import ReviewRow
+from irb_watch.services.reviews import ReviewRow, settled_values, settles
 
 
 class SupabaseReviewStore:
@@ -83,6 +83,40 @@ class SupabaseReviewStore:
             self._restore(document_id, reason)
             raise
         return True
+
+    def settle_source(self, source_id: int) -> None:
+        rows = (
+            self._c.table("sources")
+            .select("last_scan_status, last_scan_error, scans_paused_reason")
+            .eq("id", source_id)
+            .execute()
+            .data
+        )
+        if not rows:
+            return
+        source = rows[0]
+        error = source["last_scan_error"] or ""
+        if not settles(source["last_scan_status"], error, source["scans_paused_reason"]):
+            return  # a whole-scan problem or nothing to settle: leave it to the next scan
+        left = (
+            self._c.table("documents")
+            .select("external_id, review_reason")
+            .eq("source_id", source_id)
+            .eq("status", "needs_review")
+            .order("id")
+            .execute()
+            .data
+        )
+        values = settled_values([(d["external_id"], d["review_reason"] or "") for d in left])
+        # Guarded: if a scan changed the source meanwhile, its own result stands.
+        (
+            self._c.table("sources")
+            .update(values)
+            .eq("id", source_id)
+            .eq("last_scan_status", "needs_review")
+            .eq("last_scan_error", error)
+            .execute()
+        )
 
     def undo(self, document_id: int, reason: str) -> None:
         self._c.table("document_reviews").delete().eq("document_id", document_id).execute()

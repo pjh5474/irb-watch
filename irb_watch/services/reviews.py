@@ -8,6 +8,7 @@ stored (core/state.warning_key); later scans with the same key stay quiet, other
 replaced file flags the document again (core/detect.py).
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,9 +16,11 @@ from typing import Protocol
 
 from irb_watch.core.state import FLAGGED_REASONS, FileContent, warning_key
 from irb_watch.services.errors import ConflictError, NotFoundError
+from irb_watch.services.scan import POST_PROBLEMS_PREFIX, failure_text
 from irb_watch.services.users import AuditSink
 
 LIST_LIMIT = 500
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,12 @@ class ReviewStore(Protocol):
         """Put the review back and drop the approval (when it could not be logged)."""
         ...
 
+    def settle_source(self, source_id: int) -> None:
+        """Bring the source's scan status in line with its documents after an OK: if its last
+        scan was flagged only because of posts needing review, show the posts still left, or
+        `ok` when none are. A whole-scan problem (login, layout, pause) is never touched."""
+        ...
+
 
 def is_file_warning(reason: str | None, files: tuple[FileContent, ...]) -> bool:
     """True when the reason is exactly one "<file>: <note>" warning per flagged file, in the
@@ -73,6 +82,19 @@ def is_file_warning(reason: str | None, files: tuple[FileContent, ...]) -> bool:
         part.startswith(f"{name}: ") and part[len(name) + 2 :].strip() and ";" not in part
         for part, name in zip(parts, flagged, strict=True)
     )
+
+
+def settles(status: str | None, error: str | None, paused_reason: str | None) -> bool:
+    """May an OK change this source's scan status? Only when its last scan was flagged because
+    of posts needing review ("post <id>: ..."), never for a whole-scan problem or a pause."""
+    return status == "needs_review" and not paused_reason and (error or "").startswith(POST_PROBLEMS_PREFIX)
+
+
+def settled_values(left: list[tuple[str, str]]) -> dict:
+    """The source's new status from the posts still needing review (external id, reason)."""
+    if not left:
+        return {"last_scan_status": "ok", "last_scan_error": None}
+    return {"last_scan_error": failure_text(dict(left))}
 
 
 class ReviewService:
@@ -130,4 +152,10 @@ class ReviewService:
         except Exception:
             self._store.undo(document_id, reason)
             raise
+        # The source's light: without this it stayed red until the next scan. A failure here
+        # never undoes the OK (the next scan sets the source's status anyway).
+        try:
+            self._store.settle_source(row.source_id)
+        except Exception:
+            log.exception("could not update source %s after an OK", row.source_id)
         return ReviewItem(row.document_id, row.source_id, row.source_name, row.title, reason, True)
