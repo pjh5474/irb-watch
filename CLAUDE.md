@@ -23,7 +23,9 @@ irb_watch/
   services/          business rules: users, sources, scan, runner, access, summaries (+ errors.py)
   scheduler.py       APScheduler daily run + catch-up + retries (off unless SCHEDULER_ENABLED)
   core/              state, detect (changes), diff, hashing, models: pure logic, no I/O
-  crawlers/          fetcher (SSRF guard, robots, delays), snuh adapter, snuh_reader
+  crawlers/          fetcher (SSRF guard, robots, delays, read-only POSTs), snuh adapter + reader,
+                     rbay adapter + login pool + reader (R-BAY e-IRBs), tls (shipped intermediate
+                     cert), attachments (shared file step, zip unpacking)
   parsers/           pdf, hwp, hwpx, docx readers; formats.py picks one; extract_text()
   ai/                Jev classifier, OpenAI summarizer, enrich (skip rules), digests, templates
   db/                Supabase-backed repositories (documents.py, supabase_users.py, client.py)
@@ -56,7 +58,7 @@ Supabase CLI v3 targets the local stack by default; hosted needs `--remote`. The
 - Keep `docs/decisions.md` and `docs/plan.md` current when a decision changes.
 
 ## Where things stand (2026-11-10)
-**All 19 migrations are applied** (the 19th, `user_projects`, on 2026-11-10: private per-user folders of sites, see decisions.md "User projects") (checked with `npx supabase migration list --remote` on 2026-11-10). Each feature below has its backend and frontend built and committed. The frontend is the separate repo `irb-watch-frontend`.
+**All 20 migrations are applied** (on 2026-11-10: `user_projects`, private per-user folders of sites, see decisions.md "User projects"; `rbay_adapter`, see "R-BAY boards") (checked with `npx supabase migration list --remote` on 2026-11-10). Each feature below has its backend and frontend built and committed. The frontend is the separate repo `irb-watch-frontend`.
 
 Working and verified live: login and admin API, sources, manual scans of two SNUH boards (data stored in the project: sources 4 and 5), PDF/HWP/HWPX/DOCX text, change detection with version history, AI summaries (OpenAI `gpt-6-luna` + Jev), on-demand whole-document summaries, a Docker deploy to an AWS server (`docs/deploy-ec2.md`; `https://irb-api.warwarsn.online`).
 
@@ -73,6 +75,8 @@ Also built:
 - **The assistant (2026-11-09):** a read-only chat per user that streams server-sent events. Admins set daily limits. Admins may get Confirm-button proposals, which the browser runs through the normal admin API. It has run against the real model. The stream through Caddy (`flush_interval -1` on the stream route) looked like streaming in the browser, but the `live_agent_check` count is still inconclusive. See decisions.md "The assistant (agent), backend".
 - **Docs generator (2026-11-10):** drafts IRB submission and amendment forms from stored document versions plus per-source guides. Admins keep a guide library; a user may detach or attach guides. The draft is Markdown first, edited by hand or revised by the AI; a plain DOCX comes on demand. Saving an edit made from an older version is refused (409). An AI-off study is used only when the user ticks a box for that source, and each use is audit-logged. Backend: `irb_watch/docgen/`, `services/docgen.py`, `api/docgen.py`, `api/admin_guides.py`. The RLS test passed (rolled back). Not yet checked by the owner: draft quality with the real model, Word opening the hand-made DOCX, and a draft finishing after the user leaves the page.
 - **Admin-edited AI instructions (2026-11-10):** admins add text after the fixed safety rules of the chat, the docs generator and summaries. The text has history, restore, reset and a test box, and takes effect without a restart. The safety core stays in code. Code: `ai/admin_text.py`, `services/ai_instructions.py`, `api/admin_ai.py`.
+
+- **R-BAY boards (2026-11-10):** hospital e-IRBs on www.r-bay.co.kr, first 관련규정 / 양식함 / 공지 of 대구가톨릭대학교의료원 and 이화의대부속목동병원, one members-only source per board, login under site `rbay`, one shared login per hospital per run; zip attachments unpacked for all sources. Built and checked live read-only on both hospitals; migration `rbay_adapter` applied; no source created yet. See decisions.md "R-BAY boards".
 
 Next candidates:
 - search over stored document text

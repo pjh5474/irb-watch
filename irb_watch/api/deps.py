@@ -20,8 +20,11 @@ from irb_watch.auth.password_login import SupabasePasswordLogin
 from irb_watch.config import get_settings
 from irb_watch.crawlers.credentials import CredentialStore, KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
+from irb_watch.crawlers.rbay_login import POOL as RBAY_POOL
+from irb_watch.crawlers.rbay_reader import RbaySourceReader
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
+from irb_watch.crawlers.tls import rbay_ssl_context
 from irb_watch.db.agent import SupabaseAgentData, SupabaseAgentStore
 from irb_watch.db.ai_instructions import SupabaseInstructionsStore
 from irb_watch.db.alerts import SupabaseAlertStore
@@ -57,7 +60,7 @@ from irb_watch.services.members import MemberService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
 from irb_watch.services.source_login import cookies_for_source
-from irb_watch.services.sources import Source, SourceService
+from irb_watch.services.sources import RBAY_ADAPTER, Source, SourceService
 from irb_watch.services.summaries import SummaryService
 from irb_watch.services.token_login import FailureLimiter, TokenLoginService
 from irb_watch.services.users import UserService, UserStore
@@ -115,21 +118,40 @@ def get_managed_credentials() -> DatabaseCredentialStore:
     return store
 
 
-def build_reader(source: Source) -> SourceReader:
-    """One reader per site type; a new site gets a new adapter and one more branch here."""
+def _scan_fetcher(**extra) -> SafeFetcher:
+    """A fetcher with the scan settings (size, timeout, politeness delay, retries)."""
     settings = get_settings()
-    if source.adapter != "snuh_hrpp":
-        raise ValidationError(f"no adapter named {source.adapter}")
-    # One login attempt per scan; LoginRejectedError fails only this source (needs_review).
-    cookies = cookies_for_source(source, get_credential_store())
-    fetcher = SafeFetcher(
+    return SafeFetcher(
         max_bytes=settings.max_file_bytes,
         timeout=settings.request_timeout_seconds,
         delay=settings.per_domain_delay_seconds,
         retry_waits=settings.fetch_retry_waits,
         retry_budget=settings.fetch_retry_budget,
-        cookies=cookies,
+        **extra,
     )
+
+
+def build_reader(source: Source) -> SourceReader:
+    """One reader per site type; a new site gets a new adapter and one more branch here."""
+    settings = get_settings()
+    if source.adapter == RBAY_ADAPTER:
+        # The login happens inside read(), shared by the hospital's boards (rbay_login.POOL).
+        return RbaySourceReader(
+            RBAY_POOL,
+            get_credential_store(),
+            source.config["login_user"],
+            source.config["agency"],
+            source.config["board"],
+            settings.max_docs_per_url,
+            settings.max_file_bytes,
+            lambda session: _scan_fetcher(
+                cookies=session.jar(), headers=session.headers(), verify=rbay_ssl_context()
+            ),
+        )
+    if source.adapter != "snuh_hrpp":
+        raise ValidationError(f"no adapter named {source.adapter}")
+    # One login attempt per scan; LoginRejectedError fails only this source (needs_review).
+    fetcher = _scan_fetcher(cookies=cookies_for_source(source, get_credential_store()))
     return SnuhSourceReader(
         SnuhAdapter(fetcher),
         source.config["board_key"],

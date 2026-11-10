@@ -54,6 +54,21 @@ def h():
 # ---- claiming ------------------------------------------------------------------------
 
 
+def test_only_a_scan_a_person_started_is_marked_as_such(h):
+    marked = []
+
+    class RememberingReader(FakeReader):
+        def person_started(self):
+            marked.append(True)
+
+    h.reader = RememberingReader(ScanReading())
+    h.service.run_scan(h.service.begin_scan(1), None)  # a scheduled run
+    assert marked == []
+    h.reader = RememberingReader(ScanReading())
+    h.service.run_scan(h.service.begin_scan(1), "admin-1", person_started=True)
+    assert marked == [True]
+
+
 def test_unknown_source(h):
     with pytest.raises(NotFoundError):
         h.service.begin_scan(99)

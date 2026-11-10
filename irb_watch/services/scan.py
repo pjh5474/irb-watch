@@ -154,12 +154,17 @@ class ScanService:
             raise ConflictError("a scan of this source is already running")
         return source
 
-    def run_scan(self, source: Source, actor_id: str | None) -> ScanSummary:
-        """Run a scan that begin_scan() claimed. Always releases the claim."""
+    def run_scan(
+        self, source: Source, actor_id: str | None, person_started: bool = False
+    ) -> ScanSummary:
+        """Run a scan that begin_scan() claimed. Always releases the claim.
+
+        person_started: an admin pressed "scan" for this one source. That is how a pause after
+        a rejected login is lifted, so the reader may send a remembered login once more."""
         now = self._clock()
         saved = False  # True once the scan's changes were stored
         try:
-            summary = self._scan(source, actor_id, now)
+            summary = self._scan(source, actor_id, now, person_started)
             saved = True
         except LoginRejectedError as exc:
             # The site refused the login. Scheduled scans must not try again (account
@@ -223,7 +228,9 @@ class ScanService:
 
     # -- the scan itself -------------------------------------------------------------
 
-    def _scan(self, source: Source, actor_id: str | None, now: datetime) -> ScanSummary:
+    def _scan(
+        self, source: Source, actor_id: str | None, now: datetime, person_started: bool = False
+    ) -> ScanSummary:
         stored_this_run: set[str] = set()
 
         def file_sink(sha256: str, filename: str, content: bytes) -> str:
@@ -234,6 +241,9 @@ class ScanService:
             return sha256
 
         reader = self._reader_factory(source)
+        mark = getattr(reader, "person_started", None)  # only readers that remember logins
+        if person_started and mark is not None:
+            mark()
         try:
             reading = reader.read(file_sink)
         finally:

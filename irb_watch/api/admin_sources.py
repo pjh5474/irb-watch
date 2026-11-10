@@ -124,7 +124,7 @@ def _scan_then_alert(
 ) -> None:
     """A manual scan, then look at this source's health so admins are mailed if it changed.
     A mail problem never turns into a scan problem."""
-    scans.run_scan(source, actor_id)
+    scans.run_scan(source, actor_id, person_started=True)
     try:
         alerts.evaluate_source(source.id)
     except Exception:

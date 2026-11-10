@@ -43,7 +43,9 @@ class StubScanService:
         self.begun.append(source_id)
         return make_source(source_id)
 
-    def run_scan(self, source, actor_id):
+    def run_scan(self, source, actor_id, person_started=False):
+        # The scan button is a person's own scan: it may lift a pause after a rejected login.
+        assert person_started is True
         self.ran.append((source.id, actor_id))
 
 

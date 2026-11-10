@@ -4,6 +4,7 @@ Redirects are followed by hand so validate_url() runs on every hop. robots.txt i
 honoured, requests to one host are spaced out, and bodies are size-capped.
 """
 
+import ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,19 @@ DEFAULT_RETRY_WAITS = (5.0, 15.0)  # seconds before the 2nd and 3rd try
 
 class _Transient(Exception):
     """A connection-level failure worth retrying (internal to this module)."""
+
+
+@dataclass(frozen=True)
+class Body:
+    """A POST body: form fields or JSON (one of them)."""
+
+    data: dict[str, str] | None = None
+    json: dict | None = None
+
+    def kwargs(self) -> dict:
+        if self.json is not None:
+            return {"json": self.json}
+        return {"data": self.data or {}}
 
 
 @dataclass(frozen=True)
@@ -65,6 +79,8 @@ class SafeFetcher:
         resolver: Callable[[str], list[str]] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        verify: ssl.SSLContext | bool = True,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self._max_bytes = max_bytes
         self._delay = delay
@@ -78,13 +94,22 @@ class SafeFetcher:
         self._retries_used = 0
         self._last_request: dict[str, float] = {}
         self._robots: dict[str, RobotFileParser] = {}
+        # `verify` is an SSL context only for a site with a broken certificate chain (see
+        # crawlers/tls.py); verification is never switched off.
+        if verify is False:
+            raise ValueError("TLS verification cannot be switched off")
         self._client = httpx.Client(
             timeout=timeout,
             follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": USER_AGENT, **(headers or {})},
             cookies=cookies,
             transport=transport,
+            verify=verify,
         )
+
+    @property
+    def cookies(self) -> httpx.Cookies:
+        return self._client.cookies
 
     def close(self) -> None:
         self._client.close()
@@ -95,6 +120,26 @@ class SafeFetcher:
         """GET a URL. Any non-2xx status raises FetchError."""
         response = self._request(url, params, max_bytes or self._max_bytes, self._check_robots)
         if not 200 <= response.status < 300:
+            raise FetchError(f"HTTP {response.status} for {response.url}")
+        return response
+
+    def post(
+        self,
+        url: str,
+        data: dict[str, str] | None = None,
+        json: dict | None = None,
+        max_bytes: int | None = None,
+        follow_redirects: bool = True,
+    ) -> FetchedResponse:
+        """POST a form or JSON body. ONLY for requests that read: some sites (r-bay) load list
+        pages, posts and files by POST. Retried like a GET for that reason. A redirect is
+        followed as a GET (what a browser does after a form post). Non-2xx raises FetchError,
+        except a redirect when follow_redirects is False (returned as is)."""
+        body = Body(data=data, json=json)
+        response = self._request(
+            url, None, max_bytes or self._max_bytes, self._check_robots, body, follow_redirects
+        )
+        if follow_redirects and not 200 <= response.status < 300:
             raise FetchError(f"HTTP {response.status} for {response.url}")
         return response
 
@@ -115,9 +160,16 @@ class SafeFetcher:
                 self._sleep(remaining)
 
     def _request(
-        self, url: str, params: dict[str, str] | None, max_bytes: int, check_robots: bool
+        self,
+        url: str,
+        params: dict[str, str] | None,
+        max_bytes: int,
+        check_robots: bool,
+        body: "Body | None" = None,
+        follow_redirects: bool = True,
     ) -> FetchedResponse:
-        """One GET with retries for temporary site trouble (GET is safe to repeat).
+        """One request with retries for temporary site trouble (GET, and the read-only POSTs
+        of post(), are safe to repeat).
 
         Retried: HTTP 502/503/504, connection errors and timeouts. Waits come from
         retry_waits (default 5 s then 15 s = 3 tries). All retries in this fetcher's life
@@ -128,7 +180,9 @@ class SafeFetcher:
         for attempt in range(1, tries + 1):
             problem: str
             try:
-                response = self._request_once(url, params, max_bytes, check_robots)
+                response = self._request_once(
+                    url, params, max_bytes, check_robots, body, follow_redirects
+                )
             except _Transient as exc:
                 problem = str(exc)
             else:
@@ -148,7 +202,13 @@ class SafeFetcher:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _request_once(
-        self, url: str, params: dict[str, str] | None, max_bytes: int, check_robots: bool
+        self,
+        url: str,
+        params: dict[str, str] | None,
+        max_bytes: int,
+        check_robots: bool,
+        body: "Body | None" = None,
+        follow_redirects: bool = True,
     ) -> FetchedResponse:
         if params:
             url = str(httpx.URL(url).copy_merge_params(params))
@@ -159,14 +219,19 @@ class SafeFetcher:
                 self._ensure_allowed(url)
             host = httpx.URL(url).host
             self._throttle(host)
+            method = "POST" if body is not None else "GET"
+            extra = body.kwargs() if body is not None else {}
             try:
-                with self._client.stream("GET", url) as r:
+                with self._client.stream(method, url, **extra) as r:
                     self._last_request[host] = self._monotonic()
                     if r.is_redirect:
                         location = r.headers.get("location")
+                        if not follow_redirects:
+                            return FetchedResponse(url, r.status_code, r.headers, b"")
                         if not location:
                             raise FetchError(f"redirect without Location from {url}")
                         url = str(httpx.URL(url).join(location))
+                        body = None  # after a form post, the browser follows with a GET
                         continue
                     check_content_length(r.headers.get("content-length"), max_bytes)
                     content = stream_with_cap(r.iter_bytes(), max_bytes)

@@ -8,20 +8,18 @@ sink (storage), extract text. Two kinds of trouble, handled differently:
     stays tracked, the file is tracked by hash, and a warning with the reason is attached.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from irb_watch.core.detect import Observation
 from irb_watch.core.hashing import collapse_whitespace
-from irb_watch.core.state import FileContent, VersionContent
+from irb_watch.core.state import VersionContent
+from irb_watch.crawlers.attachments import FileSink, observe_files
 from irb_watch.crawlers.errors import CrawlError, LoginExpiredError, SiteUnavailableError
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.parsers.errors import ParseError
-from irb_watch.parsers.formats import extract_text
 
-# file_sink(sha256, filename, content) stores the original and returns its storage path.
-FileSink = Callable[[str, str, bytes], str]
+__all__ = ["FileSink", "ScanReading", "SnuhSourceReader", "iso_date"]
 
 
 @dataclass
@@ -75,31 +73,11 @@ class SnuhSourceReader:
         # The page text repeats the title; keep it out so a title edit is not also a text edit.
         body = collapse_whitespace(detail.body_text.replace(summary.title, " ", 1))
 
-        files: list[FileContent] = []
-        warnings: list[str] = []
-        seen_names: dict[str, int] = {}
-        for ref in detail.attachments:
-            downloaded = self._adapter.download(ref, self._max_file_bytes)
-            extracted = extract_text(downloaded.filename, downloaded.content)
-            storage_path = file_sink(downloaded.sha256, downloaded.filename, downloaded.content)
-            count = seen_names.get(ref.filename, 0) + 1
-            seen_names[ref.filename] = count
-            name = ref.filename if count == 1 else f"{ref.filename} ({count})"
-            files.append(
-                FileContent(
-                    filename=name,
-                    size_label=ref.size_label,
-                    sha256=downloaded.sha256,
-                    text=extracted.document.text if extracted.document else None,
-                    hash_only_reason=extracted.hash_only_reason,
-                    storage_path=storage_path,
-                    note=extracted.note,
-                )
-            )
-            if extracted.unreadable:
-                # Still tracked by file hash, but people need to see why there is no text.
-                warnings.append(f"{name}: {extracted.note}")
-
+        # A zip becomes the zip plus each file inside; unreadable files still count by hash,
+        # with a warning so people see why there is no text.
+        files, warnings = observe_files(
+            detail.attachments, self._adapter.download, self._max_file_bytes, file_sink
+        )
         return Observation(
             external_id=summary.post_id,
             source_url=summary.detail_url,

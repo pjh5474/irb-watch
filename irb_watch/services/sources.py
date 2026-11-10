@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from irb_watch.crawlers.rbay import BOARDS as RBAY_BOARDS
+from irb_watch.crawlers.rbay import HOST as RBAY_HOST
+from irb_watch.crawlers.rbay import HOSTS as RBAY_HOSTS
+from irb_watch.crawlers.rbay import agency_key as rbay_agency_key
+from irb_watch.crawlers.rbay import agency_url as rbay_agency_url
 from irb_watch.crawlers.sessions import valid_name
 from irb_watch.security.url_guard import UnsafeURLError, validate_url
 from irb_watch.services.errors import ConflictError, NotFoundError, ValidationError
@@ -12,6 +17,7 @@ from irb_watch.services.users import AuditSink
 
 SNUH_HOST = "hrpp.snuh.org"
 SNUH_LIST_PATH = "/hrpp/bbs/list.do"
+RBAY_ADAPTER = "rbay"
 
 
 @dataclass(frozen=True)
@@ -70,7 +76,22 @@ def detect_adapter(url: str) -> tuple[str, str, dict]:
             canonical = f"https://{SNUH_HOST}{SNUH_LIST_PATH}?key={key}"
             return "snuh_hrpp", canonical, {"board_key": key}
         raise ValidationError("the SNUH board link needs a numeric ?key=... parameter")
-    raise ValidationError("no adapter for this site yet (supported: hrpp.snuh.org boards)")
+    if (parts.hostname or "").lower() in RBAY_HOSTS:
+        # One source per board: the hospital's R-BAY address plus ?board=<code>.
+        agency = rbay_agency_key(f"https://{RBAY_HOST}{parts.path}")
+        board = (parse_qs(parts.query).get("board") or [""])[0].strip().upper()
+        if agency is None:
+            raise ValidationError(
+                "an R-BAY source needs the hospital's address, https://www.r-bay.co.kr/agency/main/<code>"
+            )
+        if board not in RBAY_BOARDS:
+            choices = ", ".join(f"{code} ({name})" for code, name in RBAY_BOARDS.items())
+            raise ValidationError(f"add ?board=<code> to the R-BAY address; one of: {choices}")
+        canonical = f"{rbay_agency_url(agency)}?board={board}"
+        return RBAY_ADAPTER, canonical, {"agency": agency, "board": board}
+    raise ValidationError(
+        "no adapter for this site yet (supported: hrpp.snuh.org boards, R-BAY e-IRB boards)"
+    )
 
 
 def _checked_login_user(login_user: str) -> str:
@@ -105,6 +126,11 @@ class SourceService:
         adapter, canonical, config = detect_adapter(url)
         if login_user:
             config["login_user"] = _checked_login_user(login_user)
+        elif adapter == RBAY_ADAPTER:
+            raise ValidationError(
+                "an R-BAY board can only be read with a login: give login_user "
+                "(its password is stored under site 'rbay')"
+            )
         try:
             self._check_url(canonical)
         except UnsafeURLError as exc:
@@ -155,6 +181,8 @@ class SourceService:
         current = self.get(source_id)
         values: dict = {}
         if login_user is not None:  # "" removes the login
+            if not login_user.strip() and current.adapter == RBAY_ADAPTER:
+                raise ValidationError("an R-BAY board cannot be read without a login")
             config = {k: v for k, v in current.config.items() if k != "login_user"}
             if login_user:
                 config["login_user"] = _checked_login_user(login_user)

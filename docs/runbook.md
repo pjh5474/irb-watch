@@ -97,6 +97,14 @@ Role changes are logged by a database trigger without an actor (the server uses 
 4. Turn AI on only if the owner agrees the documents may go to OpenAI and Jev (`PATCH` `ai_enabled: true`).
 5. The same board can be added again with a different label (different study account); the pair URL + label must be unique.
 
+## R-BAY boards (hospital e-IRBs on www.r-bay.co.kr)
+1. Store the R-BAY login once under site `rbay` (one account works for every hospital it is registered with): server `PUT /admin/credentials/<label>/rbay`; this PC `uv run python -m irb_watch.scripts.save_credentials --user <label> --site rbay`.
+2. Add one source per board: URL `https://www.r-bay.co.kr/agency/main/<hospital code>?board=REGLA` (관련규정), `FORM_BOX` (양식함) or `NOTI` (공지), with `login_user: <label>`. A login is required. AI starts off for members-only sources; `PATCH ai_enabled: true` if allowed (owner: yes for these boards).
+3. Assign readers with `PUT /admin/sources/{id}/members`.
+4. Read-only check without touching the database (one login, list, one post, one download, logout):
+   `uv run python -m irb_watch.scripts.live_rbay_check --keyring --user owner --url "<source URL>"` (drop `--keyring` to use the server's credential store).
+5. In a run, the boards of one hospital share one login; it is logged out 90 s after the last board. A rejected password is not sent again within the hour (a changed password is tried at once).
+
 ## Scheduler
 - Runs only with `SCHEDULER_ENABLED=true`. Daily scan at `SCAN_CRON` (default 06:00 in `SCAN_TIMEZONE`, Asia/Seoul), one worker per hospital site, one retry after 1 hour, a catch-up run at start-up if today's was missed.
 - Weekly admin report at `WEEKLY_STATS_CRON` (default `0 7 * * mon`, Mondays 07:00). Write the weekday as a **name**: APScheduler counts numbers from Monday = 0, so `1` means Tuesday.
