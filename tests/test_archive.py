@@ -41,6 +41,12 @@ def test_unpack_keeps_folders_and_skips_mac_junk():
     assert [(m.name, m.content) for m in unpack_zip(data)] == [("docs/protocol.txt", b"p")]
 
 
+def test_office_lock_files_are_skipped():
+    # A real R-BAY zip held Word's hidden lock file next to the document (2026-11-10).
+    data = make_zip({"서식/~$ 대상자 설명서 및 동의서.docx": b"\x05user", "서식/대상자 설명서 및 동의서.docx": b"doc"})
+    assert [m.name for m in unpack_zip(data)] == ["서식/대상자 설명서 및 동의서.docx"]
+
+
 def test_korean_names_written_by_windows_tools_are_read_correctly():
     data = cp949_zip("연구계획서.txt", b"x")
     assert unpack_zip(data)[0].name == "연구계획서.txt"
@@ -109,6 +115,7 @@ def test_a_zip_becomes_itself_plus_each_file_inside():
     assert text_file.hash_only_reason == UNSUPPORTED_FORMAT and text_file.size_label == "5B"
     # A broken file inside a zip does not fail the post; it is flagged with the reason.
     assert broken.hash_only_reason == UNREADABLE and warnings == [f"pack.zip/b.pdf: {broken.note}"]
+    assert warnings[0].count("pack.zip/b.pdf") == 1  # the name is said once, not twice
     assert len({r.sha256 for r in records}) == 3
 
 

@@ -21,9 +21,12 @@ MAX_FILES = 200
 MAX_TOTAL_BYTES = 200_000_000
 _CHUNK = 1 << 20
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")  # a normal zip, an empty zip
-# Folders macOS adds to zips; not documents.
+# Not documents: folders macOS adds to zips, Windows/macOS folder files, and the hidden lock
+# files Microsoft Office writes next to an open document ("~$name.docx", seen in a real R-BAY
+# zip on 2026-11-10; a hundred-odd bytes holding the user name, never a valid document).
 _SKIP_PREFIXES = ("__MACOSX/",)
 _SKIP_NAMES = (".DS_Store", "Thumbs.db", "desktop.ini")
+_SKIP_NAME_STARTS = ("~$", "._")
 
 
 class ArchiveError(Exception):
@@ -81,7 +84,13 @@ def iter_zip(
             if info.is_dir():
                 continue
             name = _clean(_decoded_name(info))
-            if not name or name.startswith(_SKIP_PREFIXES) or name.rsplit("/", 1)[-1] in _SKIP_NAMES:
+            base = name.rsplit("/", 1)[-1]
+            if (
+                not name
+                or name.startswith(_SKIP_PREFIXES)
+                or base in _SKIP_NAMES
+                or base.startswith(_SKIP_NAME_STARTS)
+            ):
                 continue
             infos.append((info, name))
         if len(infos) > max_files:

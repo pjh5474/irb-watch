@@ -70,9 +70,11 @@ def read_attachment(
             except ParseError as exc:
                 # Inside a zip this is a property of the archive's content, not a download
                 # error: keep the file (downloadable) and flag it.
+                # The parser's message starts with the file name; the warning adds it once.
+                reason = str(exc).removeprefix(f"{inner}: ")
                 record = FileContent(
                     inner, inner_label, inner_sha, None, UNREADABLE,
-                    file_sink(inner_sha, inner, member.content), note=str(exc),
+                    file_sink(inner_sha, inner, member.content), note=reason,
                 )
             if record.hash_only_reason == UNREADABLE:
                 warnings.append(f"{inner}: {record.note}")
