@@ -159,14 +159,22 @@ def main() -> int:
             api,
             token,
             conv,
-            "Write a numbered list of 8 short things a research coordinator should check when a "
-            "consent form changes. Do not use any tools.",
+            # Long on purpose: a fast model writes a short answer in a fraction of a second, which
+            # looks the same as a buffered stream. About 400 words takes several seconds to write.
+            "Write about 400 words, in plain paragraphs, on what a research coordinator should "
+            "check when a consent form changes, and why each point matters. Do not use any tools.",
         )
         report.check(status_code == 200, "the message was accepted", f"{status_code} {detail}")
         texts = [t for t, k, _ in events if k == "text"]
+        done = next((t for t, k, _ in events if k == "done"), None)
         if len(texts) >= 5:
             spread = texts[-1] - texts[0]
             bursts = len({round(t, 1) for t in texts})
+            report.note(
+                f"first text at {texts[0]:.1f}s, last at {texts[-1]:.1f}s, "
+                f"done at {done if done is None else round(done, 1)}s, "
+                f"{sum(len(d.get('delta', '')) for _, k, d in events if k == 'text')} characters"
+            )
             report.check(
                 spread > 0.8 and bursts >= 4,
                 "text arrives piece by piece (not all at the end)",
