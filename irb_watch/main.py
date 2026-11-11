@@ -26,6 +26,7 @@ from irb_watch.api import (
     documents,
     files,
     health,
+    pipelines,
     unsubscribe,
 )
 from irb_watch.config import get_settings
@@ -44,11 +45,13 @@ async def lifespan(_: FastAPI):
         weekly = deps.get_weekly_service()
         agent_service = deps.get_agent_service()
         docgen_service = deps.get_docgen_service()
+        pipeline_service = deps.get_pipeline_service()
 
         def purge_old() -> None:
-            # Both run every time; each one logs and swallows its own failure.
+            # All run every time; each one logs and swallows its own failure.
             agent_service.purge_old()
             docgen_service.purge_old()
+            pipeline_service.purge_old()
 
         scheduler = ScanScheduler(
             deps.get_runner(),
@@ -112,4 +115,5 @@ app.include_router(admin_templates.router)
 app.include_router(admin_ai.router)
 app.include_router(documents.router)
 app.include_router(files.router)
+app.include_router(pipelines.router)
 app.include_router(unsubscribe.router)

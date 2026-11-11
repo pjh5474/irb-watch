@@ -38,23 +38,34 @@ router = APIRouter(prefix="/admin", tags=["admin-manual"])
 # (MAX_UPLOAD_BYTES) as base64 (4/3 larger) plus room for the rest of the JSON.
 MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_BYTES * 4 // 3 + 2_000_000
 UPLOAD_PATH = re.compile(r"^/admin/sources/\d+/manual-documents(/\d+/versions)?/?$")
+# A user's upload to an IRB pipeline step: one file of at most MAX_FILE_BYTES (20 MB by default).
+PIPELINE_UPLOAD_PATH = re.compile(r"^/pipelines/\d+/steps/\d+/documents/?$")
+PIPELINE_FILE_BYTES = 20_000_000
+MAX_PIPELINE_REQUEST_BYTES = PIPELINE_FILE_BYTES * 4 // 3 + 1_000_000
 
 
 async def limit_upload_size(request: Request, call_next):
     """Refuse an upload request that is too big BEFORE its body is read, so one request cannot
     fill the small server's memory. A request without a declared size is refused too."""
-    if request.method == "POST" and UPLOAD_PATH.match(request.url.path):
-        declared = request.headers.get("content-length")
-        if declared is None or not declared.isdigit():
-            return JSONResponse({"detail": "the upload must declare its size (Content-Length)"}, status_code=411)
-        if int(declared) > MAX_UPLOAD_REQUEST_BYTES:
-            return JSONResponse(
-                {
-                    "detail": f"the upload is too large (at most {MAX_UPLOAD_BYTES / 1_000_000:.0f} MB "
-                    "of files at once); upload in two steps"
-                },
-                status_code=413,
-            )
+    if request.method != "POST":
+        return await call_next(request)
+    path = request.url.path
+    if UPLOAD_PATH.match(path):
+        limit = MAX_UPLOAD_REQUEST_BYTES
+        reason = (
+            f"the upload is too large (at most {MAX_UPLOAD_BYTES / 1_000_000:.0f} MB of files at once); "
+            "upload in two steps"
+        )
+    elif PIPELINE_UPLOAD_PATH.match(path):
+        limit = MAX_PIPELINE_REQUEST_BYTES
+        reason = f"the file is too large (at most {PIPELINE_FILE_BYTES / 1_000_000:.0f} MB)"
+    else:
+        return await call_next(request)
+    declared = request.headers.get("content-length")
+    if declared is None or not declared.isdigit():
+        return JSONResponse({"detail": "the upload must declare its size (Content-Length)"}, status_code=411)
+    if int(declared) > limit:
+        return JSONResponse({"detail": reason}, status_code=413)
     return await call_next(request)
 
 

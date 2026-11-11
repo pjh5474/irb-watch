@@ -42,6 +42,7 @@ from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
 from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.organizations import SupabaseOrganizationStore
 from irb_watch.db.pipeline_admin import SupabasePipelineSetupStore
+from irb_watch.db.pipelines import SupabasePipelineFiles, SupabasePipelineStore
 from irb_watch.db.reviews import SupabaseReviewStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.db.weekly import SupabaseWeeklyStore
@@ -63,6 +64,7 @@ from irb_watch.services.manual import ManualService
 from irb_watch.services.members import MemberService
 from irb_watch.services.organizations import OrganizationService
 from irb_watch.services.pipeline_admin import PipelineSetupService
+from irb_watch.services.pipelines import PipelineService
 from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
@@ -115,6 +117,20 @@ def get_organization_service() -> OrganizationService:
 def get_pipeline_setup_service() -> PipelineSetupService:
     client = get_supabase_client()
     return PipelineSetupService(SupabasePipelineSetupStore(client), SupabaseAuditSink(client))
+
+
+def get_pipeline_service() -> PipelineService:
+    client = get_supabase_client()
+    settings = get_settings()
+    return PipelineService(
+        SupabaseUserStore(client),
+        SupabasePipelineStore(client),
+        get_pipeline_setup_service(),
+        SupabasePipelineFiles(client),
+        max_file_bytes=settings.max_file_bytes,
+        link_ttl_seconds=settings.download_link_ttl_seconds,
+        timezone=settings.scan_timezone,
+    )
 
 
 def get_audit_sink() -> SupabaseAuditSink:
