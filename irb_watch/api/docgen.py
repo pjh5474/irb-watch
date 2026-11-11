@@ -12,12 +12,13 @@ from pydantic import BaseModel, Field
 
 from irb_watch.api.deps import current_user, get_docgen_service
 from irb_watch.auth.jwt import AuthUser
-from irb_watch.docgen.types import Draft, DraftVersion, Guide
+from irb_watch.docgen.types import DocRef, Draft, DraftVersion, Guide
 from irb_watch.services.docgen import (
     MAX_EXTRA_GUIDES,
     DocChoice,
     DocgenService,
     DraftDetail,
+    InputChange,
     UploadedFile,
 )
 
@@ -59,6 +60,22 @@ class DocRefOut(BaseModel):
     document_id: int
     version_no: int
     source_id: int
+    files: list[str] | None = None  # None = every attached file
+    page_text: bool = True
+    compare_with: int | None = None  # None = the version just before
+    compare: bool = True
+
+    @classmethod
+    def of(cls, r: DocRef) -> "DocRefOut":
+        return cls(
+            document_id=r.document_id,
+            version_no=r.version_no,
+            source_id=r.source_id,
+            files=list(r.files) if r.files is not None else None,
+            page_text=r.page_text,
+            compare_with=r.compare_with,
+            compare=r.compare,
+        )
 
 
 class DraftOut(BaseModel):
@@ -78,10 +95,7 @@ class DraftOut(BaseModel):
             id=d.id,
             title=d.title,
             instruction=d.instruction,
-            documents=[
-                DocRefOut(document_id=r.document_id, version_no=r.version_no, source_id=r.source_id)
-                for r in d.document_refs
-            ],
+            documents=[DocRefOut.of(r) for r in d.document_refs],
             guide_ids=list(d.guide_ids),
             extra_guides=[e.filename for e in d.extra_guides],
             ai_override_source_ids=list(d.ai_override_source_ids),
@@ -96,6 +110,9 @@ class VersionOut(BaseModel):
     origin: str
     instruction: str
     created_at: str
+    # What an AI version was written from (documents with their files, guide ids, attached
+    # guide file names); None for hand edits and versions saved before this was recorded.
+    inputs: dict | None = None
 
     @classmethod
     def of(cls, v: DraftVersion) -> "VersionOut":
@@ -105,6 +122,7 @@ class VersionOut(BaseModel):
             origin=v.origin,
             instruction=v.instruction,
             created_at=v.created_at,
+            inputs=v.inputs,
         )
 
 
@@ -125,6 +143,21 @@ class DraftDetailOut(BaseModel):
 class DocChoiceIn(BaseModel):
     document_id: int
     version_no: int | None = None  # None = the newest version
+    # Attached files to send, by name; None = all of them.
+    files: list[str] | None = Field(default=None, max_length=200)
+    page_text: bool = True  # False leaves the post's own text out
+    compare_with: int | None = None  # an earlier version; None = the one just before
+    compare: bool = True  # False sends no list of changes
+
+    def choice(self) -> DocChoice:
+        return DocChoice(
+            self.document_id,
+            self.version_no,
+            tuple(self.files) if self.files is not None else None,
+            self.page_text,
+            self.compare_with,
+            self.compare,
+        )
 
 
 class FileIn(BaseModel):
@@ -149,10 +182,23 @@ class MarkdownIn(BaseModel):
     base_version_no: int | None = None
 
 
+class InputsIn(BaseModel):
+    """New documents and guides for a revision (they replace the draft's current ones)."""
+
+    documents: list[DocChoiceIn] = Field(max_length=50)
+    # None: every guide linked to the documents' sources. A list: exactly these.
+    guide_ids: list[int] | None = Field(default=None, max_length=50)
+    # Names of the draft's attached guide files to keep, plus new files.
+    keep_extra_guides: list[str] = Field(default_factory=list, max_length=MAX_EXTRA_GUIDES)
+    extra_guides: list[FileIn] = Field(default_factory=list, max_length=MAX_EXTRA_GUIDES)
+
+
 class ReviseIn(BaseModel):
     instruction: str = Field(max_length=20_000)
-    # Needed only when AI was switched off for a source after the draft was made (409 names it).
+    # Needed when AI was switched off for a source after the draft was made, or for a newly
+    # added AI-off source (409 names it).
     ai_override_source_ids: list[int] = Field(default_factory=list, max_length=50)
+    inputs: InputsIn | None = None  # None: the draft's current documents and guides
 
 
 @router.get("/status", response_model=StatusOut)
@@ -183,7 +229,7 @@ def create_draft(
     return DraftDetailOut.of(
         service.create_draft(
             user.id,
-            [DocChoice(d.document_id, d.version_no) for d in body.documents],
+            [d.choice() for d in body.documents],
             body.guide_ids,
             [UploadedFile(f.filename, f.content_base64) for f in body.extra_guides],
             body.instruction,
@@ -228,9 +274,20 @@ def revise(
     user: AuthUser = Depends(current_user),
     service: DocgenService = Depends(get_docgen_service),
 ) -> VersionOut:
-    """Asks the AI to change the newest version as instructed; saves the result as a new one."""
+    """Asks the AI to change the newest version as instructed; saves the result as a new one.
+    With `inputs`, the revision reads those documents and guides, and they become the draft's."""
+    change = None
+    if body.inputs is not None:
+        change = InputChange(
+            [d.choice() for d in body.inputs.documents],
+            body.inputs.guide_ids,
+            body.inputs.keep_extra_guides,
+            [UploadedFile(f.filename, f.content_base64) for f in body.inputs.extra_guides],
+        )
     return VersionOut.of(
-        service.revise(user.id, str(draft_id), body.instruction, body.ai_override_source_ids)
+        service.revise(
+            user.id, str(draft_id), body.instruction, body.ai_override_source_ids, change
+        )
     )
 
 

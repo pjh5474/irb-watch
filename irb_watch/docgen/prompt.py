@@ -9,6 +9,7 @@ from irb_watch.ai.admin_text import with_admin_text
 from irb_watch.ai.digest import change_digest, document_digest
 from irb_watch.ai.tags import defuse
 from irb_watch.core.diff import describe_change
+from irb_watch.core.state import VersionContent
 from irb_watch.docgen.types import DocVersion, ExtraGuide, Guide
 
 GUIDE_CHARS = 20_000  # per guide
@@ -69,22 +70,41 @@ def _guide_block(title: str, filename: str, text: str) -> tuple[str, bool]:
     return f"<guide>\n{_escape(head + chr(10) + chr(10) + body, 'guide')}\n</guide>", cut
 
 
+def _select(content: VersionContent, files: tuple[str, ...] | None, page_text: bool) -> VersionContent:
+    """Only what the user chose: the page text (or nothing) and the chosen files."""
+    kept = content.files if files is None else tuple(f for f in content.files if f.filename in files)
+    return VersionContent(content.title, content.body_text if page_text else "", kept)
+
+
 def _document_block(doc: DocVersion, budget: int) -> tuple[str, bool]:
-    digest = document_digest(doc.content)
+    content = _select(doc.content, doc.files, doc.page_text)
+    digest = document_digest(content, page_text=doc.page_text)
     body, cut = _cut(digest.text, budget)
     cut = cut or digest.truncated
     parts = [
         f"document id: {doc.document_id}, version {doc.version_no}, source id: {doc.source_id}",
         f"title: {doc.title}",
-        "",
-        "TEXT:",
-        body,
     ]
-    if doc.previous is not None:
-        changes = change_digest(describe_change(doc.previous, doc.content), doc.content)
+    kept = {f.filename for f in content.files}
+    left_out = [f.filename for f in doc.content.files if f.filename not in kept]
+    if not doc.page_text:
+        parts.append("The coordinator left out the post's page text.")
+    if left_out:
+        parts.append("Files of this post the coordinator left out: " + ", ".join(left_out))
+    parts += ["", "TEXT:", body]
+    if not doc.compare:
+        parts += ["", "CHANGES: the coordinator asked for no comparison with another version."]
+    elif doc.previous is not None:
+        # The earlier version keeps the chosen names plus files that no longer exist now, so a
+        # replaced file shows as "removed" and its successor as "added" (not only "added").
+        gone = {f.filename for f in doc.previous.files} - {f.filename for f in doc.content.files}
+        wanted = None if doc.files is None else tuple(doc.files) + tuple(sorted(gone))
+        before = _select(doc.previous, wanted, doc.page_text)
+        changes = change_digest(describe_change(before, content), content)
         ctext, ccut = _cut(changes.text, CHANGES_CHARS)
         cut = cut or ccut or changes.truncated
-        parts += ["", f"CHANGES FROM VERSION {doc.version_no - 1}:", ctext or "(none)"]
+        number = doc.previous_no if doc.previous_no is not None else doc.version_no - 1
+        parts += ["", f"CHANGES FROM VERSION {number}:", ctext or "(none)"]
     else:
         parts += ["", "CHANGES: this is the first stored version; no earlier version to compare."]
     return f"<document>\n{_escape(chr(10).join(parts), 'document')}\n</document>", cut

@@ -25,7 +25,11 @@ class SourceRef:
 
 @dataclass(frozen=True)
 class DocVersion:
-    """One stored document version, and the one before it (for the list of changes)."""
+    """One stored document version, and the version it is compared with (for the list of
+    changes): by default the one just before it.
+
+    files / page_text: what of the post the user chose to send (files None = every file).
+    previous_no: the number of `previous`; compare False = the user chose no comparison."""
 
     document_id: int
     source_id: int
@@ -33,6 +37,10 @@ class DocVersion:
     version_no: int
     content: VersionContent
     previous: VersionContent | None
+    files: tuple[str, ...] | None = None
+    page_text: bool = True
+    previous_no: int | None = None
+    compare: bool = True
 
 
 @dataclass(frozen=True)
@@ -48,9 +56,43 @@ class Guide:
 
 @dataclass(frozen=True)
 class DocRef:
+    """One chosen post of a draft. files None = every attached file. compare_with None = the
+    version just before; compare False = no list of changes."""
+
     document_id: int
     version_no: int
     source_id: int
+    files: tuple[str, ...] | None = None
+    page_text: bool = True
+    compare_with: int | None = None
+    compare: bool = True
+
+
+def ref_to_json(r: DocRef) -> dict:
+    return {
+        "document_id": r.document_id,
+        "version_no": r.version_no,
+        "source_id": r.source_id,
+        "files": list(r.files) if r.files is not None else None,
+        "page_text": r.page_text,
+        "compare_with": r.compare_with,
+        "compare": r.compare,
+    }
+
+
+def ref_from_json(r: dict) -> DocRef:
+    """Rows saved before file choice existed have only the first three keys."""
+    files = r.get("files")
+    compare_with = r.get("compare_with")
+    return DocRef(
+        int(r["document_id"]),
+        int(r["version_no"]),
+        int(r["source_id"]),
+        tuple(str(f) for f in files) if files is not None else None,
+        bool(r.get("page_text", True)),
+        int(compare_with) if compare_with is not None else None,
+        bool(r.get("compare", True)),
+    )
 
 
 @dataclass(frozen=True)
@@ -59,6 +101,25 @@ class ExtraGuide:
 
     filename: str
     text: str
+
+
+@dataclass(frozen=True)
+class Inputs:
+    """What one AI version was written from. Saved on that version (guide files by name only)
+    and, for the newest AI version, as the draft's current selection (with guide file text)."""
+
+    document_refs: tuple[DocRef, ...]
+    guide_ids: tuple[int, ...]
+    extra_guides: tuple[ExtraGuide, ...]
+    ai_override_source_ids: tuple[int, ...]
+
+    def to_json(self) -> dict:
+        return {
+            "documents": [ref_to_json(r) for r in self.document_refs],
+            "guide_ids": list(self.guide_ids),
+            "extra_guides": [e.filename for e in self.extra_guides],
+            "ai_override_source_ids": list(self.ai_override_source_ids),
+        }
 
 
 @dataclass(frozen=True)
@@ -83,6 +144,7 @@ class DraftVersion:
     origin: str  # one of ORIGINS
     instruction: str = ""
     created_at: str = ""
+    inputs: dict | None = None  # Inputs.to_json() for AI versions; None for hand edits and old rows
 
 
 @dataclass(frozen=True)
@@ -111,8 +173,15 @@ class DocgenStore(Protocol):
 
     def get_source(self, source_id: int) -> SourceRef | None: ...
 
-    def get_doc_version(self, document_id: int, version_no: int | None) -> DocVersion | None:
-        """version_no None = the newest."""
+    def get_doc_version(
+        self, document_id: int, version_no: int | None, previous: bool = True
+    ) -> DocVersion | None:
+        """version_no None = the newest. previous True also reads the version just before it
+        into `previous` (None when there is none or previous is False)."""
+        ...
+
+    def get_version_content(self, document_id: int, version_no: int) -> VersionContent | None:
+        """One stored version's content (to compare with a version other than the one before)."""
         ...
 
     # -- guides ----------------------------------------------------------------------
@@ -138,8 +207,19 @@ class DocgenStore(Protocol):
     def list_drafts(self, user_id: str, limit: int) -> list[Draft]: ...
     def list_versions(self, draft_id: str) -> list[DraftVersion]: ...
     def add_version(
-        self, draft: Draft, markdown: str, origin: str, instruction: str, now: datetime
-    ) -> DraftVersion: ...
+        self,
+        draft: Draft,
+        markdown: str,
+        origin: str,
+        instruction: str,
+        now: datetime,
+        inputs: Inputs | None = None,
+        update_selection: bool = False,
+    ) -> DraftVersion:
+        """inputs (AI versions): saved on the version; with update_selection also written to
+        the draft row as its current selection. Once the version is saved this never raises
+        for the draft row: the paid version stands (the failure is logged)."""
+        ...
     def delete_draft(self, draft_id: str) -> None: ...
     def count_requests_since(self, user_id: str, since: datetime) -> int:
         """AI calls (docgen.generate + docgen.revise audit entries) since `since`."""

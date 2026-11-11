@@ -21,7 +21,7 @@ import hashlib
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from irb_watch.docgen.docx_build import build_docx
@@ -35,6 +35,7 @@ from irb_watch.docgen.types import (
     DraftWriter,
     ExtraGuide,
     Guide,
+    Inputs,
     NewDraft,
     SourceRef,
     VersionConflictError,
@@ -69,14 +70,33 @@ GUIDE_TYPES = ("pdf", "hwp", "hwpx", "docx", "md", "txt")
 
 @dataclass(frozen=True)
 class DocChoice:
+    """One post to draft from. files None = every attached file; page_text False leaves the
+    post's own text out. compare_with None = compare with the version just before;
+    compare False = send no list of changes."""
+
     document_id: int
     version_no: int | None = None
+    files: tuple[str, ...] | None = None
+    page_text: bool = True
+    compare_with: int | None = None
+    compare: bool = True
 
 
 @dataclass(frozen=True)
 class UploadedFile:
     filename: str
     content_base64: str
+
+
+@dataclass(frozen=True)
+class InputChange:
+    """New inputs for an AI revision (the side panel). keep_extra_guides: names of the draft's
+    attached guide files to keep; extra_files: new ones (together at most MAX_EXTRA_GUIDES)."""
+
+    documents: list[DocChoice]
+    guide_ids: list[int] | None = None
+    keep_extra_guides: list[str] = field(default_factory=list)
+    extra_files: list[UploadedFile] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -136,6 +156,27 @@ def read_guide_file(upload: UploadedFile) -> tuple[str, str, str]:
     if not text:
         raise ValidationError(f"{name}: the file has no text")
     return name, text, sha
+
+
+def _payload(refs, used, guides, extra, override) -> dict:
+    """The audit entry of an AI call: what was sent (ids and file names, never text)."""
+    return {
+        "documents": [
+            {
+                "document_id": r.document_id,
+                "version_no": r.version_no,
+                "files": list(r.files) if r.files is not None else None,
+                "page_text": r.page_text,
+                "compare_with": r.compare_with,
+                "compare": r.compare,
+            }
+            for r in refs
+        ],
+        "source_ids": sorted(used),
+        "guide_ids": [g.id for g in guides],
+        "extra_guides": [e.filename for e in extra],
+        "ai_override_source_ids": sorted(override),
+    }
 
 
 _FILENAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
@@ -214,15 +255,92 @@ class DocgenService:
             )
 
     def _load_docs(
-        self, refs: list[tuple[int, int | None]], sources: dict[int, SourceRef]
-    ) -> list[DocVersion]:
-        docs = []
-        for document_id, version_no in refs:
-            doc = self._store.get_doc_version(document_id, version_no)
-            if doc is None or doc.source_id not in sources:
-                raise NotFoundError(f"document {document_id} not found")
+        self, choices: list[DocChoice], sources: dict[int, SourceRef]
+    ) -> tuple[list[DocVersion], tuple[DocRef, ...]]:
+        """The chosen versions with only the chosen files, and the refs to save. The same post
+        and version chosen twice counts once (the first choice wins), also when one says
+        "newest" and the other names the newest number."""
+        docs, refs, seen = [], [], set()
+        for c in choices:
+            doc = self._load_one(c, sources)
+            if (doc.document_id, doc.version_no) in seen:
+                continue
+            seen.add((doc.document_id, doc.version_no))
             docs.append(doc)
-        return docs
+            refs.append(
+                DocRef(
+                    doc.document_id,
+                    doc.version_no,
+                    doc.source_id,
+                    doc.files,
+                    doc.page_text,
+                    c.compare_with if c.compare else None,
+                    c.compare,
+                )
+            )
+        return docs, tuple(refs)
+
+    def _load_one(self, c: DocChoice, sources: dict[int, SourceRef]) -> DocVersion:
+        # The version just before is read only when it is the one compared with.
+        doc = self._store.get_doc_version(
+            c.document_id, c.version_no, previous=c.compare and c.compare_with is None
+        )
+        if doc is None or doc.source_id not in sources:
+            raise NotFoundError(f"document {c.document_id} not found")
+        label = f"document {doc.document_id} version {doc.version_no}"
+        names = [f.filename for f in doc.content.files]
+        files = None
+        if c.files is not None:
+            files = tuple(dict.fromkeys(c.files))
+            missing = [f for f in files if f not in names]
+            if missing:
+                raise ValidationError(f'{label} has no file named "{missing[0]}"')
+        sent_files = names if files is None else files
+        if not c.page_text and not sent_files:
+            raise ValidationError(f"{label}: choose its page text or at least one file")
+
+        previous, previous_no = doc.previous, doc.version_no - 1 if doc.previous else None
+        if not c.compare:
+            previous, previous_no = None, None
+        elif c.compare_with is not None:
+            if not 1 <= c.compare_with < doc.version_no:
+                raise ValidationError(f"{label}: compare it with an earlier version")
+            previous = self._store.get_version_content(doc.document_id, c.compare_with)
+            if previous is None:
+                raise NotFoundError(f"document {doc.document_id} has no version {c.compare_with}")
+            previous_no = c.compare_with
+        return replace(
+            doc,
+            files=files,
+            page_text=c.page_text,
+            previous=previous,
+            previous_no=previous_no,
+            compare=c.compare,
+        )
+
+    def _guides(
+        self,
+        used: set[int],
+        guide_ids: list[int] | None,
+        is_admin: bool,
+        already: tuple[int, ...] = (),
+    ) -> list[Guide]:
+        """By default all of the sources' guides. A user may leave some out; only an admin may
+        add a library guide that is not linked to these sources. `already`: guides the draft
+        uses now, which may stay even if they were unlinked or archived since."""
+        defaults = {g.id: g for g in self._store.guides_for_sources(sorted(used))}
+        if guide_ids is None:
+            return list(defaults.values())
+        wanted = list(dict.fromkeys(guide_ids))
+        extra_ids = [g for g in wanted if g not in defaults]
+        new_ids = [g for g in extra_ids if g not in already]
+        if new_ids and not is_admin:
+            raise NotFoundError(f"guide {new_ids[0]} not found")
+        found = {g.id: g for g in self._store.get_guides(extra_ids)} if extra_ids else {}
+        for gid in extra_ids:
+            if gid not in found or (gid in new_ids and found[gid].archived_at is not None):
+                raise NotFoundError(f"guide {gid} not found")
+        return [defaults.get(g) or found[g] for g in wanted]
 
     def _read_extra(self) -> str:
         try:
@@ -265,7 +383,7 @@ class DocgenService:
             raise ValidationError("pick a document to test with")
         self._admin(admin_id)
         sources = self._store.readable_sources(admin_id, True)
-        return self._load_docs([(document_id, None)], sources)
+        return self._load_docs([DocChoice(document_id)], sources)[0]
 
     # -- guides for users -------------------------------------------------------------
 
@@ -301,51 +419,25 @@ class DocgenService:
         if self._writer is None:
             raise UnavailableError(NO_AI)
 
-        seen = list(dict.fromkeys((d.document_id, d.version_no) for d in documents))
         sources = self._store.readable_sources(user_id, is_admin)
-        docs = self._load_docs(seen, sources)
+        docs, refs = self._load_docs(documents, sources)
         used = {d.source_id for d in docs}
         override = set(ai_override_source_ids) & used
         self._ai_check(sources, used, override)
-
-        # Guides: by default all of the sources' guides. A user may leave some out; only an
-        # admin may add a library guide that is not linked to these sources.
-        defaults = {g.id: g for g in self._store.guides_for_sources(sorted(used))}
-        if guide_ids is None:
-            guides = list(defaults.values())
-        else:
-            wanted = list(dict.fromkeys(guide_ids))
-            extra_ids = [g for g in wanted if g not in defaults]
-            if extra_ids and not is_admin:
-                raise NotFoundError(f"guide {extra_ids[0]} not found")
-            found = {g.id: g for g in self._store.get_guides(extra_ids)} if extra_ids else {}
-            for gid in extra_ids:
-                if gid not in found or found[gid].archived_at is not None:
-                    raise NotFoundError(f"guide {gid} not found")
-            guides = [defaults.get(g) or found[g] for g in wanted]
+        guides = self._guides(used, guide_ids, is_admin)
 
         # The limit is checked before the attached files are read (reading a PDF or HWP costs
         # time and memory); the log entry that counts the call comes after, just before it.
         now = self._clock()
         self._check_limit(user_id, now)
-        extra = []
-        for upload in extra_files:
-            name, text, _ = read_guide_file(upload)
-            extra.append(ExtraGuide(name, text))
+        extra = [ExtraGuide(*read_guide_file(upload)[:2]) for upload in extra_files]
 
-        refs = tuple(DocRef(d.document_id, d.version_no, d.source_id) for d in docs)
         # The log is also the counter: no entry, no model call.
         self._audit.record_required(
             "user",
             "docgen.generate",
             user_id,
-            payload={
-                "documents": [{"document_id": r.document_id, "version_no": r.version_no} for r in refs],
-                "source_ids": sorted(used),
-                "guide_ids": [g.id for g in guides],
-                "extra_guides": [e.filename for e in extra],
-                "ai_override_source_ids": sorted(override),
-            },
+            payload=_payload(refs, used, guides, extra, override),
         )
         written = self._write(docs, guides, extra, request)
         title = written.title or docs[0].title
@@ -417,10 +509,14 @@ class DocgenService:
         draft_id: str,
         instruction: str,
         ai_override_source_ids: list[int] | None = None,
+        change: InputChange | None = None,
     ) -> DraftVersion:
         """ai_override_source_ids: AI-off sources the user ticked now (needed when an admin
-        switched AI off for a source after the draft was made)."""
+        switched AI off for a source after the draft was made, or a new one was added).
+        change: new documents and guides from the side panel; None keeps the draft's current
+        ones. Either way the inputs are saved on the new version."""
         profile = self._profile(user_id)
+        is_admin = profile.role == "admin"
         draft = self._own(user_id, draft_id)
         request = (instruction or "").strip()
         if not request:
@@ -431,16 +527,43 @@ class DocgenService:
             raise UnavailableError(NO_AI)
         versions = self._latest(draft_id)
 
+        if change is None:
+            choices = [
+                DocChoice(r.document_id, r.version_no, r.files, r.page_text, r.compare_with, r.compare)
+                for r in draft.document_refs
+            ]
+            keep = list(draft.extra_guides)
+            uploads: list[UploadedFile] = []
+        else:
+            choices = change.documents
+            if not choices:
+                raise ValidationError("choose at least one document")
+            if len(choices) > MAX_DOCUMENTS:
+                raise ValidationError(f"choose at most {MAX_DOCUMENTS} documents")
+            held = {e.filename: e for e in draft.extra_guides}
+            names = list(dict.fromkeys(change.keep_extra_guides))
+            unknown = [n for n in names if n not in held]
+            if unknown:
+                raise NotFoundError(f'this draft has no attached guide file "{unknown[0]}"')
+            keep = [held[n] for n in names]
+            uploads = change.extra_files
+            if len(keep) + len(uploads) > MAX_EXTRA_GUIDES:
+                raise ValidationError(f"attach at most {MAX_EXTRA_GUIDES} guide files")
+
         # Access is checked again: the user may have lost a study since the draft was made.
-        sources = self._store.readable_sources(user_id, profile.role == "admin")
-        docs = self._load_docs([(r.document_id, r.version_no) for r in draft.document_refs], sources)
+        sources = self._store.readable_sources(user_id, is_admin)
+        docs, refs = self._load_docs(choices, sources)
         used = {d.source_id for d in docs}
         override = (set(draft.ai_override_source_ids) | set(ai_override_source_ids or [])) & used
         self._ai_check(sources, used, override)
-        guides = self._store.get_guides(list(draft.guide_ids)) if draft.guide_ids else []
+        if change is None:
+            guides = self._store.get_guides(list(draft.guide_ids)) if draft.guide_ids else []
+        else:
+            guides = self._guides(used, change.guide_ids, is_admin, draft.guide_ids)
 
         now = self._clock()
         self._check_limit(user_id, now)
+        extra = keep + [ExtraGuide(*read_guide_file(u)[:2]) for u in uploads]
         self._audit.record_required(
             "user",
             "docgen.revise",
@@ -448,21 +571,27 @@ class DocgenService:
             payload={
                 "draft_id": draft_id,
                 "from_version": versions[-1].version_no,
-                "source_ids": sorted(used),
-                "ai_override_source_ids": sorted(override),
+                "inputs_changed": change is not None,
+                **_payload(refs, used, guides, extra, override),
             },
         )
-        written = self._write(
-            docs, guides, list(draft.extra_guides), request, current=versions[-1].markdown
-        )
+        written = self._write(docs, guides, extra, request, current=versions[-1].markdown)
         markdown = written.markdown[:MAX_MARKDOWN_CHARS]
+        inputs = Inputs(refs, tuple(g.id for g in guides), tuple(extra), tuple(sorted(override)))
+        # The draft row (with the attached guides' text) is rewritten only when its selection
+        # changed: new inputs from the side panel, or a newly ticked AI-off source.
+        changed = change is not None or set(override) != set(draft.ai_override_source_ids)
         try:
-            return self._store.add_version(draft, markdown, "ai_revision", request, now)
+            return self._store.add_version(
+                draft, markdown, "ai_revision", request, now, inputs, changed
+            )
         except VersionConflictError:
             # A hand edit was saved while the AI was writing. The revision was paid for, so it is
             # kept as the next version rather than thrown away; the user sees both.
             try:
-                return self._store.add_version(draft, markdown, "ai_revision", request, now)
+                return self._store.add_version(
+                    draft, markdown, "ai_revision", request, now, inputs, changed
+                )
             except VersionConflictError as exc:
                 raise ConflictError(
                     "the draft kept changing while the AI was writing; reload it and try again"

@@ -1,22 +1,28 @@
 """Supabase-backed storage for the docs generator."""
 
+import logging
 from datetime import datetime
 
 from postgrest.exceptions import APIError
 from supabase import Client
 
+from irb_watch.core.state import VersionContent
 from irb_watch.db.agent import SupabaseAgentData
 from irb_watch.docgen.types import (
-    DocRef,
     DocVersion,
     Draft,
     DraftVersion,
     ExtraGuide,
     Guide,
+    Inputs,
     NewDraft,
     SourceRef,
     VersionConflictError,
+    ref_from_json,
+    ref_to_json,
 )
+
+log = logging.getLogger(__name__)
 
 UNIQUE_VIOLATION = "23505"
 _GUIDE_COLUMNS = "id, title, filename, body_text, created_at, archived_at"
@@ -28,10 +34,7 @@ def _draft(row: dict) -> Draft:
         user_id=row["user_id"],
         title=row["title"] or "",
         instruction=row["instruction"] or "",
-        document_refs=tuple(
-            DocRef(int(r["document_id"]), int(r["version_no"]), int(r["source_id"]))
-            for r in row.get("document_refs") or []
-        ),
+        document_refs=tuple(ref_from_json(r) for r in row.get("document_refs") or []),
         guide_ids=tuple(int(g) for g in row.get("guide_ids") or []),
         extra_guides=tuple(
             ExtraGuide(e.get("filename", ""), e.get("text", "")) for e in row.get("extra_guides") or []
@@ -50,7 +53,19 @@ def _version(row: dict) -> DraftVersion:
         origin=row["origin"],
         instruction=row.get("instruction") or "",
         created_at=row["created_at"],
+        inputs=row.get("inputs"),
     )
+
+
+def _selection(inputs: Inputs, now: datetime) -> dict:
+    """The draft row's current selection (guide files with their text)."""
+    return {
+        "document_refs": [ref_to_json(r) for r in inputs.document_refs],
+        "guide_ids": list(inputs.guide_ids),
+        "extra_guides": [{"filename": e.filename, "text": e.text} for e in inputs.extra_guides],
+        "ai_override_source_ids": list(inputs.ai_override_source_ids),
+        "updated_at": now.isoformat(),
+    }
 
 
 class SupabaseDocgenStore:
@@ -96,7 +111,9 @@ class SupabaseDocgenStore:
         )
         return SourceRef(rows[0]["id"], rows[0]["name"], bool(rows[0]["ai_enabled"])) if rows else None
 
-    def get_doc_version(self, document_id: int, version_no: int | None) -> DocVersion | None:
+    def get_doc_version(
+        self, document_id: int, version_no: int | None, previous: bool = True
+    ) -> DocVersion | None:
         docs = (
             self._c.table("documents")
             .select("id, source_id, title")
@@ -119,15 +136,18 @@ class SupabaseDocgenStore:
         content = self._reads.get_version(document_id, number)
         if content is None:
             return None
-        previous = self._reads.get_version(document_id, number - 1) if number > 1 else None
+        before = self._reads.get_version(document_id, number - 1) if previous and number > 1 else None
         return DocVersion(
             document_id=document_id,
             source_id=docs[0]["source_id"],
             title=docs[0]["title"],
             version_no=number,
             content=content,
-            previous=previous,
+            previous=before,
         )
+
+    def get_version_content(self, document_id: int, version_no: int) -> VersionContent | None:
+        return self._reads.get_version(document_id, version_no)
 
     # -- guides ----------------------------------------------------------------------
 
@@ -235,6 +255,9 @@ class SupabaseDocgenStore:
     # -- drafts ----------------------------------------------------------------------
 
     def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft:
+        inputs = Inputs(
+            new.document_refs, new.guide_ids, new.extra_guides, new.ai_override_source_ids
+        )
         rows = (
             self._c.table("drafts")
             .insert(
@@ -242,15 +265,8 @@ class SupabaseDocgenStore:
                     "user_id": new.user_id,
                     "title": new.title,
                     "instruction": new.instruction,
-                    "document_refs": [
-                        {"document_id": r.document_id, "version_no": r.version_no, "source_id": r.source_id}
-                        for r in new.document_refs
-                    ],
-                    "guide_ids": list(new.guide_ids),
-                    "extra_guides": [{"filename": e.filename, "text": e.text} for e in new.extra_guides],
-                    "ai_override_source_ids": list(new.ai_override_source_ids),
+                    **_selection(inputs, now),
                     "created_at": now.isoformat(),
-                    "updated_at": now.isoformat(),
                 }
             )
             .execute()
@@ -266,6 +282,7 @@ class SupabaseDocgenStore:
                     "markdown": first.markdown,
                     "origin": first.origin,
                     "instruction": first.instruction,
+                    "inputs": inputs.to_json(),
                     "created_at": now.isoformat(),
                 }
             ).execute()
@@ -302,7 +319,9 @@ class SupabaseDocgenStore:
         )
         return [_version(r) for r in rows]
 
-    def add_version(self, draft, markdown, origin, instruction, now) -> DraftVersion:
+    def add_version(
+        self, draft, markdown, origin, instruction, now, inputs=None, update_selection=False
+    ) -> DraftVersion:
         last = (
             self._c.table("draft_versions")
             .select("version_no")
@@ -325,6 +344,7 @@ class SupabaseDocgenStore:
                         "markdown": markdown,
                         "origin": origin,
                         "instruction": instruction,
+                        "inputs": inputs.to_json() if inputs is not None else None,
                         "created_at": now.isoformat(),
                     }
                 )
@@ -335,7 +355,22 @@ class SupabaseDocgenStore:
             if exc.code == UNIQUE_VIOLATION:
                 raise VersionConflictError from exc
             raise
-        self._c.table("drafts").update({"updated_at": now.isoformat()}).eq("id", draft.id).execute()
+        # Two requests, not one transaction. The version is saved (and for an AI revision paid
+        # for), so a failure here is logged, not raised: the user must not retry and pay again.
+        # The draft then keeps its previous selection (the side panel shows the older one).
+        if update_selection and inputs is not None:
+            update = _selection(inputs, now)
+        else:
+            update = {"updated_at": now.isoformat()}
+        try:
+            self._c.table("drafts").update(update).eq("id", draft.id).execute()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "draft %s: version %s saved, but the draft row was not updated: %s",
+                draft.id,
+                rows[0]["version_no"],
+                type(exc).__name__,
+            )
         return _version(rows[0])
 
     def delete_draft(self, draft_id: str) -> None:

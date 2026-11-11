@@ -68,8 +68,12 @@ def change_digest(detail: ChangeDetail, content: VersionContent) -> Digest:
     return _cap(lines, MAX_CHANGE_CHARS)
 
 
-def _document_lines(content: VersionContent, per_file_chars: int | None) -> list[str]:
-    lines = [f"TITLE: {content.title}", "PAGE TEXT:", content.body_text]
+def _document_lines(
+    content: VersionContent, per_file_chars: int | None, page_text: bool = True
+) -> list[str]:
+    lines = [f"TITLE: {content.title}"]
+    if page_text:
+        lines += ["PAGE TEXT:", content.body_text]
     for file in content.files:
         lines.append(f"FILE: {file.filename}")
         if file.text:
@@ -84,6 +88,7 @@ def new_post_digest(content: VersionContent) -> Digest:
     return _cap(_document_lines(content, _MAX_FILE_START), MAX_NEW_POST_CHARS)
 
 
-def document_digest(content: VersionContent) -> Digest:
-    """The whole current document, for a summary requested by a user."""
-    return _cap(_document_lines(content, None), MAX_DOCUMENT_CHARS)
+def document_digest(content: VersionContent, page_text: bool = True) -> Digest:
+    """The whole current document, for a summary requested by a user. page_text False leaves
+    the post's page text out (the docs generator, when the user unticked it)."""
+    return _cap(_document_lines(content, None, page_text), MAX_DOCUMENT_CHARS)

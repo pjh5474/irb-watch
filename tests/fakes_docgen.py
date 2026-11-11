@@ -1,6 +1,7 @@
 """In-memory stand-ins for the docs generator's store and AI writer."""
 
 import itertools
+from dataclasses import replace
 from datetime import datetime
 
 from irb_watch.core.state import FileContent, VersionContent
@@ -9,6 +10,7 @@ from irb_watch.docgen.types import (
     Draft,
     DraftVersion,
     Guide,
+    Inputs,
     SourceRef,
     VersionConflictError,
     Written,
@@ -32,13 +34,16 @@ class FakeDocgenStore:
         self.purged_before: datetime | None = None
         self.purge_result = 0
         self.conflicts = 0
+        self.reads = 0  # version contents read (to check no needless reads)
+        self.selection_writes = 0
         self._ids = itertools.count(1)
 
     # -- setup helpers ---------------------------------------------------------------
     def add_source(self, sid, name="Board", ai_enabled=True, requires_login=False, members=()):
         self.sources[sid] = (SourceRef(sid, name, ai_enabled), requires_login, set(members))
 
-    def add_document(self, doc_id, source_id, title="Consent form", versions=2):
+    def add_document(self, doc_id, source_id, title="Consent form", versions=2, files=("a.pdf",)):
+        """Each file's text is '<name> visits: <n + 2>' and changes in every version."""
         for n in range(1, versions + 1):
             self.versions[(doc_id, n)] = (
                 source_id,
@@ -46,7 +51,12 @@ class FakeDocgenStore:
                 VersionContent(
                     title,
                     f"page text v{n}",
-                    (FileContent("a.pdf", "1 KB", "h" * 64, f"visits: {n + 2}", None, None, None),),
+                    tuple(
+                        FileContent(
+                            name, "1 KB", str(n) * 64, f"{name} visits: {n + 2}", None, None, None
+                        )
+                        for name in files
+                    ),
                 ),
             )
 
@@ -67,7 +77,7 @@ class FakeDocgenStore:
         row = self.sources.get(source_id)
         return row[0] if row else None
 
-    def get_doc_version(self, document_id, version_no):
+    def get_doc_version(self, document_id, version_no, previous=True):
         numbers = [n for (d, n) in self.versions if d == document_id]
         if not numbers:
             return None
@@ -75,8 +85,14 @@ class FakeDocgenStore:
         if (document_id, number) not in self.versions:
             return None
         source_id, title, content = self.versions[(document_id, number)]
-        prev = self.versions.get((document_id, number - 1))
+        self.reads += 1 + (1 if previous and (document_id, number - 1) in self.versions else 0)
+        prev = self.versions.get((document_id, number - 1)) if previous else None
         return DocVersion(document_id, source_id, title, number, content, prev[2] if prev else None)
+
+    def get_version_content(self, document_id, version_no):
+        self.reads += 1
+        row = self.versions.get((document_id, version_no))
+        return row[2] if row else None
 
     def _with_links(self, g: Guide) -> Guide:
         sids = tuple(sorted(s for s, gid in self.links if gid == g.id))
@@ -129,8 +145,13 @@ class FakeDocgenStore:
             now.isoformat(),
         )
         self.drafts[did] = draft
+        inputs = Inputs(
+            new.document_refs, new.guide_ids, new.extra_guides, new.ai_override_source_ids
+        )
         self.draft_versions[did] = [
-            DraftVersion(did, 1, first.markdown, first.origin, first.instruction, now.isoformat())
+            DraftVersion(
+                did, 1, first.markdown, first.origin, first.instruction, now.isoformat(), inputs.to_json()
+            )
         ]
         return draft
 
@@ -143,13 +164,30 @@ class FakeDocgenStore:
     def list_versions(self, draft_id):
         return list(self.draft_versions.get(draft_id, []))
 
-    def add_version(self, draft, markdown, origin, instruction, now):
+    def add_version(self, draft, markdown, origin, instruction, now, inputs=None, update_selection=False):
         if self.conflicts > 0:  # another save took the next number first
             self.conflicts -= 1
             raise VersionConflictError
         rows = self.draft_versions[draft.id]
-        v = DraftVersion(draft.id, rows[-1].version_no + 1, markdown, origin, instruction, now.isoformat())
+        v = DraftVersion(
+            draft.id,
+            rows[-1].version_no + 1,
+            markdown,
+            origin,
+            instruction,
+            now.isoformat(),
+            inputs.to_json() if inputs is not None else None,
+        )
         rows.append(v)
+        if inputs is not None and update_selection:
+            self.selection_writes += 1
+            self.drafts[draft.id] = replace(
+                self.drafts[draft.id],
+                document_refs=inputs.document_refs,
+                guide_ids=inputs.guide_ids,
+                extra_guides=inputs.extra_guides,
+                ai_override_source_ids=inputs.ai_override_source_ids,
+            )
         return v
 
     def delete_draft(self, draft_id):
