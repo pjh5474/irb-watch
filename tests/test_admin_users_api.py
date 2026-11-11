@@ -1,11 +1,18 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_user_service, get_user_store, get_verifier
+from irb_watch.api.deps import (
+    get_organization_service,
+    get_user_service,
+    get_user_store,
+    get_verifier,
+)
 from irb_watch.auth.jwt import AuthUnavailableError, AuthUser, InvalidTokenError
 from irb_watch.main import app
+from irb_watch.services.organizations import OrganizationService
 from irb_watch.services.users import UserService
 from tests.fakes import FakeAudit, FakeAuth, FakeStore
+from tests.fakes_orgs import FakeOrgStore
 
 
 class FakeVerifier:
@@ -28,9 +35,11 @@ def api():
     auth = FakeAuth(store)
     audit = FakeAudit()
     service = UserService(store, auth, audit, min_password_length=8)
+    orgs = OrganizationService(FakeOrgStore(store), audit)
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: store
     app.dependency_overrides[get_user_service] = lambda: service
+    app.dependency_overrides[get_organization_service] = lambda: orgs
     yield TestClient(app), store, auth, audit
     app.dependency_overrides.clear()
 

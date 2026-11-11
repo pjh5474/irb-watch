@@ -172,6 +172,9 @@ class UserService:
     ) -> tuple[list[Profile], int]:
         return self._store.list_profiles(limit, offset, include_deleted)
 
+    def get_user(self, user_id: str) -> Profile:
+        return self._require_profile(user_id)
+
     def _require_profile(self, user_id: str) -> Profile:
         profile = self._store.get_profile(user_id)
         if profile is None:
