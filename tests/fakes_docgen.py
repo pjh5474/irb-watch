@@ -9,12 +9,14 @@ from irb_watch.docgen.types import (
     DocVersion,
     Draft,
     DraftVersion,
+    FormTemplate,
     Guide,
     GuideRevision,
     Inputs,
     SourceRef,
     VersionConflictError,
     Written,
+    WrittenFields,
 )
 
 NOW = datetime(2026, 11, 10, 9, 0)
@@ -38,6 +40,9 @@ class FakeDocgenStore:
         self.reads = 0  # version contents read (to check no needless reads)
         self.revisions: list[GuideRevision] = []
         self.selection_writes = 0
+        self.templates: dict[int, FormTemplate] = {}
+        self.template_links: set[tuple[int, int]] = set()  # (source_id, template_id)
+        self.fail_create_draft: Exception | None = None
         self._ids = itertools.count(1)
 
     # -- setup helpers ---------------------------------------------------------------
@@ -169,7 +174,60 @@ class FakeDocgenStore:
     def unlink_guide(self, source_id, guide_id):
         self.links.discard((source_id, guide_id))
 
+    # -- form templates ----------------------------------------------------------------
+    def _with_template_links(self, t: FormTemplate) -> FormTemplate:
+        sids = tuple(sorted(s for s, tid in self.template_links if tid == t.id))
+        return replace(t, source_ids=sids)
+
+    def create_template(self, title, doc_type, filename, storage_path, sha256, fields, created_by, now):
+        tid = max(self.templates, default=0) + 1
+        self.templates[tid] = FormTemplate(
+            tid, title, doc_type, filename, storage_path, sha256, False, "review", tuple(fields),
+            now.isoformat(), now.isoformat(),
+        )
+        return self._with_template_links(self.templates[tid])
+
+    def list_templates(self, include_archived):
+        return [
+            self._with_template_links(t)
+            for t in sorted(self.templates.values(), key=lambda t: -t.id)
+            if include_archived or t.archived_at is None
+        ]
+
+    def get_template(self, template_id):
+        t = self.templates.get(template_id)
+        return self._with_template_links(t) if t else None
+
+    def templates_for_sources(self, source_ids):
+        if not source_ids:
+            return []
+        live = [
+            t for t in sorted(self.templates.values(), key=lambda t: t.id)
+            if t.archived_at is None and t.status == "ready"
+        ]
+        out = [t for t in live if t.is_global]
+        linked = {tid for s, tid in self.template_links if s in source_ids}
+        out += [t for t in live if not t.is_global and t.id in linked]
+        return [self._with_template_links(t) for t in out]
+
+    def update_template(self, template_id, changes, now):
+        self.templates[template_id] = replace(
+            self.templates[template_id], **changes, updated_at=now.isoformat()
+        )
+
+    def archive_template(self, template_id, now):
+        self.templates[template_id] = replace(self.templates[template_id], archived_at=now.isoformat())
+        self.template_links = {(s, t) for s, t in self.template_links if t != template_id}
+
+    def link_template(self, source_id, template_id, now):
+        self.template_links.add((source_id, template_id))
+
+    def unlink_template(self, source_id, template_id):
+        self.template_links.discard((source_id, template_id))
+
     def create_draft(self, new, first, now):
+        if self.fail_create_draft is not None:
+            raise self.fail_create_draft
         did = f"00000000-0000-0000-0000-{next(self._ids):012d}"
         draft = Draft(
             did,
@@ -182,6 +240,7 @@ class FakeDocgenStore:
             new.ai_override_source_ids,
             now.isoformat(),
             now.isoformat(),
+            new.template,
         )
         self.drafts[did] = draft
         inputs = Inputs(
@@ -189,7 +248,14 @@ class FakeDocgenStore:
         )
         self.draft_versions[did] = [
             DraftVersion(
-                did, 1, first.markdown, first.origin, first.instruction, now.isoformat(), inputs.to_json()
+                did,
+                1,
+                first.markdown,
+                first.origin,
+                first.instruction,
+                now.isoformat(),
+                inputs.to_json(),
+                first.fields,
             )
         ]
         return draft
@@ -203,7 +269,9 @@ class FakeDocgenStore:
     def list_versions(self, draft_id):
         return list(self.draft_versions.get(draft_id, []))
 
-    def add_version(self, draft, markdown, origin, instruction, now, inputs=None, update_selection=False):
+    def add_version(
+        self, draft, markdown, origin, instruction, now, inputs=None, update_selection=False, fields=None
+    ):
         if self.conflicts > 0:  # another save took the next number first
             self.conflicts -= 1
             raise VersionConflictError
@@ -216,6 +284,7 @@ class FakeDocgenStore:
             instruction,
             now.isoformat(),
             inputs.to_json() if inputs is not None else None,
+            fields,
         )
         rows.append(v)
         if inputs is not None and update_selection:
@@ -244,8 +313,18 @@ class FakeDocgenStore:
         return self.prior_used + logged
 
     def purge_before(self, cutoff):
+        """Deletes drafts older than cutoff (by updated_at) and reports them like the real store;
+        purge_result, when set, is the count reported for drafts not kept here."""
         self.purged_before = cutoff
-        return self.purge_result
+        gone = [d for d in self.drafts.values() if d.updated_at < cutoff.isoformat()]
+        paths = [
+            d.template.storage_path
+            for d in gone
+            if d.template is not None and d.template.template_id is None
+        ]
+        for d in gone:
+            self.delete_draft(d.id)
+        return self.purge_result or len(gone), paths
 
 
 class FakeWriter:
@@ -254,9 +333,39 @@ class FakeWriter:
         self.title = title
         self.markdown = markdown
         self.fail: Exception | None = None
+        self.answers: dict = {}  # a form draft's answers; tests set them per case
 
     def write(self, instructions, input_text):
         self.calls.append((instructions, input_text))
         if self.fail is not None:
             raise self.fail
         return Written(self.title, self.markdown)
+
+    def write_fields(self, instructions, input_text):
+        self.calls.append((instructions, input_text))
+        if self.fail is not None:
+            raise self.fail
+        return WrittenFields(self.title, dict(self.answers))
+
+
+class FakeTemplateFiles:
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.deleted: list[str] = []
+        self.fail_put: Exception | None = None
+        self.fail_get: Exception | None = None
+
+    def put(self, path, content):
+        if self.fail_put is not None:
+            raise self.fail_put
+        self.files[path] = content
+
+    def get(self, path):
+        if self.fail_get is not None:
+            raise self.fail_get
+        return self.files[path]
+
+    def delete(self, paths):
+        for p in paths:
+            self.deleted.append(p)
+            self.files.pop(p, None)

@@ -4,7 +4,8 @@ Supported: headings (# to ######, shown as three heading sizes), paragraphs, '-'
 bullets and '1.' numbered lines (with indentation by leading spaces), simple '|' tables,
 **bold**, *italic* / _italic_, `code` (as plain text), links (text only), horizontal rules
 (an empty line). Anything else is written as plain text, so nothing is lost.
-The layout is neutral on purpose; hospital layouts are a later step.
+The layout is neutral on purpose. A draft that fills a hospital's own form is exported by
+form_fill.py instead.
 """
 
 import io

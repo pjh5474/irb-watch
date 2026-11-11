@@ -31,7 +31,7 @@ from irb_watch.db.alerts import SupabaseAlertStore
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.credentials import DatabaseCredentialStore
 from irb_watch.db.digest import SupabaseDigestStore
-from irb_watch.db.docgen import SupabaseDocgenStore
+from irb_watch.db.docgen import SupabaseDocgenStore, SupabaseTemplateFiles
 from irb_watch.db.documents import (
     SupabaseFileStorage,
     SupabaseScanRepo,
@@ -345,6 +345,7 @@ def get_docgen_service() -> DocgenService:
         SupabaseAuditSink(client),
         get_settings().docgen_requests_per_day,
         extra_instructions=_extra("docgen"),
+        files=SupabaseTemplateFiles(client),
     )
 
 

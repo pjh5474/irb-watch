@@ -16,6 +16,7 @@ from irb_watch.api import (
     admin_members,
     admin_scans,
     admin_sources,
+    admin_templates,
     admin_users,
     agent,
     auth_token,
@@ -103,6 +104,7 @@ app.include_router(admin_agent.router)
 app.include_router(agent.router)
 app.include_router(docgen.router)
 app.include_router(admin_guides.router)
+app.include_router(admin_templates.router)
 app.include_router(admin_ai.router)
 app.include_router(documents.router)
 app.include_router(files.router)

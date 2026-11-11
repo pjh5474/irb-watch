@@ -12,7 +12,15 @@ from pydantic import BaseModel, Field
 
 from irb_watch.api.deps import current_user, get_docgen_service
 from irb_watch.auth.jwt import AuthUser
-from irb_watch.docgen.types import DocRef, Draft, DraftVersion, Guide
+from irb_watch.docgen.types import (
+    DocRef,
+    Draft,
+    DraftTemplate,
+    DraftVersion,
+    FormField,
+    FormTemplate,
+    Guide,
+)
 from irb_watch.services.docgen import (
     MAX_EXTRA_GUIDES,
     DocChoice,
@@ -82,6 +90,76 @@ class DocRefOut(BaseModel):
         )
 
 
+class FormFieldOut(BaseModel):
+    key: str
+    label: str
+    kind: str  # text | choice
+    source: str  # marker ({{name}} typed in the file) | auto (found by the server)
+    where: str
+    options: list[str]
+    multi: bool
+    hint: str
+
+    @classmethod
+    def of(cls, f: FormField) -> "FormFieldOut":
+        return cls(
+            key=f.key,
+            label=f.label,
+            kind=f.kind,
+            source=f.source,
+            where=f.where,
+            options=list(f.options),
+            multi=f.multi,
+            hint=f.hint,
+        )
+
+
+class DraftTemplateOut(BaseModel):
+    template_id: int | None  # None = a one-off file attached to this draft
+    title: str
+    filename: str
+    fields: list[FormFieldOut]
+
+    @classmethod
+    def of(cls, t: DraftTemplate) -> "DraftTemplateOut":
+        return cls(
+            template_id=t.template_id,
+            title=t.title,
+            filename=t.filename,
+            fields=[FormFieldOut.of(f) for f in t.fields],
+        )
+
+
+class TemplateOut(BaseModel):
+    id: int
+    title: str
+    doc_type: str
+    filename: str
+    is_global: bool
+    status: str  # review | ready
+    source_ids: list[int]
+    fields: list[FormFieldOut]
+    created_at: str
+    updated_at: str
+    archived_at: str | None = None
+
+    @classmethod
+    def of(cls, t: FormTemplate) -> "TemplateOut":
+        return cls(
+            id=t.id,
+            title=t.title,
+            doc_type=t.doc_type,
+            filename=t.filename,
+            is_global=t.is_global,
+            status=t.status,
+            source_ids=list(t.source_ids),
+            fields=[FormFieldOut.of(f) for f in t.fields],
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+            archived_at=t.archived_at,
+        )
+
+
 class DraftOut(BaseModel):
     id: str
     title: str
@@ -92,6 +170,7 @@ class DraftOut(BaseModel):
     ai_override_source_ids: list[int]
     created_at: str
     updated_at: str
+    template: DraftTemplateOut | None = None  # None = a Markdown draft
 
     @classmethod
     def of(cls, d: Draft) -> "DraftOut":
@@ -105,6 +184,7 @@ class DraftOut(BaseModel):
             ai_override_source_ids=list(d.ai_override_source_ids),
             created_at=d.created_at,
             updated_at=d.updated_at,
+            template=DraftTemplateOut.of(d.template) if d.template else None,
         )
 
 
@@ -117,6 +197,8 @@ class VersionOut(BaseModel):
     # What an AI version was written from (documents with their files, guide ids, attached
     # guide file names); None for hand edits and versions saved before this was recorded.
     inputs: dict | None = None
+    # Template drafts: one answer per field key (text, or the picked options).
+    fields: dict[str, str | list[str]] | None = None
 
     @classmethod
     def of(cls, v: DraftVersion) -> "VersionOut":
@@ -127,6 +209,7 @@ class VersionOut(BaseModel):
             instruction=v.instruction,
             created_at=v.created_at,
             inputs=v.inputs,
+            fields=v.fields,
         )
 
 
@@ -178,12 +261,26 @@ class DraftIn(BaseModel):
     instruction: str = Field(default="", max_length=20_000)
     # Sources with AI switched off whose text the user agreed to send to OpenAI for this draft.
     ai_override_source_ids: list[int] = Field(default_factory=list, max_length=50)
+    # A form to fill (one answer per field): a library template, or a one-off .docx file.
+    template_id: int | None = None
+    template_file: FileIn | None = None
 
 
 class MarkdownIn(BaseModel):
-    markdown: str = Field(max_length=500_000)
+    markdown: str = Field(default="", max_length=500_000)
     # The version the edit started from; a newer one on the server answers 409.
     base_version_no: int | None = None
+    # A template draft sends its answers instead of markdown.
+    fields: dict[str, str | list[str]] | None = Field(default=None, max_length=500)
+
+
+class TemplateFileIn(BaseModel):
+    file: FileIn
+
+
+class TemplateCheckOut(BaseModel):
+    filename: str
+    fields: list[FormFieldOut]
 
 
 class InputsIn(BaseModel):
@@ -238,8 +335,36 @@ def create_draft(
             [UploadedFile(f.filename, f.content_base64) for f in body.extra_guides],
             body.instruction,
             body.ai_override_source_ids,
+            body.template_id,
+            UploadedFile(body.template_file.filename, body.template_file.content_base64)
+            if body.template_file
+            else None,
         )
     )
+
+
+@router.get("/templates", response_model=list[TemplateOut])
+def templates(
+    source_id: list[int] = Query(default_factory=list),
+    user: AuthUser = Depends(current_user),
+    service: DocgenService = Depends(get_docgen_service),
+) -> list[TemplateOut]:
+    """The forms a draft from these sources may fill (global ones and the sources' own)."""
+    return [TemplateOut.of(t) for t in service.templates_for(user.id, source_id)]
+
+
+@router.post("/templates/check", response_model=TemplateCheckOut)
+def check_template(
+    body: TemplateFileIn,
+    user: AuthUser = Depends(current_user),
+    service: DocgenService = Depends(get_docgen_service),
+) -> TemplateCheckOut:
+    """The fields the server finds in a .docx form, before a draft is made from it. Nothing is
+    stored or counted."""
+    name, fields = service.check_template_file(
+        user.id, UploadedFile(body.file.filename, body.file.content_base64)
+    )
+    return TemplateCheckOut(filename=name, fields=[FormFieldOut.of(f) for f in fields])
 
 
 @router.get("/drafts", response_model=list[DraftOut])
@@ -265,9 +390,10 @@ def save_edit(
     user: AuthUser = Depends(current_user),
     service: DocgenService = Depends(get_docgen_service),
 ) -> VersionOut:
-    """Saves a hand edit as a new version (no AI, not counted)."""
+    """Saves a hand edit as a new version (no AI, not counted). A template draft sends
+    `fields` (its answers) instead of markdown."""
     return VersionOut.of(
-        service.save_edit(user.id, str(draft_id), body.markdown, body.base_version_no)
+        service.save_edit(user.id, str(draft_id), body.markdown, body.base_version_no, body.fields)
     )
 
 
@@ -302,7 +428,8 @@ def export_docx(
     user: AuthUser = Depends(current_user),
     service: DocgenService = Depends(get_docgen_service),
 ) -> Response:
-    """A plain DOCX of one version (default: the newest)."""
+    """A DOCX of one version (default: the newest): the filled form for a template draft,
+    otherwise a plain document."""
     content, filename = service.export_docx(user.id, str(draft_id), version_no)
     ascii_name = filename.encode("ascii", "ignore").decode() or "draft.docx"
     disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"

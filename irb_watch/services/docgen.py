@@ -20,26 +20,35 @@ import binascii
 import hashlib
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from irb_watch.docgen.docx_build import build_docx
+from irb_watch.docgen.form_fields import FormError, detect_fields
+from irb_watch.docgen.form_fill import fill, placeholder, render_markdown
 from irb_watch.docgen.prompt import build_input
 from irb_watch.docgen.types import (
     DocgenStore,
     DocRef,
     DocVersion,
     Draft,
+    DraftTemplate,
     DraftVersion,
     DraftWriter,
     ExtraGuide,
+    FieldValue,
+    FormField,
+    FormTemplate,
     Guide,
     GuideRevision,
     Inputs,
     NewDraft,
     SourceRef,
+    TemplateFiles,
     VersionConflictError,
+    picked_list,
 )
 from irb_watch.parsers.errors import ParseError
 from irb_watch.parsers.formats import extract_text
@@ -67,6 +76,11 @@ RETENTION_DAYS = 30
 REFUSAL = "this account cannot use the docs generator"
 NO_AI = "the docs generator is not set up on this server (OPENAI_API_KEY and OPENAI_MODEL)"
 GUIDE_TYPES = ("pdf", "hwp", "hwpx", "docx", "md", "txt")
+MAX_ANSWER_CHARS = 4_000  # one field's answer
+MAX_ANSWERS_CHARS = 100_000  # all answers of a version
+MAX_HINT_CHARS = 300
+MAX_DOC_TYPE_CHARS = 100
+NO_TEMPLATES = "form templates are not set up on this server (no file storage)"
 
 
 @dataclass(frozen=True)
@@ -105,6 +119,81 @@ class DraftDetail:
     draft: Draft
     versions: list[DraftVersion]
     guides: list[Guide]
+
+
+@dataclass(frozen=True)
+class FieldEdit:
+    """An admin's review of one detected field: kept (by being in the list), its label, a note
+    for the AI and, for tick boxes, whether several options may be ticked."""
+
+    key: str
+    label: str
+    hint: str = ""
+    multi: bool = False
+
+
+def read_template_file(upload: UploadedFile) -> tuple[str, bytes, str, tuple[FormField, ...]]:
+    """Returns (clean filename, bytes, sha256, detected fields), or refuses with the reason."""
+    name = _clean_name(upload.filename)
+    if not name:
+        raise ValidationError("the form file needs a file name")
+    content = _decode(upload)
+    try:
+        fields = detect_fields(name, content)
+    except FormError as exc:
+        raise ValidationError(str(exc)) from exc
+    return name, content, hashlib.sha256(content).hexdigest(), fields
+
+
+def _picked(f: FormField, v: FieldValue | None) -> list[str]:
+    picked = [o for o in dict.fromkeys(picked_list(v)) if o in f.options]
+    return picked if f.multi else picked[:1]
+
+
+def ai_answers(form: DraftTemplate, raw: dict[str, FieldValue]) -> dict[str, FieldValue]:
+    """The model's answers checked against the form: unknown keys dropped, a missing or empty
+    text answer becomes a visible placeholder, options not in the list are ignored."""
+    out: dict[str, FieldValue] = {}
+    for f in form.fields:
+        v = raw.get(f.key)
+        if f.kind == "choice":
+            out[f.key] = _picked(f, v)
+        else:
+            text = (v if isinstance(v, str) else ", ".join(v or [])).strip()
+            out[f.key] = text[:MAX_ANSWER_CHARS] or placeholder(f.label)
+    return out
+
+
+def user_answers(form: DraftTemplate, raw: dict[str, FieldValue]) -> dict[str, FieldValue]:
+    """A hand edit's answers: refused (with the reason) for an unknown key, a too long answer or
+    an option that is not on the form. A field left out is saved as unanswered."""
+    known = {f.key: f for f in form.fields}
+    unknown = [k for k in raw if k not in known]
+    if unknown:
+        raise ValidationError(f'this form has no field "{unknown[0]}"')
+    out: dict[str, FieldValue] = {}
+    total = 0
+    for key, v in raw.items():
+        f = known[key]
+        if f.kind == "choice":
+            picked = picked_list(v)  # "" = nothing picked, as everywhere
+            bad = [o for o in picked if o not in f.options]
+            if bad:
+                raise ValidationError(f'"{f.label}" has no option "{bad[0]}"')
+            if not f.multi and len(set(picked)) > 1:
+                raise ValidationError(f'"{f.label}" takes only one option')
+            out[key] = list(dict.fromkeys(picked))
+        else:
+            if not isinstance(v, str):
+                raise ValidationError(f'"{f.label}" takes text')
+            text = v.replace("\r\n", "\n").strip()
+            if len(text) > MAX_ANSWER_CHARS:
+                raise ValidationError(f'"{f.label}" is too long (at most {MAX_ANSWER_CHARS} characters)')
+            total += len(text)
+            out[key] = text
+    if total > MAX_ANSWERS_CHARS:
+        raise ValidationError(f"the answers are too long together (at most {MAX_ANSWERS_CHARS} characters)")
+    return out
 
 
 def _decode(upload: UploadedFile) -> bytes:
@@ -159,9 +248,9 @@ def read_guide_file(upload: UploadedFile) -> tuple[str, str, str]:
     return name, text, sha
 
 
-def _payload(refs, used, guides, extra, override) -> dict:
+def _payload(refs, used, guides, extra, override, form: DraftTemplate | None = None) -> dict:
     """The audit entry of an AI call: what was sent (ids and file names, never text)."""
-    return {
+    out = {
         "documents": [
             {
                 "document_id": r.document_id,
@@ -178,6 +267,9 @@ def _payload(refs, used, guides, extra, override) -> dict:
         "extra_guides": [e.filename for e in extra],
         "ai_override_source_ids": sorted(override),
     }
+    if form is not None:
+        out["template"] = {"template_id": form.template_id, "filename": form.filename}
+    return out
 
 
 _FILENAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
@@ -198,6 +290,7 @@ class DocgenService:
         daily_limit: int = 10,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         extra_instructions: Callable[[], str] = lambda: "",
+        files: TemplateFiles | None = None,
     ) -> None:
         self._users = users
         self._store = store
@@ -206,6 +299,7 @@ class DocgenService:
         self._daily_limit = daily_limit
         self._clock = clock
         self._extra = extra_instructions  # the admins' added instructions, read per call
+        self._files = files  # the form-template bucket; None = templates switched off
 
     @property
     def enabled(self) -> bool:
@@ -362,6 +456,66 @@ class DocgenService:
                 f"the AI could not write the draft ({type(exc).__name__}); please try again"
             ) from exc
 
+    def _write_fields(self, docs, guides, extra, request, form: DraftTemplate, current=None):
+        """A template draft: one answer per field, checked against the form."""
+        assert self._writer is not None
+        instructions, text = build_input(
+            docs, guides, extra, request, admin_text=self._read_extra(), form=form, current_answers=current
+        )
+        try:
+            written = self._writer.write_fields(instructions, text)
+        except Exception as exc:
+            log.warning("docs generator (form) failed: %s", type(exc).__name__)
+            raise UpstreamError(
+                f"the AI could not fill the form ({type(exc).__name__}); please try again"
+            ) from exc
+        return written.title, ai_answers(form, written.values)
+
+    def _need_files(self) -> TemplateFiles:
+        if self._files is None:
+            raise UnavailableError(NO_TEMPLATES)
+        return self._files
+
+    def _template(self, template_id: int) -> FormTemplate:
+        found = self._store.get_template(template_id)
+        if found is None:
+            raise NotFoundError("form template not found")
+        return found
+
+    def _draft_template(
+        self, template_id: int, used: set[int], is_admin: bool
+    ) -> DraftTemplate:
+        """A library template the user may fill for documents from these sources: ready, not
+        archived, and global or offered by one of the sources (an admin may use any ready one)."""
+        self._need_files()
+        t = self._store.get_template(template_id)
+        offered = t is not None and t.archived_at is None and (
+            is_admin or t.is_global or bool(set(t.source_ids) & used)
+        )
+        if t is None or not offered or (t.status != "ready" and not is_admin):
+            raise NotFoundError(f"form template {template_id} not found")
+        if t.status != "ready":
+            raise ConflictError(f'the form template "{t.title}" is waiting for its field check; save its fields first')
+        return DraftTemplate(t.id, t.title, t.filename, t.storage_path, t.fields)
+
+    def _read_form(self, form: DraftTemplate) -> bytes:
+        try:
+            return self._need_files().get(form.storage_path)
+        except UnavailableError:
+            raise
+        except Exception as exc:
+            log.warning("form file %s could not be read: %s", form.storage_path, type(exc).__name__)
+            raise UnavailableError("the form file could not be read from storage; please try again") from exc
+
+    def _drop_files(self, paths: list[str]) -> None:
+        """Best effort: a file left behind is only wasted space (logged)."""
+        if not paths or self._files is None:
+            return
+        try:
+            self._files.delete(paths)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not delete %d form file(s): %s", len(paths), type(exc).__name__)
+
     def _own(self, user_id: str, draft_id: str) -> Draft:
         draft = self._store.get_draft(draft_id)
         if draft is None or draft.user_id != user_id:
@@ -395,6 +549,33 @@ class DocgenService:
         wanted = [s for s in dict.fromkeys(source_ids) if s in readable]
         return self._store.guides_for_sources(wanted) if wanted else []
 
+    # -- form templates for users -------------------------------------------------------
+
+    def templates_for(self, user_id: str, source_ids: list[int]) -> list[FormTemplate]:
+        """The ready forms a draft from these sources may fill: global ones and those the
+        sources offer. An admin also gets every other ready one (after these)."""
+        profile = self._profile(user_id)
+        if self._files is None:
+            return []
+        is_admin = profile.role == "admin"
+        readable = self._store.readable_sources(user_id, is_admin)
+        wanted = [s for s in dict.fromkeys(source_ids) if s in readable]
+        found = self._store.templates_for_sources(wanted) if wanted else []
+        if is_admin:
+            ids = {t.id for t in found}
+            found += [
+                t for t in self._store.list_templates(False) if t.status == "ready" and t.id not in ids
+            ]
+        return found
+
+    def check_template_file(self, user_id: str, upload: UploadedFile) -> tuple[str, tuple[FormField, ...]]:
+        """The fields a one-off form would have, before a draft is made from it. Nothing is
+        stored or counted."""
+        self._profile(user_id)
+        self._need_files()
+        name, _, _, fields = read_template_file(upload)
+        return name, fields
+
     # -- drafts ------------------------------------------------------------------------
 
     def create_draft(
@@ -405,9 +586,15 @@ class DocgenService:
         extra_files: list[UploadedFile],
         instruction: str,
         ai_override_source_ids: list[int],
+        template_id: int | None = None,
+        template_file: UploadedFile | None = None,
     ) -> DraftDetail:
+        """template_id (a library form) or template_file (a one-off DOCX for this draft): the
+        draft is then one answer per field of that form, fixed for the draft's life."""
         profile = self._profile(user_id)
         is_admin = profile.role == "admin"
+        if template_id is not None and template_file is not None:
+            raise ValidationError("choose a form from the list or attach one, not both")
         if not documents:
             raise ValidationError("choose at least one document")
         if len(documents) > MAX_DOCUMENTS:
@@ -426,33 +613,59 @@ class DocgenService:
         override = set(ai_override_source_ids) & used
         self._ai_check(sources, used, override)
         guides = self._guides(used, guide_ids, is_admin)
+        form = self._draft_template(template_id, used, is_admin) if template_id is not None else None
 
         # The limit is checked before the attached files are read (reading a PDF or HWP costs
         # time and memory); the log entry that counts the call comes after, just before it.
         now = self._clock()
         self._check_limit(user_id, now)
         extra = [ExtraGuide(*read_guide_file(upload)[:2]) for upload in extra_files]
+        one_off: list[str] = []
+        if template_file is not None:
+            files = self._need_files()
+            name, content, sha, fields = read_template_file(template_file)
+            form = DraftTemplate(None, name, name, f"drafts/{uuid.uuid4().hex}/{sha}.docx", fields)
+            # Stored before the paid call, so a storage failure costs nothing; removed again if
+            # the draft is not saved.
+            try:
+                files.put(form.storage_path, content)
+            except Exception as exc:
+                log.warning("one-off form file could not be stored: %s", type(exc).__name__)
+                raise UnavailableError("the form file could not be stored; please try again") from exc
+            one_off.append(form.storage_path)
 
-        # The log is also the counter: no entry, no model call.
-        self._audit.record_required(
-            "user",
-            "docgen.generate",
-            user_id,
-            payload=_payload(refs, used, guides, extra, override),
-        )
-        written = self._write(docs, guides, extra, request)
-        title = written.title or docs[0].title
-        new = NewDraft(
-            user_id=user_id,
-            title=title[:MAX_TITLE_CHARS],
-            instruction=request,
-            document_refs=refs,
-            guide_ids=tuple(g.id for g in guides),
-            extra_guides=tuple(extra),
-            ai_override_source_ids=tuple(sorted(override)),
-        )
-        first = DraftVersion("", 1, written.markdown[:MAX_MARKDOWN_CHARS], "ai", request)
-        draft = self._store.create_draft(new, first, now)
+        try:
+            # The log is also the counter: no entry, no model call.
+            self._audit.record_required(
+                "user",
+                "docgen.generate",
+                user_id,
+                payload=_payload(refs, used, guides, extra, override, form),
+            )
+            if form is None:
+                written = self._write(docs, guides, extra, request)
+                ai_title, markdown, values = written.title, written.markdown, None
+            else:
+                ai_title, values = self._write_fields(docs, guides, extra, request, form)
+                markdown = ""
+            title = (ai_title or docs[0].title)[:MAX_TITLE_CHARS]
+            if form is not None:
+                markdown = render_markdown(title, form.fields, values)
+            new = NewDraft(
+                user_id=user_id,
+                title=title,
+                instruction=request,
+                document_refs=refs,
+                guide_ids=tuple(g.id for g in guides),
+                extra_guides=tuple(extra),
+                ai_override_source_ids=tuple(sorted(override)),
+                template=form,
+            )
+            first = DraftVersion("", 1, markdown[:MAX_MARKDOWN_CHARS], "ai", request, fields=values)
+            draft = self._store.create_draft(new, first, now)
+        except Exception:
+            self._drop_files(one_off)
+            raise
         return DraftDetail(draft, self._store.list_versions(draft.id), guides)
 
     def list_drafts(self, user_id: str) -> list[Draft]:
@@ -476,28 +689,47 @@ class DocgenService:
         return versions
 
     def save_edit(
-        self, user_id: str, draft_id: str, markdown: str, base_version_no: int | None = None
+        self,
+        user_id: str,
+        draft_id: str,
+        markdown: str,
+        base_version_no: int | None = None,
+        fields: dict[str, FieldValue] | None = None,
     ) -> DraftVersion:
         """base_version_no: the version the user's edit started from. When a newer version
         exists (another tab, or an AI revision), the save is refused instead of silently
-        building on old text."""
+        building on old text. A template draft is saved as `fields` (one answer per field);
+        its markdown is then made from them."""
         self._profile(user_id)
         draft = self._own(user_id, draft_id)
-        text = (markdown or "").strip()
-        if not text:
-            raise ValidationError("the draft is empty")
-        if len(text) > MAX_MARKDOWN_CHARS:
-            raise ValidationError(f"the draft is too long (at most {MAX_MARKDOWN_CHARS} characters)")
+        answers = None
+        if draft.template is not None:
+            if fields is None:
+                raise ValidationError("this draft fills a form; send its answers (fields)")
+            answers = user_answers(draft.template, fields)
+            text = render_markdown(draft.title, draft.template.fields, answers)
+        else:
+            if fields is not None:
+                raise ValidationError("this draft has no form; send its text (markdown)")
+            text = (markdown or "").strip()
+            if not text:
+                raise ValidationError("the draft is empty")
+            if len(text) > MAX_MARKDOWN_CHARS:
+                raise ValidationError(f"the draft is too long (at most {MAX_MARKDOWN_CHARS} characters)")
         versions = self._latest(draft_id)
         if base_version_no is not None and base_version_no != versions[-1].version_no:
             raise ConflictError(
                 f"the draft has a newer version ({versions[-1].version_no}) than the one you "
                 f"edited ({base_version_no}); reload it and save again"
             )
-        if versions[-1].markdown == text:
+        if answers is not None and versions[-1].fields == answers:
+            return versions[-1]
+        if answers is None and versions[-1].markdown == text:
             return versions[-1]
         try:
-            return self._store.add_version(draft, text, "user_edit", "", self._clock())
+            return self._store.add_version(
+                draft, text[:MAX_MARKDOWN_CHARS], "user_edit", "", self._clock(), fields=answers
+            )
         except VersionConflictError as exc:
             raise ConflictError(
                 "the draft was changed at the same moment (another save or an AI revision); "
@@ -573,25 +805,33 @@ class DocgenService:
                 "draft_id": draft_id,
                 "from_version": versions[-1].version_no,
                 "inputs_changed": change is not None,
-                **_payload(refs, used, guides, extra, override),
+                **_payload(refs, used, guides, extra, override, draft.template),
             },
         )
-        written = self._write(docs, guides, extra, request, current=versions[-1].markdown)
-        markdown = written.markdown[:MAX_MARKDOWN_CHARS]
+        form = draft.template
+        values = None
+        if form is None:
+            written = self._write(docs, guides, extra, request, current=versions[-1].markdown)
+            markdown = written.markdown[:MAX_MARKDOWN_CHARS]
+        else:
+            # The form never changes for a draft; the current answers go in place of the text.
+            current = versions[-1].fields or {}
+            _, values = self._write_fields(docs, guides, extra, request, form, current=current)
+            markdown = render_markdown(draft.title, form.fields, values)[:MAX_MARKDOWN_CHARS]
         inputs = Inputs(refs, tuple(g.id for g in guides), tuple(extra), tuple(sorted(override)))
         # The draft row (with the attached guides' text) is rewritten only when its selection
         # changed: new inputs from the side panel, or a newly ticked AI-off source.
         changed = change is not None or set(override) != set(draft.ai_override_source_ids)
         try:
             return self._store.add_version(
-                draft, markdown, "ai_revision", request, now, inputs, changed
+                draft, markdown, "ai_revision", request, now, inputs, changed, values
             )
         except VersionConflictError:
             # A hand edit was saved while the AI was writing. The revision was paid for, so it is
             # kept as the next version rather than thrown away; the user sees both.
             try:
                 return self._store.add_version(
-                    draft, markdown, "ai_revision", request, now, inputs, changed
+                    draft, markdown, "ai_revision", request, now, inputs, changed, values
                 )
             except VersionConflictError as exc:
                 raise ConflictError(
@@ -610,24 +850,41 @@ class DocgenService:
             chosen = next((v for v in versions if v.version_no == version_no), None)
         if chosen is None:
             raise NotFoundError("that draft version does not exist")
-        content = build_docx(chosen.markdown)
+        form = draft.template
+        if form is None:
+            content = build_docx(chosen.markdown)
+        else:
+            template = self._read_form(form)
+            try:
+                content = fill(form.filename, template, form.fields, chosen.fields or {})
+            except FormError as exc:
+                raise UnavailableError(f"the form file could not be filled: {exc}") from exc
         self._audit.record(
             "user",
             "docgen.export",
             user_id,
-            payload={"draft_id": draft_id, "version_no": chosen.version_no},
+            payload={
+                "draft_id": draft_id,
+                "version_no": chosen.version_no,
+                **({"template_id": form.template_id, "filename": form.filename} if form else {}),
+            },
         )
         return content, docx_filename(draft.title, chosen.version_no)
 
     def delete_draft(self, user_id: str, draft_id: str) -> None:
         self._profile(user_id)
-        self._own(user_id, draft_id)
+        draft = self._own(user_id, draft_id)
         self._store.delete_draft(draft_id)
+        # A one-off form file belongs to this draft only; a library file is shared.
+        if draft.template is not None and draft.template.template_id is None:
+            self._drop_files([draft.template.storage_path])
 
     def purge_old(self, days: int = RETENTION_DAYS) -> int:
-        """Delete drafts unchanged for `days`. Never raises: it runs from the scheduler."""
+        """Delete drafts unchanged for `days`, with their one-off form files. Never raises: it
+        runs from the scheduler."""
         try:
-            count = self._store.purge_before(self._clock() - timedelta(days=days))
+            count, paths = self._store.purge_before(self._clock() - timedelta(days=days))
+            self._drop_files(paths)  # the one-off form files of exactly the deleted drafts
             if count:
                 self._audit.record(
                     "admin", "docgen.purged", None, payload={"drafts": count, "days": days}
@@ -822,4 +1079,245 @@ class DocgenService:
             title=guide.title,
             payload={"guide_id": guide_id},
             source_id=source_id,
+        )
+
+    # -- the admin's form templates -----------------------------------------------------
+    # A new or replaced file starts in 'review': the admin checks the detected fields (keeps,
+    # renames, adds a note for the AI) and saving them makes the template 'ready'. Files are
+    # never deleted, because drafts made from a template keep pointing at its file.
+
+    def list_templates(self, admin_id: str, include_archived: bool) -> list[FormTemplate]:
+        self._admin(admin_id)
+        return self._store.list_templates(include_archived)
+
+    def template(self, admin_id: str, template_id: int) -> FormTemplate:
+        self._admin(admin_id)
+        return self._template(template_id)
+
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        clean = (title or "").strip()
+        if not clean or len(clean) > MAX_TITLE_CHARS:
+            raise ValidationError(f"the title must be 1 to {MAX_TITLE_CHARS} characters")
+        return clean
+
+    @staticmethod
+    def _clean_doc_type(doc_type: str) -> str:
+        clean = " ".join((doc_type or "").split())
+        if len(clean) > MAX_DOC_TYPE_CHARS:
+            raise ValidationError(f"the document type is too long (at most {MAX_DOC_TYPE_CHARS} characters)")
+        return clean
+
+    def _store_file(self, content: bytes, sha: str) -> str:
+        path = f"library/{uuid.uuid4().hex}/{sha}.docx"
+        try:
+            self._need_files().put(path, content)
+        except UnavailableError:
+            raise
+        except Exception as exc:
+            log.warning("form template file could not be stored: %s", type(exc).__name__)
+            raise UnavailableError("the form file could not be stored; please try again") from exc
+        return path
+
+    def create_template(
+        self, admin_id: str, title: str, doc_type: str, upload: UploadedFile
+    ) -> FormTemplate:
+        self._admin(admin_id)
+        self._need_files()
+        clean = self._clean_title(title)
+        kind = self._clean_doc_type(doc_type)
+        name, content, sha, fields = read_template_file(upload)
+        path = self._store_file(content, sha)
+        try:
+            t = self._store.create_template(clean, kind, name, path, sha, fields, admin_id, self._clock())
+        except Exception:
+            self._drop_files([path])
+            raise
+        self._audit.record(
+            "admin",
+            "docgen.template_created",
+            admin_id,
+            title=clean,
+            payload={"template_id": t.id, "filename": name, "fields": len(fields)},
+        )
+        return t
+
+    def detected_fields(self, admin_id: str, template_id: int) -> tuple[FormField, ...]:
+        """Every field found in the template's current file, including ones the admin removed
+        (so they can be added back)."""
+        self._admin(admin_id)
+        t = self._template(template_id)
+        content = self._read_form(DraftTemplate(t.id, t.title, t.filename, t.storage_path, ()))
+        try:
+            return detect_fields(t.filename, content)
+        except FormError as exc:
+            raise UnavailableError(f"the form file could not be read again: {exc}") from exc
+
+    def save_template_fields(
+        self, admin_id: str, template_id: int, edits: list[FieldEdit]
+    ) -> FormTemplate:
+        """The checked list of fields, in the admin's order; the template becomes ready."""
+        t = self._template_open(admin_id, template_id)
+        detected = {f.key: f for f in self.detected_fields(admin_id, template_id)}
+        if not edits:
+            raise ValidationError("keep at least one field")
+        out: list[FormField] = []
+        seen: set[str] = set()
+        for e in edits:
+            f = detected.get(e.key)
+            if f is None:
+                raise ValidationError(f'the form has no field "{e.key}"')
+            if e.key in seen:
+                raise ValidationError(f'the field "{e.key}" is listed twice')
+            seen.add(e.key)
+            label = " ".join((e.label or "").split())
+            if not label or len(label) > 120:
+                raise ValidationError(f'the label of "{e.key}" must be 1 to 120 characters')
+            hint = " ".join((e.hint or "").split())
+            if len(hint) > MAX_HINT_CHARS:
+                raise ValidationError(f'the note of "{label}" is too long (at most {MAX_HINT_CHARS} characters)')
+            out.append(replace(f, label=label, hint=hint, multi=e.multi if f.kind == "choice" else False))
+        self._store.update_template(template_id, {"fields": tuple(out), "status": "ready"}, self._clock())
+        self._audit.record(
+            "admin",
+            "docgen.template_fields_saved",
+            admin_id,
+            title=t.title,
+            payload={"template_id": template_id, "fields": len(out), "detected": len(detected)},
+        )
+        return self._template(template_id)
+
+    def _template_open(self, admin_id: str, template_id: int) -> FormTemplate:
+        self._admin(admin_id)
+        t = self._template(template_id)
+        if t.archived_at is not None:
+            raise ConflictError("this form template is archived; upload it again to use it")
+        return t
+
+    def update_template(
+        self,
+        admin_id: str,
+        template_id: int,
+        title: str | None,
+        doc_type: str | None,
+        is_global: bool | None,
+    ) -> FormTemplate:
+        t = self._template_open(admin_id, template_id)
+        changes: dict = {}
+        if title is not None and self._clean_title(title) != t.title:
+            changes["title"] = self._clean_title(title)
+        if doc_type is not None and self._clean_doc_type(doc_type) != t.doc_type:
+            changes["doc_type"] = self._clean_doc_type(doc_type)
+        if is_global is not None and is_global != t.is_global:
+            changes["is_global"] = is_global
+        if not changes:
+            return t
+        self._store.update_template(template_id, changes, self._clock())
+        self._audit.record(
+            "admin",
+            "docgen.template_updated",
+            admin_id,
+            title=changes.get("title", t.title),
+            payload={"template_id": template_id, **changes, **({"old_title": t.title} if "title" in changes else {})},
+        )
+        return self._template(template_id)
+
+    def replace_template_file(self, admin_id: str, template_id: int, upload: UploadedFile) -> FormTemplate:
+        """A new file; its fields are found again and the template goes back to 'review'.
+        Drafts already made keep the old file. The admin's earlier check is reused only for the
+        SAME field: a marker of the same name, or a found blank whose place, detected label and
+        options are unchanged (a found blank's key is its position, which moves when the form
+        is edited). Such a field keeps its label, note and 'several allowed', or stays dropped;
+        everything else starts as detected."""
+        t = self._template_open(admin_id, template_id)
+        self._need_files()
+        name, content, sha, fields = read_template_file(upload)
+        if sha == t.sha256:
+            raise ConflictError("this is the same file as the template's current file; nothing changed")
+        carried = self._carry_review(t, fields)
+        path = self._store_file(content, sha)
+        try:
+            self._store.update_template(
+                template_id,
+                {"filename": name, "storage_path": path, "sha256": sha, "fields": carried, "status": "review"},
+                self._clock(),
+            )
+        except Exception:
+            self._drop_files([path])
+            raise
+        self._audit.record(
+            "admin",
+            "docgen.template_replaced",
+            admin_id,
+            title=t.title,
+            payload={"template_id": template_id, "filename": name, "old_filename": t.filename, "fields": len(fields)},
+        )
+        return self._template(template_id)
+
+    def _carry_review(self, t: FormTemplate, fields: tuple[FormField, ...]) -> tuple[FormField, ...]:
+        kept = {f.key: f for f in t.fields}
+        try:
+            old_file = self._read_form(DraftTemplate(t.id, t.title, t.filename, t.storage_path, ()))
+            before = {f.key: f for f in detect_fields(t.filename, old_file)}
+        except (UnavailableError, FormError) as exc:
+            # Without the old file only markers can be matched safely (by name).
+            log.warning("template %s: old file not re-read (%s); only markers keep their review", t.id, exc)
+            before = {f.key: f for f in t.fields if f.source == "marker"}
+
+        def same(f: FormField) -> bool:
+            b = before.get(f.key)
+            if b is None:
+                return False
+            return f.source == "marker" or (b.label == f.label and b.options == f.options and b.kind == f.kind)
+
+        out = []
+        for f in fields:
+            if not same(f):
+                out.append(f)  # new, or moved: as detected
+            elif f.key in kept:
+                k = kept[f.key]
+                out.append(replace(f, label=k.label, hint=k.hint, multi=k.multi and f.kind == "choice"))
+            # else: the admin dropped this same field before; it stays dropped
+        return tuple(out) or fields  # never an empty list: the admin reviews it anyway
+
+    def set_template_sources(self, admin_id: str, template_id: int, source_ids: list[int]) -> FormTemplate:
+        """The full list of sites that offer this form (one audit entry, written first)."""
+        t = self._template_open(admin_id, template_id)
+        if t.is_global:
+            raise ConflictError("this form is global and offered to every site; make it site-specific first")
+        known = {s.id for s in self._store.list_sources()}
+        wanted = set(source_ids)
+        unknown = sorted(wanted - known)
+        if unknown:
+            raise NotFoundError(f"source {unknown[0]} not found")
+        current = set(t.source_ids)
+        added, removed = sorted(wanted - current), sorted(current - wanted)
+        if not added and not removed:
+            return t
+        self._audit.record_required(
+            "admin",
+            "docgen.template_sources_set",
+            admin_id,
+            title=t.title,
+            payload={"template_id": template_id, "added": added, "removed": removed},
+        )
+        now = self._clock()
+        for sid in added:
+            self._store.link_template(sid, template_id, now)
+        for sid in removed:
+            self._store.unlink_template(sid, template_id)
+        return self._template(template_id)
+
+    def archive_template(self, admin_id: str, template_id: int) -> None:
+        self._admin(admin_id)
+        t = self._template(template_id)
+        if t.archived_at is not None:
+            return
+        self._store.archive_template(template_id, self._clock())
+        self._audit.record(
+            "admin",
+            "docgen.template_archived",
+            admin_id,
+            title=t.title,
+            payload={"template_id": template_id, "unlinked_source_ids": list(t.source_ids)},
         )

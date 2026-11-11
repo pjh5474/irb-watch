@@ -22,6 +22,7 @@ dependencies = [
     "olefile",
     "defusedxml",
     "pydantic-settings",
+    "python-docx",
 ]
 
 [dependency-groups]

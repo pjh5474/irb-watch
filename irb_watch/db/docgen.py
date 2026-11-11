@@ -13,12 +13,17 @@ from irb_watch.docgen.types import (
     Draft,
     DraftVersion,
     ExtraGuide,
+    FormTemplate,
     Guide,
     GuideRevision,
     Inputs,
     NewDraft,
     SourceRef,
     VersionConflictError,
+    draft_template_from_json,
+    draft_template_to_json,
+    field_from_json,
+    field_to_json,
     ref_from_json,
     ref_to_json,
 )
@@ -26,7 +31,56 @@ from irb_watch.docgen.types import (
 log = logging.getLogger(__name__)
 
 UNIQUE_VIOLATION = "23505"
+TEMPLATE_BUCKET = "form-templates"
 _GUIDE_COLUMNS = "id, title, filename, body_text, created_at, archived_at, is_global, text_updated_at"
+_TEMPLATE_COLUMNS = (
+    "id, title, doc_type, filename, storage_path, sha256, is_global, status, fields, "
+    "created_at, updated_at, archived_at"
+)
+
+
+class SupabaseTemplateFiles:
+    """The private bucket of form-template files (service role only)."""
+
+    def __init__(self, client: Client) -> None:
+        self._bucket = client.storage.from_(TEMPLATE_BUCKET)
+
+    def put(self, path: str, content: bytes) -> None:
+        # Every path has a fresh random folder, so an existing object is a real conflict and
+        # fails (never overwritten, never silently kept).
+        self._bucket.upload(
+            path,
+            content,
+            {
+                "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "upsert": "false",
+            },
+        )
+
+    def get(self, path: str) -> bytes:
+        return self._bucket.download(path)
+
+    def delete(self, paths: list[str]) -> None:
+        if paths:
+            self._bucket.remove(paths)
+
+
+def _template(row: dict, links: tuple[int, ...]) -> FormTemplate:
+    return FormTemplate(
+        id=row["id"],
+        title=row["title"],
+        doc_type=row.get("doc_type") or "",
+        filename=row["filename"],
+        storage_path=row["storage_path"],
+        sha256=row["sha256"],
+        is_global=bool(row.get("is_global")),
+        status=row["status"],
+        fields=tuple(field_from_json(f) for f in row.get("fields") or []),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        archived_at=row.get("archived_at"),
+        source_ids=links,
+    )
 
 
 def _draft(row: dict) -> Draft:
@@ -43,6 +97,7 @@ def _draft(row: dict) -> Draft:
         ai_override_source_ids=tuple(int(s) for s in row.get("ai_override_source_ids") or []),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        template=draft_template_from_json(row["template"]) if row.get("template") else None,
     )
 
 
@@ -55,6 +110,7 @@ def _version(row: dict) -> DraftVersion:
         instruction=row.get("instruction") or "",
         created_at=row["created_at"],
         inputs=row.get("inputs"),
+        fields=row.get("fields"),
     )
 
 
@@ -359,6 +415,129 @@ class SupabaseDocgenStore:
             "guide_id", guide_id
         ).execute()
 
+    # -- form templates ----------------------------------------------------------------
+
+    def _template_links(self, ids: list[int]) -> dict[int, tuple[int, ...]]:
+        if not ids:
+            return {}
+        rows = (
+            self._c.table("source_form_templates")
+            .select("source_id, template_id")
+            .in_("template_id", ids)
+            .execute()
+            .data
+        )
+        out: dict[int, list[int]] = {}
+        for r in rows:
+            out.setdefault(r["template_id"], []).append(r["source_id"])
+        return {t: tuple(sorted(s)) for t, s in out.items()}
+
+    def _templates(self, rows: list[dict]) -> list[FormTemplate]:
+        links = self._template_links([r["id"] for r in rows])
+        return [_template(r, links.get(r["id"], ())) for r in rows]
+
+    def create_template(
+        self, title, doc_type, filename, storage_path, sha256, fields, created_by, now
+    ) -> FormTemplate:
+        rows = (
+            self._c.table("form_templates")
+            .insert(
+                {
+                    "title": title,
+                    "doc_type": doc_type,
+                    "filename": filename,
+                    "storage_path": storage_path,
+                    "sha256": sha256,
+                    "fields": [field_to_json(f) for f in fields],
+                    "status": "review",
+                    "created_by": created_by,
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                }
+            )
+            .execute()
+            .data
+        )
+        return self._templates(rows)[0]
+
+    def list_templates(self, include_archived: bool) -> list[FormTemplate]:
+        query = self._c.table("form_templates").select(_TEMPLATE_COLUMNS)
+        if not include_archived:
+            query = query.is_("archived_at", "null")
+        return self._templates(query.order("id", desc=True).execute().data)
+
+    def get_template(self, template_id: int) -> FormTemplate | None:
+        rows = (
+            self._c.table("form_templates")
+            .select(_TEMPLATE_COLUMNS)
+            .eq("id", template_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return self._templates(rows)[0] if rows else None
+
+    def templates_for_sources(self, source_ids: list[int]) -> list[FormTemplate]:
+        if not source_ids:
+            return []
+        global_rows = (
+            self._c.table("form_templates")
+            .select(_TEMPLATE_COLUMNS)
+            .eq("is_global", True)
+            .eq("status", "ready")
+            .is_("archived_at", "null")
+            .order("id")
+            .execute()
+            .data
+        )
+        links = (
+            self._c.table("source_form_templates")
+            .select("template_id")
+            .in_("source_id", source_ids)
+            .execute()
+            .data
+        )
+        global_ids = {r["id"] for r in global_rows}
+        linked = sorted({r["template_id"] for r in links} - global_ids)
+        rows = (
+            self._c.table("form_templates")
+            .select(_TEMPLATE_COLUMNS)
+            .in_("id", linked)
+            .eq("status", "ready")
+            .is_("archived_at", "null")
+            .order("id")
+            .execute()
+            .data
+            if linked
+            else []
+        )
+        return self._templates(global_rows + rows)
+
+    def update_template(self, template_id: int, changes: dict, now: datetime) -> None:
+        row = dict(changes)
+        if "fields" in row:
+            row["fields"] = [field_to_json(f) for f in row["fields"]]
+        row["updated_at"] = now.isoformat()
+        self._c.table("form_templates").update(row).eq("id", template_id).execute()
+
+    def archive_template(self, template_id: int, now: datetime) -> None:
+        self._c.table("form_templates").update(
+            {"archived_at": now.isoformat(), "updated_at": now.isoformat()}
+        ).eq("id", template_id).execute()
+        self._c.table("source_form_templates").delete().eq("template_id", template_id).execute()
+
+    def link_template(self, source_id: int, template_id: int, now: datetime) -> None:
+        self._c.table("source_form_templates").upsert(
+            {"source_id": source_id, "template_id": template_id, "created_at": now.isoformat()},
+            on_conflict="source_id,template_id",
+            ignore_duplicates=True,
+        ).execute()
+
+    def unlink_template(self, source_id: int, template_id: int) -> None:
+        self._c.table("source_form_templates").delete().eq("source_id", source_id).eq(
+            "template_id", template_id
+        ).execute()
+
     # -- drafts ----------------------------------------------------------------------
 
     def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft:
@@ -373,6 +552,7 @@ class SupabaseDocgenStore:
                     "title": new.title,
                     "instruction": new.instruction,
                     **_selection(inputs, now),
+                    "template": draft_template_to_json(new.template) if new.template else None,
                     "created_at": now.isoformat(),
                 }
             )
@@ -390,6 +570,7 @@ class SupabaseDocgenStore:
                     "origin": first.origin,
                     "instruction": first.instruction,
                     "inputs": inputs.to_json(),
+                    "fields": first.fields,
                     "created_at": now.isoformat(),
                 }
             ).execute()
@@ -427,7 +608,15 @@ class SupabaseDocgenStore:
         return [_version(r) for r in rows]
 
     def add_version(
-        self, draft, markdown, origin, instruction, now, inputs=None, update_selection=False
+        self,
+        draft,
+        markdown,
+        origin,
+        instruction,
+        now,
+        inputs=None,
+        update_selection=False,
+        fields=None,
     ) -> DraftVersion:
         last = (
             self._c.table("draft_versions")
@@ -452,6 +641,7 @@ class SupabaseDocgenStore:
                         "origin": origin,
                         "instruction": instruction,
                         "inputs": inputs.to_json() if inputs is not None else None,
+                        "fields": fields,
                         "created_at": now.isoformat(),
                     }
                 )
@@ -495,6 +685,13 @@ class SupabaseDocgenStore:
         )
         return result.count or 0
 
-    def purge_before(self, cutoff: datetime) -> int:
-        rows = self._c.table("drafts").delete().lt("updated_at", cutoff.isoformat()).execute().data
-        return len(rows or [])
+    def purge_before(self, cutoff: datetime) -> tuple[int, list[str]]:
+        # The delete returns the deleted rows, so the files are those of exactly these drafts.
+        rows = self._c.table("drafts").delete().lt("updated_at", cutoff.isoformat()).execute().data or []
+        paths = []
+        for r in rows:
+            t = r.get("template") or {}
+            # Library files are shared by every draft of the template: never deleted here.
+            if t.get("template_id") is None and t.get("storage_path"):
+                paths.append(t["storage_path"])
+        return len(rows), paths
