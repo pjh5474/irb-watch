@@ -57,6 +57,7 @@ from irb_watch.services.digest import DigestService
 from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ConflictError, ValidationError
+from irb_watch.services.manual import ManualService
 from irb_watch.services.members import MemberService
 from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
@@ -196,6 +197,19 @@ def get_scan_service() -> ScanService:
         build_reader,
         SupabaseAuditSink(client),
         enricher=build_enricher(extra=_extra("summary")),
+    )
+
+
+def get_manual_service() -> ManualService:
+    client = get_supabase_client()
+    settings = get_settings()
+    return ManualService(
+        SupabaseScanRepo(client, settings.max_scan_payload_bytes),
+        SupabaseFileStorage(client),
+        SupabaseAuditSink(client),
+        SupabaseSourceStore(client).get,
+        enricher=build_enricher(extra=_extra("summary")),
+        max_file_bytes=settings.max_file_bytes,
     )
 
 

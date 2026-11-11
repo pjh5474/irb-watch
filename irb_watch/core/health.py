@@ -48,7 +48,10 @@ def source_health(
     scans_paused_reason: str | None = None,
     now: datetime | None = None,
     stale_hours: int = 36,
+    manual: bool = False,
 ) -> Health:
+    """manual: a source an admin fills by hand (never scanned), so it is never "stale"; a
+    document with a file warning still makes it a problem."""
     if not is_active:
         return Health(INACTIVE)
     if scan_in_progress:
@@ -61,6 +64,8 @@ def source_health(
         return Health(ATTENTION, FAILED)
     if last_scan_at is None:
         return Health(IDLE)
+    if manual:
+        return Health(OK)
     try:
         last = datetime.fromisoformat(last_scan_at)
     except ValueError:

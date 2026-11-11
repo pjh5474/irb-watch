@@ -145,6 +145,7 @@ class WeeklyStatsService:
                 scans_paused_reason=s.scans_paused_reason,
                 now=now,
                 stale_hours=self._stale_hours,
+                manual=s.is_manual,
             )
             if health.alarming:
                 unhealthy.append((ws(s.id), health.level))

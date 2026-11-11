@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from irb_watch.api import (
     admin_agent,
@@ -11,6 +12,7 @@ from irb_watch.api import (
     admin_documents,
     admin_guides,
     admin_mail,
+    admin_manual,
     admin_members,
     admin_scans,
     admin_sources,
@@ -67,6 +69,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="IRB Watch", lifespan=lifespan)
 
+# Added before CORS so CORS wraps it: a refused upload still reaches the browser with its reason.
+app.add_middleware(BaseHTTPMiddleware, dispatch=admin_manual.limit_upload_size)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().frontend_origin_list,
@@ -87,6 +91,8 @@ async def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
 app.include_router(health.router)
 app.include_router(auth_token.router)
 app.include_router(admin_users.router)
+# Before admin_sources: "/admin/sources/manual" must not be read as a source id.
+app.include_router(admin_manual.router)
 app.include_router(admin_sources.router)
 app.include_router(admin_scans.router)
 app.include_router(admin_credentials.router)

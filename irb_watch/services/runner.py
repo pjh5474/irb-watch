@@ -118,6 +118,14 @@ class ScanRunner:
                     continue
                 if not source.is_active:
                     continue
+                if source.is_manual:
+                    # Filled by hand, never scanned. Quietly left out of the daily run; when an
+                    # admin picked it ("scan selected"), the skip is recorded with the reason.
+                    if only is not None:
+                        reason = "manual source: its documents are uploaded by hand, it is not scanned"
+                        self._record_skip(source, trigger, reason, actor_id)
+                        report.skipped[source.id] = reason
+                    continue
                 if trigger == CATCH_UP and not self._is_overdue(source, now):
                     continue  # quietly: the catch-up only looks at overdue sources
                 reason = self._skip_reason(source)

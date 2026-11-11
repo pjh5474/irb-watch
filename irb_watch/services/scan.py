@@ -150,6 +150,8 @@ class ScanService:
             raise NotFoundError("source not found")
         if not source.is_active:
             raise ConflictError("source is inactive")
+        if source.is_manual:
+            raise ValidationError("a manual source is not scanned; upload its documents instead")
         if not self._repo.claim_scan(source_id, self._clock(), STALE_SCAN_MINUTES):
             raise ConflictError("a scan of this source is already running")
         return source
@@ -231,15 +233,7 @@ class ScanService:
     def _scan(
         self, source: Source, actor_id: str | None, now: datetime, person_started: bool = False
     ) -> ScanSummary:
-        stored_this_run: set[str] = set()
-
-        def file_sink(sha256: str, filename: str, content: bytes) -> str:
-            # The object is named by its hash: upload only when that hash is new.
-            if sha256 not in stored_this_run and not self._repo.has_stored_file(sha256):
-                self._storage.put(sha256, content)
-            stored_this_run.add(sha256)
-            return sha256
-
+        file_sink = make_file_sink(self._repo, self._storage)
         reader = self._reader_factory(source)
         mark = getattr(reader, "person_started", None)  # only readers that remember logins
         if person_started and mark is not None:
@@ -284,24 +278,7 @@ class ScanService:
         ]
 
         titles = {o.external_id: o.content.title for o in reading.observations}
-        for external_id, reason in result.needs_review.items():
-            if before.get(external_id) == (NEEDS_REVIEW, reason):
-                continue  # already announced with this very reason
-            doc = loaded.store.get(external_id)
-            title = titles.get(external_id) or (
-                doc.latest.content.title if doc else f"Post {external_id}"
-            )
-            cards.append(
-                ScanCard(
-                    "document",
-                    "document.needs_review",
-                    actor_id,
-                    title=title,
-                    summary=reason,
-                    payload={"external_id": external_id, "reason": reason},
-                    external_id=external_id,
-                )
-            )
+        cards += needs_review_cards(result.needs_review, before, titles, loaded, actor_id)
 
         counts = {k: sum(1 for e in result.events if e.kind == k) for k in
                   ("new", "updated", "removed", "reappeared")}
@@ -346,35 +323,90 @@ class ScanService:
         enrichment: Enrichment | None,
         plain: bool = False,
     ) -> "ScanCard":
-        detail = event.detail
-        payload: dict = {"version_no": event.version_no}
-        if detail is not None:
-            payload["title_changed"] = detail.title_change is not None
-            payload["text_changed"] = detail.body_diff is not None
-            payload["files"] = {f.filename: f.kind for f in detail.meaningful_file_changes}
-        priority = detail.suggested_priority if detail else None
-        summary = None
-        if enrichment is not None:
-            priority = enrichment.priority
-            summary = enrichment.summary
-            payload["category"] = enrichment.category
-            payload["summary_source"] = enrichment.source
-            if enrichment.note:
-                payload["ai_note"] = enrichment.note
-        elif plain and detail is not None:
-            # AI is off for this source: a factual template line, no text leaves the server.
-            summary = template_summary(detail, event.title)
-            payload["summary_source"] = "template"
-        return ScanCard(
-            "document",
-            f"document.{event.kind}",
-            actor_id,
-            title=event.title,
-            summary=summary,
-            payload=payload,
-            priority=priority,
-            external_id=event.external_id,
+        return event_card(event, actor_id, enrichment, plain)
+
+
+def make_file_sink(repo: ScanRepo, storage: FileStorage):
+    """The file step shared by scans and manual uploads: the original is stored under its hash,
+    uploaded only when that hash is new. Returns the storage path (the hash)."""
+    stored: set[str] = set()
+
+    def file_sink(sha256: str, filename: str, content: bytes) -> str:
+        if sha256 not in stored and not repo.has_stored_file(sha256):
+            storage.put(sha256, content)
+        stored.add(sha256)
+        return sha256
+
+    return file_sink
+
+
+def needs_review_cards(
+    needs_review: dict[str, str],
+    before: dict[str, tuple[str, str | None]],
+    titles: dict[str, str],
+    loaded: LoadedStore,
+    actor_id: str | None,
+) -> list[ScanCard]:
+    """One card per post newly flagged, or flagged for another reason. `before` holds each
+    post's (status, review_reason) as loaded, so a persistent problem is announced once."""
+    cards = []
+    for external_id, reason in needs_review.items():
+        if before.get(external_id) == (NEEDS_REVIEW, reason):
+            continue  # already announced with this very reason
+        doc = loaded.store.get(external_id)
+        title = titles.get(external_id) or (
+            doc.latest.content.title if doc else f"Post {external_id}"
         )
+        cards.append(
+            ScanCard(
+                "document",
+                "document.needs_review",
+                actor_id,
+                title=title,
+                summary=reason,
+                payload={"external_id": external_id, "reason": reason},
+                external_id=external_id,
+            )
+        )
+    return cards
+
+
+def event_card(
+    event: ChangeEvent,
+    actor_id: str | None,
+    enrichment: Enrichment | None,
+    plain: bool = False,
+) -> ScanCard:
+    """The news card of one change (shared by scans and manual uploads)."""
+    detail = event.detail
+    payload: dict = {"version_no": event.version_no}
+    if detail is not None:
+        payload["title_changed"] = detail.title_change is not None
+        payload["text_changed"] = detail.body_diff is not None
+        payload["files"] = {f.filename: f.kind for f in detail.meaningful_file_changes}
+    priority = detail.suggested_priority if detail else None
+    summary = None
+    if enrichment is not None:
+        priority = enrichment.priority
+        summary = enrichment.summary
+        payload["category"] = enrichment.category
+        payload["summary_source"] = enrichment.source
+        if enrichment.note:
+            payload["ai_note"] = enrichment.note
+    elif plain and detail is not None:
+        # AI is off for this source: a factual template line, no text leaves the server.
+        summary = template_summary(detail, event.title)
+        payload["summary_source"] = "template"
+    return ScanCard(
+        "document",
+        f"document.{event.kind}",
+        actor_id,
+        title=event.title,
+        summary=summary,
+        payload=payload,
+        priority=priority,
+        external_id=event.external_id,
+    )
 
 
 POST_PROBLEMS_PREFIX = "post "  # every per-post summary starts so; whole-scan errors never do

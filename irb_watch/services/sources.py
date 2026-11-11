@@ -1,5 +1,6 @@
 """Admin-managed list of sources (URLs to scan)."""
 
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -18,6 +19,10 @@ from irb_watch.services.users import AuditSink
 SNUH_HOST = "hrpp.snuh.org"
 SNUH_LIST_PATH = "/hrpp/bbs/list.do"
 RBAY_ADAPTER = "rbay"
+# A hospital without an e-IRB site: an admin uploads its documents by hand (services/manual.py).
+# Never scanned; its url is a "manual:<random>" placeholder.
+MANUAL_ADAPTER = "manual"
+MANUAL_URL_PREFIX = "manual:"
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,11 @@ class Source:
     # False: no text of this source is sent to the AI services (scan cards get a plain
     # template line, summaries are refused). Members-only sources start with it off.
     ai_enabled: bool = True
+
+    @property
+    def is_manual(self) -> bool:
+        """Filled by hand by an admin (no e-IRB site): never scanned, never "stale"."""
+        return self.adapter == MANUAL_ADAPTER
 
 
 class DuplicateSourceError(Exception):
@@ -166,6 +176,38 @@ class SourceService:
         )
         return source
 
+    def create_manual(
+        self, actor_id: str | None, name: str, members_only: bool, ai_enabled: bool | None = None
+    ) -> Source:
+        """A source filled by hand (no site to scan). members_only: readable only by admins and
+        assigned members, like a study; AI then starts off unless the admin says otherwise."""
+        name = name.strip()
+        if not name:
+            raise ValidationError("name must not be empty")
+        use_ai = (not members_only) if ai_enabled is None else ai_enabled
+        placeholder = f"{MANUAL_URL_PREFIX}{secrets.token_hex(8)}"
+        try:
+            source = self._store.create(
+                name,
+                MANUAL_ADAPTER,
+                placeholder,
+                {},
+                actor_id,
+                requires_login=members_only,
+                ai_enabled=use_ai,
+            )
+        except DuplicateSourceError as exc:  # 16 random hex digits: practically never
+            raise ConflictError("please try again") from exc
+        self._audit.record(
+            "admin",
+            "source.created",
+            actor_id,
+            title=f"Source {name} added",
+            payload={"adapter": MANUAL_ADAPTER, "members_only": members_only, "ai_enabled": use_ai},
+            source_id=source.id,
+        )
+        return source
+
     def list(self) -> list[Source]:
         return self._store.list()
 
@@ -186,6 +228,8 @@ class SourceService:
     ) -> Source:
         current = self.get(source_id)
         values: dict = {}
+        if login_user is not None and current.is_manual:
+            raise ValidationError("a manual source has no site to log in to")
         if login_user is not None:  # "" removes the login
             if not login_user.strip() and current.adapter == RBAY_ADAPTER:
                 raise ValidationError("an R-BAY board cannot be read without a login")

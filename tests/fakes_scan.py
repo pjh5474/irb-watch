@@ -133,6 +133,7 @@ class FakeScanRepo:
         if self.fail_persist:
             raise RuntimeError("database down")
         doc_ids = self._persist(source_id, loaded, seen, now)
+        self.locked.discard(source_id)  # the database function frees the scan lock too
         for card in cards:
             self.cards.append(card)
             if self.audit is not None:

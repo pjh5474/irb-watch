@@ -116,6 +116,7 @@ class AlertService:
             scans_paused_reason=source.scans_paused_reason,
             now=self._clock(),
             stale_hours=self._stale_hours,
+            manual=source.is_manual,
         )
 
     def _evaluate_many(self, sources: list[Source]) -> None:

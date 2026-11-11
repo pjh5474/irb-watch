@@ -58,7 +58,7 @@ Supabase CLI v3 targets the local stack by default; hosted needs `--remote`. The
 - Keep `docs/decisions.md` and `docs/plan.md` current when a decision changes.
 
 ## Where things stand (2026-11-10)
-**All 24 migrations are applied** (on 2026-11-11: `docgen_version_inputs`, see decisions.md "Docs generator: file choice and inputs per version", and `guide_admin_tools`, see "Guide library admin tools"; on 2026-11-10: `user_projects`, private per-user folders of sites, see decisions.md "User projects"; `rbay_adapter`, see "R-BAY boards"; `file_warnings_review` and `document_reviews_table`, see "File warnings and big files") (checked with `npx supabase migration list --remote` on 2026-11-10). Each feature below has its backend and frontend built and committed. The frontend is the separate repo `irb-watch-frontend`.
+**All 25 migrations are applied** (on 2026-11-11: `docgen_version_inputs`, see decisions.md "Docs generator: file choice and inputs per version", `guide_admin_tools`, see "Guide library admin tools", and `manual_sources`, see "Manual sources"; on 2026-11-10: `user_projects`, private per-user folders of sites, see decisions.md "User projects"; `rbay_adapter`, see "R-BAY boards"; `file_warnings_review` and `document_reviews_table`, see "File warnings and big files") (checked with `npx supabase migration list --remote` on 2026-11-10). Each feature below has its backend and frontend built and committed. The frontend is the separate repo `irb-watch-frontend`.
 
 Working and verified live: login and admin API, sources, manual scans of two SNUH boards (data stored in the project: sources 4 and 5), PDF/HWP/HWPX/DOCX text, change detection with version history, AI summaries (OpenAI `gpt-6-luna` + Jev), on-demand whole-document summaries, a Docker deploy to an AWS server (`docs/deploy-ec2.md`; `https://irb-api.warwarsn.online`).
 
@@ -78,6 +78,8 @@ Also built:
 - **Admin-edited AI instructions (2026-11-10):** admins add text after the fixed safety rules of the chat, the docs generator and summaries. The text has history, restore, reset and a test box, and takes effect without a restart. The safety core stays in code. Code: `ai/admin_text.py`, `services/ai_instructions.py`, `api/admin_ai.py`.
 
 - **R-BAY boards (2026-11-10):** hospital e-IRBs on www.r-bay.co.kr, first 관련규정 / 양식함 / 공지 of 대구가톨릭대학교의료원 and 이화의대부속목동병원, one members-only source per board, login stored per hospital (site `rbay-<hospital code>`), one shared login per hospital per run; zip attachments unpacked for all sources. Built and checked live read-only on both hospitals; migration `rbay_adapter` applied; no source created yet. See decisions.md "R-BAY boards".
+
+- **Manual sources (2026-11-11):** adapter `manual` for hospitals with no e-IRB site; admins upload documents and new versions by hand; saved through the scan path (`commit_scan`, cards, AI summaries); never scanned. Code: `services/manual.py`, `api/admin_manual.py`. Migration `manual_sources` applied 2026-11-11. See decisions.md "Manual sources".
 
 Next candidates:
 - search over stored document text
