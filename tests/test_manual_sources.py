@@ -302,15 +302,22 @@ class FakeAlerts:
 def test_oversized_or_undeclared_uploads_are_refused_before_reading():
     from irb_watch.api.admin_manual import MAX_UPLOAD_REQUEST_BYTES
 
-    client = TestClient(app)
-    path = "/admin/sources/7/manual-documents"
-    res = client.post(path, content=b"{}", headers={"Content-Length": str(MAX_UPLOAD_REQUEST_BYTES + 1)})
-    assert res.status_code == 413 and "too large" in res.json()["detail"]
-    res = client.post(f"{path}/5/versions", content=b"{}", headers={"Content-Length": str(MAX_UPLOAD_REQUEST_BYTES + 1)})
-    assert res.status_code == 413
-    # other routes are not affected (this one then fails on the missing login, as usual)
-    res = client.post("/admin/sources/manual", content=b"{}", headers={"Content-Length": str(MAX_UPLOAD_REQUEST_BYTES + 1)})
-    assert res.status_code != 413
+    # The fake login check: without it the real one needs the project's key address, which only
+    # exists in a local env file (CI has none).
+    app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
+    try:
+        client = TestClient(app)
+        path = "/admin/sources/7/manual-documents"
+        big = {"Content-Length": str(MAX_UPLOAD_REQUEST_BYTES + 1)}
+        res = client.post(path, content=b"{}", headers=big)
+        assert res.status_code == 413 and "too large" in res.json()["detail"]
+        res = client.post(f"{path}/5/versions", content=b"{}", headers=big)
+        assert res.status_code == 413
+        # other routes are not affected: this one fails on the missing login, as usual
+        res = client.post("/admin/sources/manual", content=b"{}", headers=big)
+        assert res.status_code == 401
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_a_mail_problem_never_fails_an_upload(env):
