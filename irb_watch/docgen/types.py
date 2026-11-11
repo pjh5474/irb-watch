@@ -51,7 +51,22 @@ class Guide:
     body_text: str
     created_at: str
     archived_at: str | None = None
-    source_ids: tuple[int, ...] = ()  # sources that use it by default
+    source_ids: tuple[int, ...] = ()  # sources that use it by default (unused while global)
+    is_global: bool = False  # a default of every draft, for every source
+    text_updated_at: str | None = None  # when the file was last replaced; None = never
+
+
+@dataclass(frozen=True)
+class GuideRevision:
+    """An old text of a guide, kept when an admin replaced its file."""
+
+    id: int
+    guide_id: int
+    filename: str
+    body_text: str
+    valid_from: str
+    replaced_by: str | None
+    replaced_at: str
 
 
 @dataclass(frozen=True)
@@ -191,7 +206,21 @@ class DocgenStore(Protocol):
     def list_guides(self, include_archived: bool) -> list[Guide]: ...
     def get_guides(self, guide_ids: list[int]) -> list[Guide]: ...
     def guides_for_sources(self, source_ids: list[int]) -> list[Guide]:
-        """Non-archived guides linked to any of these sources."""
+        """Non-archived guides linked to any of these sources, plus every non-archived global
+        guide (global ones first). Empty source list: nothing."""
+        ...
+
+    def list_sources(self) -> list[SourceRef]: ...
+    def update_guide(self, guide_id: int, title: str | None, is_global: bool | None) -> None: ...
+    def replace_guide_text(
+        self, guide: Guide, filename: str, body_text: str, sha256: str, by: str, now: datetime
+    ) -> None:
+        """Make the new text current only if the guide still has the text this call read (else
+        VersionConflictError, nothing written), then keep that old text in guide_revisions."""
+        ...
+
+    def list_guide_revisions(self, guide_id: int) -> list[GuideRevision]:
+        """Newest first."""
         ...
 
     def archive_guide(self, guide_id: int, now: datetime) -> None:

@@ -42,6 +42,8 @@ class GuideOut(BaseModel):
     source_ids: list[int]
     created_at: str
     archived_at: str | None = None
+    is_global: bool = False  # a default of every draft; source_ids are unused while true
+    text_updated_at: str | None = None  # when the file was last replaced
 
     @classmethod
     def of(cls, g: Guide) -> "GuideOut":
@@ -53,6 +55,8 @@ class GuideOut(BaseModel):
             source_ids=list(g.source_ids),
             created_at=g.created_at,
             archived_at=g.archived_at,
+            is_global=g.is_global,
+            text_updated_at=g.text_updated_at,
         )
 
 

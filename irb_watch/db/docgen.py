@@ -14,6 +14,7 @@ from irb_watch.docgen.types import (
     DraftVersion,
     ExtraGuide,
     Guide,
+    GuideRevision,
     Inputs,
     NewDraft,
     SourceRef,
@@ -25,7 +26,7 @@ from irb_watch.docgen.types import (
 log = logging.getLogger(__name__)
 
 UNIQUE_VIOLATION = "23505"
-_GUIDE_COLUMNS = "id, title, filename, body_text, created_at, archived_at"
+_GUIDE_COLUMNS = "id, title, filename, body_text, created_at, archived_at, is_global, text_updated_at"
 
 
 def _draft(row: dict) -> Draft:
@@ -177,6 +178,8 @@ class SupabaseDocgenStore:
                 created_at=r["created_at"],
                 archived_at=r.get("archived_at"),
                 source_ids=links.get(r["id"], ()),
+                is_global=bool(r.get("is_global")),
+                text_updated_at=r.get("text_updated_at"),
             )
             for r in rows
         ]
@@ -223,18 +226,122 @@ class SupabaseDocgenStore:
             .data
         )
         ids = sorted({r["guide_id"] for r in links})
-        if not ids:
-            return []
-        rows = (
+        global_rows = (
             self._c.table("guides")
             .select(_GUIDE_COLUMNS)
-            .in_("id", ids)
+            .eq("is_global", True)
             .is_("archived_at", "null")
             .order("id")
             .execute()
             .data
         )
-        return self._guides(rows)
+        global_ids = {r["id"] for r in global_rows}
+        linked = [i for i in ids if i not in global_ids]
+        rows = (
+            self._c.table("guides")
+            .select(_GUIDE_COLUMNS)
+            .in_("id", linked)
+            .is_("archived_at", "null")
+            .order("id")
+            .execute()
+            .data
+            if linked
+            else []
+        )
+        return self._guides(global_rows + rows)
+
+    def list_sources(self) -> list[SourceRef]:
+        rows = self._c.table("sources").select("id, name, ai_enabled").order("name").execute().data
+        return [SourceRef(r["id"], r["name"], bool(r["ai_enabled"])) for r in rows]
+
+    def update_guide(self, guide_id: int, title: str | None, is_global: bool | None) -> None:
+        changes: dict = {}
+        if title is not None:
+            changes["title"] = title
+        if is_global is not None:
+            changes["is_global"] = is_global
+        if changes:
+            self._c.table("guides").update(changes).eq("id", guide_id).execute()
+
+    def replace_guide_text(self, guide, filename, body_text, sha256, by, now) -> None:
+        current = (
+            self._c.table("guides")
+            .select("filename, body_text, sha256, created_at, text_updated_at")
+            .eq("id", guide.id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not current:
+            raise VersionConflictError
+        old = current[0]
+        # The update only applies if the guide still has the text read above (same hash and the
+        # same replacement time), so of two replacements at the same moment one gets a conflict
+        # and writes nothing. Two requests, not one transaction: the old text is kept in memory
+        # and written to the history right after.
+        query = (
+            self._c.table("guides")
+            .update(
+                {
+                    "filename": filename,
+                    "body_text": body_text,
+                    "sha256": sha256,
+                    "text_updated_at": now.isoformat(),
+                }
+            )
+            .eq("id", guide.id)
+            .eq("sha256", old["sha256"])
+        )
+        if old["text_updated_at"] is None:
+            query = query.is_("text_updated_at", "null")
+        else:
+            query = query.eq("text_updated_at", old["text_updated_at"])
+        if not query.execute().data:
+            raise VersionConflictError
+        row = {
+            "guide_id": guide.id,
+            "filename": old["filename"] or "",
+            "body_text": old["body_text"],
+            "sha256": old["sha256"],
+            "valid_from": old["text_updated_at"] or old["created_at"],
+            "replaced_by": by,
+            "replaced_at": now.isoformat(),
+        }
+        try:
+            self._c.table("guide_revisions").insert(row).execute()
+        except Exception:  # noqa: BLE001  any failure: try once more, then log and raise
+            try:  # one more try: the old text exists nowhere else now
+                self._c.table("guide_revisions").insert(row).execute()
+            except Exception:
+                log.error(
+                    "guide %s: new text saved, but its old text (sha256 %s) could not be kept "
+                    "in guide_revisions",
+                    guide.id,
+                    old["sha256"],
+                )
+                raise
+
+    def list_guide_revisions(self, guide_id: int) -> list[GuideRevision]:
+        rows = (
+            self._c.table("guide_revisions")
+            .select("id, guide_id, filename, body_text, valid_from, replaced_by, replaced_at")
+            .eq("guide_id", guide_id)
+            .order("replaced_at", desc=True)
+            .execute()
+            .data
+        )
+        return [
+            GuideRevision(
+                r["id"],
+                r["guide_id"],
+                r["filename"] or "",
+                r["body_text"],
+                r["valid_from"],
+                r.get("replaced_by"),
+                r["replaced_at"],
+            )
+            for r in rows
+        ]
 
     def archive_guide(self, guide_id: int, now: datetime) -> None:
         self._c.table("guides").update({"archived_at": now.isoformat()}).eq("id", guide_id).execute()

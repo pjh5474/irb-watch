@@ -6,18 +6,58 @@ from pydantic import BaseModel, Field
 from irb_watch.api.deps import get_docgen_service, require_admin
 from irb_watch.api.docgen import FileIn, GuideOut
 from irb_watch.auth.jwt import AuthUser
-from irb_watch.services.docgen import DocgenService, UploadedFile
+from irb_watch.docgen.types import Guide, GuideRevision
+from irb_watch.services.docgen import MAX_TITLE_CHARS, DocgenService, UploadedFile
 
 router = APIRouter(prefix="/admin", tags=["admin-guides"])
 
 
 class GuideIn(BaseModel):
-    title: str = Field(max_length=500)
+    title: str = Field(max_length=MAX_TITLE_CHARS)  # the same limit as the service and the table
     file: FileIn
 
 
 class GuideTextOut(GuideOut):
     body_text: str
+
+    @classmethod
+    def of_text(cls, g: Guide) -> "GuideTextOut":
+        return cls(**GuideOut.of(g).model_dump(), body_text=g.body_text)
+
+
+class GuidePatch(BaseModel):
+    title: str | None = Field(default=None, max_length=MAX_TITLE_CHARS)
+    is_global: bool | None = None
+
+
+class GuideFileIn(BaseModel):
+    file: FileIn
+
+
+class GuideSourcesIn(BaseModel):
+    source_ids: list[int] = Field(max_length=1000)
+
+
+class RevisionOut(BaseModel):
+    id: int
+    filename: str
+    body_text: str
+    chars: int
+    valid_from: str
+    replaced_by: str | None
+    replaced_at: str
+
+    @classmethod
+    def of(cls, r: GuideRevision) -> "RevisionOut":
+        return cls(
+            id=r.id,
+            filename=r.filename,
+            body_text=r.body_text,
+            chars=len(r.body_text),
+            valid_from=r.valid_from,
+            replaced_by=r.replaced_by,
+            replaced_at=r.replaced_at,
+        )
 
 
 @router.get("/guides", response_model=list[GuideOut])
@@ -40,7 +80,63 @@ def create_guide(
     guide = service.create_guide(
         admin.id, body.title, UploadedFile(body.file.filename, body.file.content_base64)
     )
-    return GuideTextOut(**GuideOut.of(guide).model_dump(), body_text=guide.body_text)
+    return GuideTextOut.of_text(guide)
+
+
+@router.get("/guides/{guide_id}", response_model=GuideTextOut)
+def get_guide(
+    guide_id: int,
+    admin: AuthUser = Depends(require_admin),
+    service: DocgenService = Depends(get_docgen_service),
+) -> GuideTextOut:
+    """One guide with its current text."""
+    return GuideTextOut.of_text(service.guide(admin.id, guide_id))
+
+
+@router.patch("/guides/{guide_id}", response_model=GuideOut)
+def update_guide(
+    guide_id: int,
+    body: GuidePatch,
+    admin: AuthUser = Depends(require_admin),
+    service: DocgenService = Depends(get_docgen_service),
+) -> GuideOut:
+    """Rename, and/or make global (a default of every draft for every site) or site-specific."""
+    return GuideOut.of(service.update_guide(admin.id, guide_id, body.title, body.is_global))
+
+
+@router.put("/guides/{guide_id}/file", response_model=GuideTextOut)
+def replace_guide_file(
+    guide_id: int,
+    body: GuideFileIn,
+    admin: AuthUser = Depends(require_admin),
+    service: DocgenService = Depends(get_docgen_service),
+) -> GuideTextOut:
+    """Replace the guide's file; the old text stays in its history. Answers the new text."""
+    guide = service.replace_guide_file(
+        admin.id, guide_id, UploadedFile(body.file.filename, body.file.content_base64)
+    )
+    return GuideTextOut.of_text(guide)
+
+
+@router.get("/guides/{guide_id}/history", response_model=list[RevisionOut])
+def guide_history(
+    guide_id: int,
+    admin: AuthUser = Depends(require_admin),
+    service: DocgenService = Depends(get_docgen_service),
+) -> list[RevisionOut]:
+    """Earlier texts of the guide, newest first."""
+    return [RevisionOut.of(r) for r in service.guide_history(admin.id, guide_id)]
+
+
+@router.put("/guides/{guide_id}/sources", response_model=GuideOut)
+def set_guide_sources(
+    guide_id: int,
+    body: GuideSourcesIn,
+    admin: AuthUser = Depends(require_admin),
+    service: DocgenService = Depends(get_docgen_service),
+) -> GuideOut:
+    """The full list of sites that use this guide by default (replaces the current list)."""
+    return GuideOut.of(service.set_guide_sources(admin.id, guide_id, body.source_ids))
 
 
 @router.delete("/guides/{guide_id}", status_code=204)

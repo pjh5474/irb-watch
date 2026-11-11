@@ -10,6 +10,7 @@ from irb_watch.docgen.types import (
     Draft,
     DraftVersion,
     Guide,
+    GuideRevision,
     Inputs,
     SourceRef,
     VersionConflictError,
@@ -35,6 +36,7 @@ class FakeDocgenStore:
         self.purge_result = 0
         self.conflicts = 0
         self.reads = 0  # version contents read (to check no needless reads)
+        self.revisions: list[GuideRevision] = []
         self.selection_writes = 0
         self._ids = itertools.count(1)
 
@@ -60,8 +62,12 @@ class FakeDocgenStore:
                 ),
             )
 
-    def add_guide(self, gid, title="SNUH amendment guide", text="Sections: 1. Summary", sources=()):
-        self.guides[gid] = Guide(gid, title, f"{title}.txt", text, "2026-11-01T00:00:00+00:00")
+    def add_guide(
+        self, gid, title="SNUH amendment guide", text="Sections: 1. Summary", sources=(), is_global=False
+    ):
+        self.guides[gid] = Guide(
+            gid, title, f"{title}.txt", text, "2026-11-01T00:00:00+00:00", is_global=is_global
+        )
         for s in sources:
             self.links.add((s, gid))
 
@@ -96,7 +102,7 @@ class FakeDocgenStore:
 
     def _with_links(self, g: Guide) -> Guide:
         sids = tuple(sorted(s for s, gid in self.links if gid == g.id))
-        return Guide(g.id, g.title, g.filename, g.body_text, g.created_at, g.archived_at, sids)
+        return replace(g, source_ids=sids)
 
     def create_guide(self, title, filename, body_text, sha256, created_by, now):
         gid = max(self.guides, default=0) + 1
@@ -114,14 +120,47 @@ class FakeDocgenStore:
         return [self._with_links(self.guides[g]) for g in guide_ids if g in self.guides]
 
     def guides_for_sources(self, source_ids):
-        ids = sorted({gid for s, gid in self.links if s in source_ids})
-        return [
-            self._with_links(self.guides[g]) for g in ids if self.guides[g].archived_at is None
-        ]
+        if not source_ids:
+            return []
+        live = [g for g in sorted(self.guides) if self.guides[g].archived_at is None]
+        global_ids = [g for g in live if self.guides[g].is_global]
+        linked = sorted({gid for s, gid in self.links if s in source_ids} - set(global_ids))
+        return [self._with_links(self.guides[g]) for g in global_ids + [g for g in linked if g in live]]
+
+    def list_sources(self):
+        return sorted((row[0] for row in self.sources.values()), key=lambda s: s.name)
+
+    def update_guide(self, guide_id, title, is_global):
+        g = self.guides[guide_id]
+        self.guides[guide_id] = replace(
+            g,
+            title=g.title if title is None else title,
+            is_global=g.is_global if is_global is None else is_global,
+        )
+
+    def replace_guide_text(self, guide, filename, body_text, sha256, by, now):
+        g = self.guides[guide.id]
+        self.revisions.append(
+            GuideRevision(
+                len(self.revisions) + 1,
+                g.id,
+                g.filename,
+                g.body_text,
+                g.text_updated_at or g.created_at,
+                by,
+                now.isoformat(),
+            )
+        )
+        self.guides[guide.id] = replace(
+            g, filename=filename, body_text=body_text, text_updated_at=now.isoformat()
+        )
+
+    def list_guide_revisions(self, guide_id):
+        return [r for r in reversed(self.revisions) if r.guide_id == guide_id]
 
     def archive_guide(self, guide_id, now):
         g = self.guides[guide_id]
-        self.guides[guide_id] = Guide(g.id, g.title, g.filename, g.body_text, g.created_at, now.isoformat())
+        self.guides[guide_id] = replace(g, archived_at=now.isoformat())
         self.links = {(s, gid) for s, gid in self.links if gid != guide_id}
 
     def link_guide(self, source_id, guide_id, now):

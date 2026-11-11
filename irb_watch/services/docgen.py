@@ -35,6 +35,7 @@ from irb_watch.docgen.types import (
     DraftWriter,
     ExtraGuide,
     Guide,
+    GuideRevision,
     Inputs,
     NewDraft,
     SourceRef,
@@ -691,6 +692,8 @@ class DocgenService:
         guide = self._guide(guide_id)
         if guide.archived_at is not None:
             raise ConflictError("this guide is archived; upload it again to use it")
+        if guide.is_global:
+            raise ConflictError("this guide is global and applies to every site already")
         if source_id in guide.source_ids:
             return
         self._store.link_guide(source_id, guide_id, self._clock())
@@ -702,6 +705,109 @@ class DocgenService:
             payload={"guide_id": guide_id},
             source_id=source_id,
         )
+
+    def guide(self, admin_id: str, guide_id: int) -> Guide:
+        self._admin(admin_id)
+        return self._guide(guide_id)
+
+    def update_guide(
+        self, admin_id: str, guide_id: int, title: str | None, is_global: bool | None
+    ) -> Guide:
+        """Rename a guide and/or make it global (a default of every draft for every source) or
+        site-specific again. Its source links are kept either way (unused while global)."""
+        self._admin(admin_id)
+        guide = self._guide(guide_id)
+        if guide.archived_at is not None:
+            raise ConflictError("this guide is archived; upload it again to use it")
+        clean = None
+        if title is not None:
+            clean = title.strip()
+            if not clean or len(clean) > MAX_TITLE_CHARS:
+                raise ValidationError(f"the title must be 1 to {MAX_TITLE_CHARS} characters")
+            if clean == guide.title:
+                clean = None
+        flag = None if is_global is None or is_global == guide.is_global else is_global
+        if clean is None and flag is None:
+            return guide
+        self._store.update_guide(guide_id, clean, flag)
+        self._audit.record(
+            "admin",
+            "docgen.guide_updated",
+            admin_id,
+            title=clean or guide.title,
+            payload={
+                "guide_id": guide_id,
+                **({"old_title": guide.title} if clean is not None else {}),
+                **({"is_global": flag} if flag is not None else {}),
+            },
+        )
+        return self._guide(guide_id)
+
+    def replace_guide_file(self, admin_id: str, guide_id: int, upload: UploadedFile) -> Guide:
+        """New text for a guide; the old text is kept in its history. Links and the global flag
+        stay; drafts use the new text from their next AI call."""
+        self._admin(admin_id)
+        guide = self._guide(guide_id)
+        if guide.archived_at is not None:
+            raise ConflictError("this guide is archived; upload it again to use it")
+        name, text, sha = read_guide_file(upload)
+        if text == guide.body_text:
+            # The same file again (a double click, a retry): history rows cannot be removed, so
+            # nothing is written; the admin is told why.
+            raise ConflictError("this file has the same text as the guide's current text; nothing changed")
+        try:
+            self._store.replace_guide_text(guide, name, text, sha, admin_id, self._clock())
+        except VersionConflictError as exc:
+            raise ConflictError(
+                "the guide's file was replaced by someone else at the same moment; reload and try again"
+            ) from exc
+        self._audit.record(
+            "admin",
+            "docgen.guide_replaced",
+            admin_id,
+            title=guide.title,
+            payload={"guide_id": guide_id, "filename": name, "old_filename": guide.filename, "chars": len(text)},
+        )
+        return self._guide(guide_id)
+
+    def guide_history(self, admin_id: str, guide_id: int) -> list[GuideRevision]:
+        self._admin(admin_id)
+        self._guide(guide_id)
+        return self._store.list_guide_revisions(guide_id)
+
+    def set_guide_sources(self, admin_id: str, guide_id: int, source_ids: list[int]) -> Guide:
+        """The full list of sources that use this guide by default (added and removed in one
+        call, one audit entry). Refused for a global or archived guide."""
+        self._admin(admin_id)
+        guide = self._guide(guide_id)
+        if guide.archived_at is not None:
+            raise ConflictError("this guide is archived; upload it again to use it")
+        if guide.is_global:
+            raise ConflictError("this guide is global and applies to every site; make it site-specific first")
+        known = {s.id for s in self._store.list_sources()}
+        wanted = set(source_ids)
+        unknown = sorted(wanted - known)
+        if unknown:
+            raise NotFoundError(f"source {unknown[0]} not found")
+        current = set(guide.source_ids)
+        added, removed = sorted(wanted - current), sorted(current - wanted)
+        if not added and not removed:
+            return guide
+        # Written first, fail closed (as for study members): no entry, no change. The links are
+        # separate writes; if one fails part-way, the entry already names every intended change.
+        self._audit.record_required(
+            "admin",
+            "docgen.guide_sources_set",
+            admin_id,
+            title=guide.title,
+            payload={"guide_id": guide_id, "added": added, "removed": removed},
+        )
+        now = self._clock()
+        for sid in added:
+            self._store.link_guide(sid, guide_id, now)
+        for sid in removed:
+            self._store.unlink_guide(sid, guide_id)
+        return self._guide(guide_id)
 
     def unlink_guide(self, admin_id: str, source_id: int, guide_id: int) -> None:
         self._admin(admin_id)
