@@ -201,10 +201,12 @@ def test_upload_versions_by_name_and_reads_text():
     step = min(store.steps([pipeline.id]), key=lambda s: s.position)
     doc, v1 = service.upload("u1", pipeline.id, step.id, "연구계획서", "protocol v1.docx", docx_bytes("Protocol one"))
     assert v1.version_no == 1 and v1.has_text and store.texts[v1.id].startswith("Protocol one")
-    doc2, v2 = service.upload("u1", pipeline.id, step.id, " 연구계획서 ", "protocol v2.docx", docx_bytes("Protocol two"))
+    # The same bytes twice: a DOCX built again carries a new timestamp and would not be equal.
+    two = docx_bytes("Protocol two")
+    doc2, v2 = service.upload("u1", pipeline.id, step.id, " 연구계획서 ", "protocol v2.docx", two)
     assert doc2.id == doc.id and v2.version_no == 2
     with pytest.raises(ConflictError, match="same as version 2"):
-        service.upload("u1", pipeline.id, step.id, "연구계획서", "again.docx", docx_bytes("Protocol two"))
+        service.upload("u1", pipeline.id, step.id, "연구계획서", "again.docx", two)
     assert len(files.stored) == 2
     assert all(path.startswith(f"p{pipeline.id}/s{step.id}/") for path in files.stored)
 

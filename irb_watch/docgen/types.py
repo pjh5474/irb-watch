@@ -85,6 +85,63 @@ class DocRef:
     compare: bool = True
 
 
+@dataclass(frozen=True)
+class StepFileRef:
+    """One of the user's own pipeline step files a draft is written from: a named step
+    document at one version."""
+
+    document_id: int
+    version_no: int
+    name: str
+    step_id: int
+    step_name: str = ""
+
+    def to_json(self) -> dict:
+        return {
+            "document_id": self.document_id, "version_no": self.version_no, "name": self.name,
+            "step_id": self.step_id, "step_name": self.step_name,
+        }
+
+
+def step_file_from_json(d: dict) -> StepFileRef:
+    return StepFileRef(
+        int(d["document_id"]), int(d["version_no"]), d.get("name") or "",
+        int(d["step_id"]), d.get("step_name") or "",
+    )
+
+
+@dataclass(frozen=True)
+class StepFile:
+    ref: StepFileRef
+    filename: str
+    text: str  # the stored text of that version (never empty: files without text are refused)
+
+
+@dataclass(frozen=True)
+class StepContext:
+    """What a pipeline step adds to a draft made in it. Built by the pipeline side
+    (StepReader), which also checks that the step is the user's own and live."""
+
+    step_id: int
+    step_name: str
+    hospital_id: int
+    files: tuple[StepFile, ...] = ()
+    instructions: str = ""  # the step type's added AI instructions (admin-written)
+    guide_ids: tuple[int, ...] = ()  # the step type's default guides
+    form_template_id: int | None = None  # the step type's default form
+    allow_board_documents: bool = True
+
+
+class StepReader(Protocol):
+    def context(
+        self, user_id: str, step_id: int, files: list[tuple[int, int | None]]
+    ) -> StepContext:
+        """files: (step document id, version number or None for the newest). Raises
+        NotFoundError for a step or file that is not the user's own and live, and
+        ValidationError for a file outside the step's rules or without readable text."""
+        ...
+
+
 def ref_to_json(r: DocRef) -> dict:
     return {
         "document_id": r.document_id,
@@ -129,14 +186,18 @@ class Inputs:
     guide_ids: tuple[int, ...]
     extra_guides: tuple[ExtraGuide, ...]
     ai_override_source_ids: tuple[int, ...]
+    step_files: tuple[StepFileRef, ...] = ()  # the user's own step files (pipeline drafts)
 
     def to_json(self) -> dict:
-        return {
+        out = {
             "documents": [ref_to_json(r) for r in self.document_refs],
             "guide_ids": list(self.guide_ids),
             "extra_guides": [e.filename for e in self.extra_guides],
             "ai_override_source_ids": list(self.ai_override_source_ids),
         }
+        if self.step_files:
+            out["step_files"] = [f.to_json() for f in self.step_files]
+        return out
 
 
 FIELD_KINDS = ("text", "choice")
@@ -264,6 +325,8 @@ class Draft:
     created_at: str
     updated_at: str
     template: DraftTemplate | None = None  # None = a Markdown draft
+    pipeline_step_id: int | None = None  # made in this pipeline step (None: standalone)
+    step_files: tuple[StepFileRef, ...] = ()  # the user's own step files it is written from
 
 
 @dataclass(frozen=True)
@@ -289,6 +352,8 @@ class NewDraft:
     extra_guides: tuple[ExtraGuide, ...] = ()
     ai_override_source_ids: tuple[int, ...] = field(default_factory=tuple)
     template: DraftTemplate | None = None
+    pipeline_step_id: int | None = None
+    step_files: tuple[StepFileRef, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -397,6 +462,10 @@ class DocgenStore(Protocol):
     def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft: ...
     def get_draft(self, draft_id: str) -> Draft | None: ...
     def list_drafts(self, user_id: str, limit: int) -> list[Draft]: ...
+    def drafts_of_steps(self, user_id: str, step_ids: list[int]) -> list[Draft]:
+        """This user's drafts made in these pipeline steps, newest first (at most 200)."""
+        ...
+
     def list_versions(self, draft_id: str) -> list[DraftVersion]: ...
     def add_version(
         self,
@@ -420,7 +489,8 @@ class DocgenStore(Protocol):
         ...
 
     def purge_before(self, cutoff: datetime) -> tuple[int, list[str]]:
-        """Delete drafts unchanged since cutoff. Returns how many, and the storage paths of the
+        """Delete standalone drafts unchanged since cutoff (a pipeline step's drafts stay; they
+        go with their step). Returns how many, and the storage paths of the
         one-off form files of exactly those drafts (to delete them too)."""
         ...
 

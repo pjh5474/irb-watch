@@ -10,7 +10,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 
-from irb_watch.api.deps import current_user, get_docgen_service
+from irb_watch.api.deps import (
+    current_user,
+    get_docgen_service,
+    get_draft_job_service,
+    get_pipeline_service,
+)
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.docgen.types import (
     DocRef,
@@ -29,6 +34,8 @@ from irb_watch.services.docgen import (
     InputChange,
     UploadedFile,
 )
+from irb_watch.services.draft_jobs import DraftJobService, Job
+from irb_watch.services.pipelines import PipelineService
 
 router = APIRouter(prefix="/docgen", tags=["docgen"])
 
@@ -160,6 +167,35 @@ class TemplateOut(BaseModel):
         )
 
 
+class JobOut(BaseModel):
+    """A background draft or revision job. done: draft_id is the draft to open. failed: error
+    is the reason, written for the user."""
+
+    id: str
+    kind: str  # draft | revision
+    status: str  # queued | running | done | failed
+    error: str | None = None
+    draft_id: str | None = None
+    pipeline_step_id: int | None = None
+    created_at: str
+    finished_at: str | None = None
+
+    @classmethod
+    def of(cls, j: Job) -> "JobOut":
+        return cls(
+            id=j.id, kind=j.kind, status=j.status, error=j.error, draft_id=j.draft_id,
+            pipeline_step_id=j.pipeline_step_id, created_at=j.created_at, finished_at=j.finished_at,
+        )
+
+
+class StepFileOut(BaseModel):
+    document_id: int
+    version_no: int
+    name: str
+    step_id: int
+    step_name: str
+
+
 class DraftOut(BaseModel):
     id: str
     title: str
@@ -171,6 +207,8 @@ class DraftOut(BaseModel):
     created_at: str
     updated_at: str
     template: DraftTemplateOut | None = None  # None = a Markdown draft
+    pipeline_step_id: int | None = None  # made in this pipeline step
+    step_files: list[StepFileOut] = Field(default_factory=list)  # the user's own files it uses
 
     @classmethod
     def of(cls, d: Draft) -> "DraftOut":
@@ -185,6 +223,8 @@ class DraftOut(BaseModel):
             created_at=d.created_at,
             updated_at=d.updated_at,
             template=DraftTemplateOut.of(d.template) if d.template else None,
+            pipeline_step_id=d.pipeline_step_id,
+            step_files=[StepFileOut(**f.to_json()) for f in d.step_files],
         )
 
 
@@ -266,6 +306,20 @@ class DraftIn(BaseModel):
     template_file: FileIn | None = None
 
 
+class StepFileIn(BaseModel):
+    document_id: int  # a step document of the user's pipeline
+    version_no: int | None = None  # None = the newest version
+
+
+class StepDraftIn(DraftIn):
+    """A draft made in a pipeline step: the user's own step files (named in the dialog, so
+    starting is the consent to send them to the AI service) and, when the step's type allows,
+    hospital board documents."""
+
+    documents: list[DocChoiceIn] = Field(default_factory=list, max_length=50)
+    step_files: list[StepFileIn] = Field(default_factory=list, max_length=50)
+
+
 class MarkdownIn(BaseModel):
     markdown: str = Field(default="", max_length=500_000)
     # The version the edit started from; a newer one on the server answers 409.
@@ -319,16 +373,21 @@ def default_guides(
     return [GuideOut.of(g) for g in service.default_guides(user.id, source_id)]
 
 
-@router.post("/drafts", status_code=201, response_model=DraftDetailOut)
+@router.post("/drafts", status_code=202, response_model=JobOut)
 def create_draft(
     body: DraftIn,
     user: AuthUser = Depends(current_user),
     service: DocgenService = Depends(get_docgen_service),
-) -> DraftDetailOut:
-    """Writes the first draft with the AI (takes up to a few minutes). 409 names any AI-off
-    source that was not ticked."""
-    return DraftDetailOut.of(
-        service.create_draft(
+    jobs: DraftJobService = Depends(get_draft_job_service),
+) -> JobOut:
+    """Checks the request and starts a background job that writes the first draft with the AI
+    (up to a few minutes). Refusals are answered at once (409 names any AI-off source that was
+    not ticked); afterwards poll GET /docgen/jobs/{id}: `done` carries the new draft's id,
+    `failed` the reason."""
+    job = jobs.start(
+        user.id,
+        "draft",
+        lambda: service.prepare_draft(
             user.id,
             [d.choice() for d in body.documents],
             body.guide_ids,
@@ -339,8 +398,76 @@ def create_draft(
             UploadedFile(body.template_file.filename, body.template_file.content_base64)
             if body.template_file
             else None,
-        )
+        ),
     )
+    return JobOut.of(job)
+
+
+@router.post("/steps/{step_id}/drafts", status_code=202, response_model=JobOut)
+def create_step_draft(
+    step_id: int,
+    body: StepDraftIn,
+    user: AuthUser = Depends(current_user),
+    service: DocgenService = Depends(get_docgen_service),
+    jobs: DraftJobService = Depends(get_draft_job_service),
+    pipelines: PipelineService = Depends(get_pipeline_service),
+) -> JobOut:
+    """A draft for one step of the user's own IRB pipeline, as a background job (one open job
+    per step). It is written from the chosen step files and board documents with the step
+    type's instructions, guides and form."""
+    job = jobs.start(
+        user.id,
+        "draft",
+        lambda: service.prepare_draft(
+            user.id,
+            [d.choice() for d in body.documents],
+            body.guide_ids,
+            [UploadedFile(f.filename, f.content_base64) for f in body.extra_guides],
+            body.instruction,
+            body.ai_override_source_ids,
+            body.template_id,
+            UploadedFile(body.template_file.filename, body.template_file.content_base64)
+            if body.template_file
+            else None,
+            step_id=step_id,
+            step_files=[(f.document_id, f.version_no) for f in body.step_files],
+        ),
+        step_id=step_id,
+        owns=lambda: pipelines.check_own_step(user.id, step_id),
+    )
+    pipelines.draft_started(user.id, step_id, "draft", job.id)
+    return JobOut.of(job)
+
+
+@router.get("/pipelines/{pipeline_id}/drafts", response_model=list[DraftOut])
+def pipeline_drafts(
+    pipeline_id: int,
+    user: AuthUser = Depends(current_user),
+    service: DocgenService = Depends(get_docgen_service),
+    pipelines: PipelineService = Depends(get_pipeline_service),
+) -> list[DraftOut]:
+    """The drafts made in the steps of the user's own pipeline, newest first (each names its
+    step in pipeline_step_id)."""
+    step_ids = pipelines.step_ids(user.id, pipeline_id)
+    return [DraftOut.of(d) for d in service.step_drafts(user.id, step_ids)]
+
+
+@router.get("/jobs", response_model=list[JobOut])
+def list_jobs(
+    user: AuthUser = Depends(current_user),
+    jobs: DraftJobService = Depends(get_draft_job_service),
+) -> list[JobOut]:
+    """The user's open draft jobs, and those that failed in the last 24 hours."""
+    return [JobOut.of(j) for j in jobs.list(user.id)]
+
+
+@router.get("/jobs/{job_id}", response_model=JobOut)
+def get_job(
+    job_id: UUID,
+    user: AuthUser = Depends(current_user),
+    jobs: DraftJobService = Depends(get_draft_job_service),
+) -> JobOut:
+    return JobOut.of(jobs.get(user.id, str(job_id)))
 
 
 @router.get("/templates", response_model=list[TemplateOut])
@@ -397,15 +524,17 @@ def save_edit(
     )
 
 
-@router.post("/drafts/{draft_id}/revise", response_model=VersionOut)
+@router.post("/drafts/{draft_id}/revise", status_code=202, response_model=JobOut)
 def revise(
     draft_id: UUID,
     body: ReviseIn,
     user: AuthUser = Depends(current_user),
     service: DocgenService = Depends(get_docgen_service),
-) -> VersionOut:
-    """Asks the AI to change the newest version as instructed; saves the result as a new one.
-    With `inputs`, the revision reads those documents and guides, and they become the draft's."""
+    jobs: DraftJobService = Depends(get_draft_job_service),
+) -> JobOut:
+    """Checks the request and starts a background job in which the AI changes the newest
+    version as instructed; the result is saved as a new version. With `inputs`, the revision
+    reads those documents and guides, and they become the draft's. Poll GET /docgen/jobs/{id}."""
     change = None
     if body.inputs is not None:
         change = InputChange(
@@ -414,11 +543,16 @@ def revise(
             body.inputs.keep_extra_guides,
             [UploadedFile(f.filename, f.content_base64) for f in body.inputs.extra_guides],
         )
-    return VersionOut.of(
-        service.revise(
+    job = jobs.start(
+        user.id,
+        "revision",
+        lambda: service.prepare_revision(
             user.id, str(draft_id), body.instruction, body.ai_override_source_ids, change
-        )
+        ),
+        draft_id=str(draft_id),
+        owns=lambda: service.check_own_draft(user.id, str(draft_id)),
     )
+    return JobOut.of(job)
 
 
 @router.post("/drafts/{draft_id}/export")

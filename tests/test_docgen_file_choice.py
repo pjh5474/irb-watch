@@ -6,13 +6,19 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_docgen_service, get_user_store, get_verifier
+from irb_watch.api.deps import (
+    get_docgen_service,
+    get_draft_job_service,
+    get_user_store,
+    get_verifier,
+)
 from irb_watch.core.state import FileContent, VersionContent
 from irb_watch.main import app
 from irb_watch.services.docgen import DocChoice, DocgenService, InputChange, UploadedFile
 from irb_watch.services.errors import ConflictError, NotFoundError, ValidationError
 from tests.fakes import FakeAudit, FakeStore
 from tests.fakes_docgen import NOW, FakeDocgenStore, FakeWriter
+from tests.fakes_jobs import finished_draft, inline_jobs
 from tests.test_admin_users_api import FakeVerifier
 
 PUBLIC, OFF = 1, 3
@@ -239,6 +245,8 @@ def client(env):
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: service._users
     app.dependency_overrides[get_docgen_service] = lambda: service
+    jobs = inline_jobs()
+    app.dependency_overrides[get_draft_job_service] = lambda: jobs
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -255,8 +263,7 @@ def test_the_api_takes_file_choices_and_new_inputs_on_revise(client, env):
         headers=h,
         json={"documents": [{"document_id": 10, "files": ["consent.hwp"], "compare_with": 1}]},
     )
-    assert res.status_code == 201, res.text
-    body = res.json()
+    body = finished_draft(client, res, h)
     doc = body["draft"]["documents"][0]
     assert doc["files"] == ["consent.hwp"] and doc["compare_with"] == 1 and doc["page_text"] is True
     assert body["versions"][0]["inputs"]["documents"][0]["files"] == ["consent.hwp"]
@@ -270,8 +277,8 @@ def test_the_api_takes_file_choices_and_new_inputs_on_revise(client, env):
             "inputs": {"documents": [{"document_id": 10, "compare": False}], "guide_ids": None},
         },
     )
-    assert res.status_code == 200, res.text
-    assert res.json()["inputs"]["documents"][0]["files"] is None
+    revised = finished_draft(client, res, h)["versions"][-1]
+    assert revised["inputs"]["documents"][0]["files"] is None
     assert "asked for no comparison" in writer.calls[-1][1]
 
     res = client.post(

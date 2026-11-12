@@ -26,6 +26,7 @@ from irb_watch.docgen.types import (
     field_to_json,
     ref_from_json,
     ref_to_json,
+    step_file_from_json,
 )
 
 log = logging.getLogger(__name__)
@@ -98,6 +99,8 @@ def _draft(row: dict) -> Draft:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         template=draft_template_from_json(row["template"]) if row.get("template") else None,
+        pipeline_step_id=row.get("pipeline_step_id"),
+        step_files=tuple(step_file_from_json(f) for f in row.get("step_files") or []),
     )
 
 
@@ -549,7 +552,8 @@ class SupabaseDocgenStore:
 
     def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft:
         inputs = Inputs(
-            new.document_refs, new.guide_ids, new.extra_guides, new.ai_override_source_ids
+            new.document_refs, new.guide_ids, new.extra_guides, new.ai_override_source_ids,
+            new.step_files,
         )
         rows = (
             self._c.table("drafts")
@@ -559,6 +563,8 @@ class SupabaseDocgenStore:
                     "title": new.title,
                     "instruction": new.instruction,
                     **_selection(inputs, now),
+                    "pipeline_step_id": new.pipeline_step_id,
+                    "step_files": [f.to_json() for f in new.step_files],
                     "template": draft_template_to_json(new.template) if new.template else None,
                     "created_at": now.isoformat(),
                 }
@@ -598,6 +604,21 @@ class SupabaseDocgenStore:
             .eq("user_id", user_id)
             .order("updated_at", desc=True)
             .limit(limit)
+            .execute()
+            .data
+        )
+        return [_draft(r) for r in rows]
+
+    def drafts_of_steps(self, user_id: str, step_ids: list[int]) -> list[Draft]:
+        if not step_ids:
+            return []
+        rows = (
+            self._c.table("drafts")
+            .select("*")
+            .eq("user_id", user_id)
+            .in_("pipeline_step_id", step_ids)
+            .order("created_at", desc=True)
+            .limit(200)
             .execute()
             .data
         )
@@ -694,7 +715,12 @@ class SupabaseDocgenStore:
 
     def purge_before(self, cutoff: datetime) -> tuple[int, list[str]]:
         # The delete returns the deleted rows, so the files are those of exactly these drafts.
-        rows = self._c.table("drafts").delete().lt("updated_at", cutoff.isoformat()).execute().data or []
+        # A pipeline step's drafts are kept: they go with their step (owner, 2026-11-11).
+        rows = (
+            self._c.table("drafts").delete().lt("updated_at", cutoff.isoformat())
+            .is_("pipeline_step_id", "null").execute().data
+            or []
+        )
         paths = []
         for r in rows:
             t = r.get("template") or {}

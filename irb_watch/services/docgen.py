@@ -47,6 +47,8 @@ from irb_watch.docgen.types import (
     Inputs,
     NewDraft,
     SourceRef,
+    StepContext,
+    StepReader,
     TemplateFiles,
     VersionConflictError,
     picked_list,
@@ -249,8 +251,12 @@ def read_guide_file(upload: UploadedFile) -> tuple[str, str, str]:
     return name, text, sha
 
 
-def _payload(refs, used, guides, extra, override, form: DraftTemplate | None = None) -> dict:
-    """The audit entry of an AI call: what was sent (ids and file names, never text)."""
+def _payload(
+    refs, used, guides, extra, override, form: DraftTemplate | None = None,
+    step: StepContext | None = None,
+) -> dict:
+    """The audit entry of an AI call: what was sent (ids and file names, never text). For a
+    pipeline draft it names each of the user's own files that went to the AI service."""
     out = {
         "documents": [
             {
@@ -270,6 +276,9 @@ def _payload(refs, used, guides, extra, override, form: DraftTemplate | None = N
     }
     if form is not None:
         out["template"] = {"template_id": form.template_id, "filename": form.filename}
+    if step is not None:
+        out["pipeline_step_id"] = step.step_id
+        out["step_files"] = [{**f.ref.to_json(), "filename": f.filename} for f in step.files]
     return out
 
 
@@ -292,7 +301,9 @@ class DocgenService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         extra_instructions: Callable[[], str] = lambda: "",
         files: TemplateFiles | None = None,
+        steps: StepReader | None = None,
     ) -> None:
+        self._steps = steps  # the pipeline side: a step's files and AI settings (None: off)
         self._users = users
         self._store = store
         self._writer = writer
@@ -428,11 +439,17 @@ class DocgenService:
         guide_ids: list[int] | None,
         is_admin: bool,
         already: tuple[int, ...] = (),
+        also: tuple[int, ...] = (),
     ) -> list[Guide]:
         """By default all of the hospitals' guides. A user may leave some out; only an admin may
         add a library guide that is not linked to these hospitals. `already`: guides the draft
         uses now, which may stay even if they were unlinked or archived since."""
         defaults = {g.id: g for g in self._store.guides_for_hospitals(sorted(hospitals))}
+        # `also`: the default guides of the pipeline step's type (live ones), after the others.
+        missing = [g for g in also if g not in defaults]
+        for g in self._store.get_guides(missing) if missing else []:
+            if g.archived_at is None:
+                defaults[g.id] = g
         if guide_ids is None:
             return list(defaults.values())
         wanted = list(dict.fromkeys(guide_ids))
@@ -453,10 +470,12 @@ class DocgenService:
             log.warning("could not read the admins' docs instructions: %s", type(exc).__name__)
             return ""
 
-    def _write(self, docs, guides, extra, request, current=None, admin_text=None):
+    def _write(self, docs, guides, extra, request, current=None, admin_text=None, step=None):
         assert self._writer is not None
         text_of_admins = self._read_extra() if admin_text is None else admin_text
-        instructions, text = build_input(docs, guides, extra, request, current, text_of_admins)
+        instructions, text = build_input(
+            docs, guides, extra, request, current, text_of_admins, step=step
+        )
         try:
             return self._writer.write(instructions, text)
         except Exception as exc:
@@ -465,11 +484,14 @@ class DocgenService:
                 f"the AI could not write the draft ({type(exc).__name__}); please try again"
             ) from exc
 
-    def _write_fields(self, docs, guides, extra, request, form: DraftTemplate, current=None):
+    def _write_fields(
+        self, docs, guides, extra, request, form: DraftTemplate, current=None, step=None
+    ):
         """A template draft: one answer per field, checked against the form."""
         assert self._writer is not None
         instructions, text = build_input(
-            docs, guides, extra, request, admin_text=self._read_extra(), form=form, current_answers=current
+            docs, guides, extra, request, admin_text=self._read_extra(), form=form,
+            current_answers=current, step=step,
         )
         try:
             written = self._writer.write_fields(instructions, text)
@@ -492,7 +514,7 @@ class DocgenService:
         return found
 
     def _draft_template(
-        self, template_id: int, hospitals: set[int], is_admin: bool
+        self, template_id: int, hospitals: set[int], is_admin: bool, also: int | None = None
     ) -> DraftTemplate:
         """A library template the user may fill for documents from these hospitals: ready, not
         archived, and global or offered by one of the hospitals (an admin may use any ready one)."""
@@ -500,6 +522,7 @@ class DocgenService:
         t = self._store.get_template(template_id)
         offered = t is not None and t.archived_at is None and (
             is_admin or t.is_global or bool(set(t.hospital_ids) & hospitals)
+            or template_id == also  # the default form of the pipeline step's type
         )
         if t is None or not offered or (t.status != "ready" and not is_admin):
             raise NotFoundError(f"form template {template_id} not found")
@@ -530,6 +553,11 @@ class DocgenService:
         if draft is None or draft.user_id != user_id:
             raise NotFoundError("draft not found")
         return draft
+
+    def check_own_draft(self, user_id: str, draft_id: str) -> None:
+        """Raises unless the draft is the active user's own (before a job row names it)."""
+        self._profile(user_id)
+        self._own(user_id, draft_id)
 
     def preview(self, admin_id: str, extra: str, document_id: int | None, request: str) -> str:
         """Admin test run with UNSAVED instructions on one document (its newest version, with
@@ -599,14 +627,60 @@ class DocgenService:
         ai_override_source_ids: list[int],
         template_id: int | None = None,
         template_file: UploadedFile | None = None,
+        step_id: int | None = None,
+        step_files: list[tuple[int, int | None]] | None = None,
     ) -> DraftDetail:
-        """template_id (a library form) or template_file (a one-off DOCX for this draft): the
-        draft is then one answer per field of that form, fixed for the draft's life."""
+        """Checks, counts and writes in one call (tests and scripts). The API runs the two
+        halves apart: prepare_draft in the request, its result as a background job."""
+        return self.prepare_draft(
+            user_id, documents, guide_ids, extra_files, instruction, ai_override_source_ids,
+            template_id, template_file, step_id, step_files,
+        )()
+
+    def prepare_draft(
+        self,
+        user_id: str,
+        documents: list[DocChoice],
+        guide_ids: list[int] | None,
+        extra_files: list[UploadedFile],
+        instruction: str,
+        ai_override_source_ids: list[int],
+        template_id: int | None = None,
+        template_file: UploadedFile | None = None,
+        step_id: int | None = None,
+        step_files: list[tuple[int, int | None]] | None = None,
+    ) -> Callable[[], DraftDetail]:
+        """Everything a draft can be refused for, the daily limit and the audit entry that
+        counts the call. Returns the work that calls the model and saves the draft.
+
+        template_id (a library form) or template_file (a one-off DOCX for this draft): the
+        draft is then one answer per field of that form, fixed for the draft's life.
+        step_id: the pipeline step the draft is made in; step_files: the user's own step
+        documents it is written from, as (document id, version or None for the newest). Board
+        documents are then optional."""
         profile = self._profile(user_id)
         is_admin = profile.role == "admin"
         if template_id is not None and template_file is not None:
             raise ValidationError("choose a form from the list or attach one, not both")
-        if not documents:
+        step: StepContext | None = None
+        if step_id is not None:
+            if self._steps is None:
+                raise UnavailableError("pipeline drafts are not set up on this server")
+            if template_file is not None:
+                # A step's drafts are deleted with the step (database cascade), which would
+                # leave a one-off form file behind; the step type's form or a library form is
+                # used instead.
+                raise ValidationError(
+                    "a pipeline draft fills a form from the list, not an attached file"
+                )
+            step = self._steps.context(user_id, step_id, list(step_files or []))
+            if documents and not step.allow_board_documents:
+                raise ValidationError("this step's type does not use hospital board documents")
+            if not documents and not step.files:
+                raise ValidationError("choose at least one file or document")
+        elif step_files:
+            raise ValidationError("step files need a pipeline step")
+        elif not documents:
             raise ValidationError("choose at least one document")
         if len(documents) > MAX_DOCUMENTS:
             raise ValidationError(f"choose at most {MAX_DOCUMENTS} documents")
@@ -624,8 +698,18 @@ class DocgenService:
         override = set(ai_override_source_ids) & used
         self._ai_check(sources, used, override)
         hospitals = self._hospitals(used, sources)
-        guides = self._guides(hospitals, guide_ids, is_admin)
-        form = self._draft_template(template_id, hospitals, is_admin) if template_id is not None else None
+        if step is not None:
+            hospitals.add(step.hospital_id)  # the pipeline's hospital, even with no board document
+        guides = self._guides(
+            hospitals, guide_ids, is_admin, also=step.guide_ids if step is not None else ()
+        )
+        form = (
+            self._draft_template(
+                template_id, hospitals, is_admin, also=step.form_template_id if step else None
+            )
+            if template_id is not None
+            else None
+        )
 
         # The limit is checked before the attached files are read (reading a PDF or HWP costs
         # time and memory); the log entry that counts the call comes after, just before it.
@@ -652,33 +736,46 @@ class DocgenService:
                 "user",
                 "docgen.generate",
                 user_id,
-                payload=_payload(refs, used, guides, extra, override, form),
+                payload=_payload(refs, used, guides, extra, override, form, step),
             )
-            if form is None:
-                written = self._write(docs, guides, extra, request)
-                ai_title, markdown, values = written.title, written.markdown, None
-            else:
-                ai_title, values = self._write_fields(docs, guides, extra, request, form)
-                markdown = ""
-            title = (ai_title or docs[0].title)[:MAX_TITLE_CHARS]
-            if form is not None:
-                markdown = render_markdown(title, form.fields, values)
-            new = NewDraft(
-                user_id=user_id,
-                title=title,
-                instruction=request,
-                document_refs=refs,
-                guide_ids=tuple(g.id for g in guides),
-                extra_guides=tuple(extra),
-                ai_override_source_ids=tuple(sorted(override)),
-                template=form,
-            )
-            first = DraftVersion("", 1, markdown[:MAX_MARKDOWN_CHARS], "ai", request, fields=values)
-            draft = self._store.create_draft(new, first, now)
         except Exception:
             self._drop_files(one_off)
             raise
-        return DraftDetail(draft, self._store.list_versions(draft.id), guides)
+        fallback_title = docs[0].title if docs else (step.step_name if step else "")
+        step_refs = tuple(f.ref for f in step.files) if step is not None else ()
+
+        def work() -> DraftDetail:
+            """The model call and the save. May run in a background job."""
+            try:
+                if form is None:
+                    written = self._write(docs, guides, extra, request, step=step)
+                    ai_title, markdown, values = written.title, written.markdown, None
+                else:
+                    ai_title, values = self._write_fields(docs, guides, extra, request, form, step=step)
+                    markdown = ""
+                title = (ai_title or fallback_title)[:MAX_TITLE_CHARS]
+                if form is not None:
+                    markdown = render_markdown(title, form.fields, values)
+                new = NewDraft(
+                    user_id=user_id,
+                    title=title,
+                    instruction=request,
+                    document_refs=refs,
+                    guide_ids=tuple(g.id for g in guides),
+                    extra_guides=tuple(extra),
+                    ai_override_source_ids=tuple(sorted(override)),
+                    template=form,
+                    pipeline_step_id=step.step_id if step is not None else None,
+                    step_files=step_refs,
+                )
+                first = DraftVersion("", 1, markdown[:MAX_MARKDOWN_CHARS], "ai", request, fields=values)
+                draft = self._store.create_draft(new, first, now)
+            except Exception:
+                self._drop_files(one_off)
+                raise
+            return DraftDetail(draft, self._store.list_versions(draft.id), guides)
+
+        return work
 
     def list_drafts(self, user_id: str) -> list[Draft]:
         self._profile(user_id)
@@ -756,10 +853,25 @@ class DocgenService:
         ai_override_source_ids: list[int] | None = None,
         change: InputChange | None = None,
     ) -> DraftVersion:
-        """ai_override_source_ids: AI-off sources the user ticked now (needed when an admin
+        """Checks, counts and writes in one call (tests and scripts); see prepare_revision."""
+        return self.prepare_revision(user_id, draft_id, instruction, ai_override_source_ids, change)()
+
+    def prepare_revision(
+        self,
+        user_id: str,
+        draft_id: str,
+        instruction: str,
+        ai_override_source_ids: list[int] | None = None,
+        change: InputChange | None = None,
+    ) -> Callable[[], DraftVersion]:
+        """Everything a revision can be refused for, the daily limit and the audit entry that
+        counts the call. Returns the work that calls the model and saves the new version.
+
+        ai_override_source_ids: AI-off sources the user ticked now (needed when an admin
         switched AI off for a source after the draft was made, or a new one was added).
         change: new documents and guides from the side panel; None keeps the draft's current
-        ones. Either way the inputs are saved on the new version."""
+        ones. Either way the inputs are saved on the new version. A pipeline draft reads its
+        own step files again (the versions it was written from); they cannot be changed here."""
         profile = self._profile(user_id)
         is_admin = profile.role == "admin"
         draft = self._own(user_id, draft_id)
@@ -781,7 +893,7 @@ class DocgenService:
             uploads: list[UploadedFile] = []
         else:
             choices = change.documents
-            if not choices:
+            if not choices and not draft.step_files:
                 raise ValidationError("choose at least one document")
             if len(choices) > MAX_DOCUMENTS:
                 raise ValidationError(f"choose at most {MAX_DOCUMENTS} documents")
@@ -795,6 +907,26 @@ class DocgenService:
             if len(keep) + len(uploads) > MAX_EXTRA_GUIDES:
                 raise ValidationError(f"attach at most {MAX_EXTRA_GUIDES} guide files")
 
+        # A pipeline draft: the step must still be the user's own and live, and its files are
+        # read again at the versions the draft was written from.
+        step: StepContext | None = None
+        if draft.pipeline_step_id is not None:
+            if self._steps is None:
+                raise UnavailableError("pipeline drafts are not set up on this server")
+            try:
+                step = self._steps.context(
+                    user_id, draft.pipeline_step_id,
+                    [(f.document_id, f.version_no) for f in draft.step_files],
+                )
+            except (NotFoundError, ValidationError) as exc:
+                # The draft's own files cannot be changed in a revision, so say what to do.
+                raise ConflictError(
+                    f"this draft's own files can no longer be used ({exc.message}); "
+                    "edit the draft by hand or start a new draft for the step"
+                ) from exc
+            if change is not None and choices and not step.allow_board_documents:
+                raise ValidationError("this step's type does not use hospital board documents")
+
         # Access is checked again: the user may have lost a study since the draft was made.
         sources = self._store.readable_sources(user_id, is_admin)
         docs, refs = self._load_docs(choices, sources)
@@ -804,8 +936,12 @@ class DocgenService:
         if change is None:
             guides = self._store.get_guides(list(draft.guide_ids)) if draft.guide_ids else []
         else:
+            hospitals = self._hospitals(used, sources)
+            if step is not None:
+                hospitals.add(step.hospital_id)
             guides = self._guides(
-                self._hospitals(used, sources), change.guide_ids, is_admin, draft.guide_ids
+                hospitals, change.guide_ids, is_admin, draft.guide_ids,
+                also=step.guide_ids if step is not None else (),
             )
 
         now = self._clock()
@@ -819,38 +955,58 @@ class DocgenService:
                 "draft_id": draft_id,
                 "from_version": versions[-1].version_no,
                 "inputs_changed": change is not None,
-                **_payload(refs, used, guides, extra, override, draft.template),
+                **_payload(refs, used, guides, extra, override, draft.template, step),
             },
         )
         form = draft.template
-        values = None
-        if form is None:
-            written = self._write(docs, guides, extra, request, current=versions[-1].markdown)
-            markdown = written.markdown[:MAX_MARKDOWN_CHARS]
-        else:
-            # The form never changes for a draft; the current answers go in place of the text.
-            current = versions[-1].fields or {}
-            _, values = self._write_fields(docs, guides, extra, request, form, current=current)
-            markdown = render_markdown(draft.title, form.fields, values)[:MAX_MARKDOWN_CHARS]
-        inputs = Inputs(refs, tuple(g.id for g in guides), tuple(extra), tuple(sorted(override)))
+        inputs = Inputs(
+            refs, tuple(g.id for g in guides), tuple(extra), tuple(sorted(override)),
+            tuple(f.ref for f in step.files) if step is not None else (),
+        )
         # The draft row (with the attached guides' text) is rewritten only when its selection
         # changed: new inputs from the side panel, or a newly ticked AI-off source.
         changed = change is not None or set(override) != set(draft.ai_override_source_ids)
-        try:
-            return self._store.add_version(
-                draft, markdown, "ai_revision", request, now, inputs, changed, values
-            )
-        except VersionConflictError:
-            # A hand edit was saved while the AI was writing. The revision was paid for, so it is
-            # kept as the next version rather than thrown away; the user sees both.
+
+        def work() -> DraftVersion:
+            """The model call and the save. May run in a background job, minutes after the
+            checks: the newest version is read now, so a hand edit saved while the job waited
+            is the text that gets revised (never an older one)."""
+            latest = self._latest(draft_id)[-1]
+            values = None
+            if form is None:
+                written = self._write(docs, guides, extra, request, current=latest.markdown, step=step)
+                markdown = written.markdown[:MAX_MARKDOWN_CHARS]
+            else:
+                # The form never changes for a draft; the current answers go in place of the text.
+                current = latest.fields or {}
+                _, values = self._write_fields(
+                    docs, guides, extra, request, form, current=current, step=step
+                )
+                markdown = render_markdown(draft.title, form.fields, values)[:MAX_MARKDOWN_CHARS]
             try:
                 return self._store.add_version(
                     draft, markdown, "ai_revision", request, now, inputs, changed, values
                 )
-            except VersionConflictError as exc:
-                raise ConflictError(
-                    "the draft kept changing while the AI was writing; reload it and try again"
-                ) from exc
+            except VersionConflictError:
+                # A hand edit was saved while the AI was writing. The revision was paid for, so
+                # it is kept as the next version rather than thrown away; the user sees both.
+                try:
+                    return self._store.add_version(
+                        draft, markdown, "ai_revision", request, now, inputs, changed, values
+                    )
+                except VersionConflictError as exc:
+                    raise ConflictError(
+                        "the draft kept changing while the AI was writing; reload it and try again"
+                    ) from exc
+
+        return work
+
+    def step_drafts(self, user_id: str, step_ids: list[int]) -> list[Draft]:
+        """The user's drafts made in these pipeline steps, newest first."""
+        self._profile(user_id)
+        if not step_ids:
+            return []
+        return self._store.drafts_of_steps(user_id, step_ids)
 
     def export_docx(
         self, user_id: str, draft_id: str, version_no: int | None

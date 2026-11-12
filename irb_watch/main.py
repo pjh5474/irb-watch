@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -39,20 +40,30 @@ async def lifespan(_: FastAPI):
     """Start the daily scan schedule when SCHEDULER_ENABLED=true; stop it on shutdown."""
     settings = get_settings()
     scheduler = None
+    from irb_watch.api import deps
+
+    # Draft jobs run inside this process and keep their inputs in memory: one that was open
+    # when the last run stopped cannot continue and is marked failed with a reason. This
+    # assumes ONE API process; a second one would fail the first one's jobs at its start.
+    try:
+        deps.get_draft_job_service().fail_unfinished()
+    except Exception:
+        logging.getLogger(__name__).exception("open draft jobs could not be checked at start")
     if settings.scheduler_enabled:
-        from irb_watch.api import deps
         from irb_watch.scheduler import ScanScheduler
 
         weekly = deps.get_weekly_service()
         agent_service = deps.get_agent_service()
         docgen_service = deps.get_docgen_service()
         pipeline_service = deps.get_pipeline_service()
+        job_service = deps.get_draft_job_service()
 
         def purge_old() -> None:
             # All run every time; each one logs and swallows its own failure.
             agent_service.purge_old()
             docgen_service.purge_old()
             pipeline_service.purge_old()
+            job_service.purge_old()
 
         scheduler = ScanScheduler(
             deps.get_runner(),

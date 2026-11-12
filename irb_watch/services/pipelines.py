@@ -32,6 +32,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from irb_watch.docgen.types import StepContext, StepFile, StepFileRef
 from irb_watch.parsers.errors import ParseError
 from irb_watch.parsers.formats import extract_text
 from irb_watch.services.errors import (
@@ -50,6 +51,7 @@ MAX_STEP_NAME = 100
 MAX_DOC_NAME = 200
 MAX_NOTE = 4000
 MAX_STEPS = 60
+MAX_DRAFT_FILES = 15  # the user's own files in one AI draft
 MAX_TEXT_CHARS = 2_000_000
 SUBMITTED = "submitted"
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -171,6 +173,11 @@ class PipelineStore(Protocol):
     def touch_pipeline(self, pipeline_id: int) -> None: ...
     # steps
     def steps(self, pipeline_ids: list[int]) -> list[Step]: ...
+    def get_step(self, step_id: int) -> Step | None: ...
+    def version_text(self, version_id: int) -> str | None:
+        """The text read from one uploaded version (None: no text was read)."""
+        ...
+
     def add_step(self, pipeline_id: int, values: dict) -> Step: ...
     def update_step(self, step_id: int, values: dict) -> Step: ...
     def reorder_steps(self, pipeline_id: int, step_ids: list[int]) -> None:
@@ -192,6 +199,35 @@ class PipelineStore(Protocol):
         """Ids removed before `cutoff` and the file paths of every version under them."""
         ...
     def purge_rows(self, kind: str, ids: list[int]) -> None: ...
+
+
+@dataclass(frozen=True)
+class DraftFileChoice:
+    """One of the user's own files offered for an AI draft of a step (its newest version)."""
+
+    document_id: int
+    name: str
+    step_id: int
+    step_name: str
+    version_no: int
+    filename: str
+    has_text: bool  # False: stored only; it cannot be sent to the AI
+    text_note: str | None
+    ticked: bool  # sent unless the user unticks it
+
+
+@dataclass(frozen=True)
+class DraftInputs:
+    """What the "Draft for this step" dialog starts from. Nothing here is sent anywhere."""
+
+    step_id: int
+    step_name: str
+    hospital_id: int
+    files: list[DraftFileChoice]
+    allow_board_documents: bool
+    guide_ids: tuple[int, ...]  # the step type's default guides
+    form_template_id: int | None  # the step type's default form
+    has_instructions: bool  # the step type has added AI instructions
 
 
 class PipelineFiles(Protocol):
@@ -392,6 +428,141 @@ class PipelineService:
         return PipelineDetail(
             summary, views, self._setup.statuses(include_archived=True), self._setup.step_types()
         )
+
+    # -- AI drafts of a step (phase 3) ---------------------------------------------------------
+    # The draft itself is the docs generator's (services/docgen.py); this side says which of the
+    # user's own files may be used and hands over the step type's AI settings.
+
+    def _draft_scope(self, pipeline: Pipeline, step: Step) -> tuple[StepType | None, list[Step]]:
+        """The step's type (archived ones too: its settings still apply to existing steps) and
+        the steps whose files may be used: this one, plus the earlier live ones unless the type
+        says no. A step without a type (the user's own) may use earlier steps."""
+        stype = None
+        if step.step_type_id is not None:
+            types = {t.id: t for t in self._setup.step_types(include_archived=True)}
+            stype = types.get(step.step_type_id)
+        allowed = [step]
+        if stype is None or stype.input_earlier_steps:
+            earlier = [
+                s for s in self._store.steps([pipeline.id])
+                if s.deleted_at is None and s.id != step.id and s.position < step.position
+            ]
+            allowed = sorted(earlier, key=lambda s: s.position) + [step]
+        return stype, allowed
+
+    def draft_inputs(self, user_id: str, pipeline_id: int, step_id: int) -> DraftInputs:
+        """The dialog's starting point: the newest version of every live document of this step
+        and of the earlier steps (when the type allows), ticked when it has readable text."""
+        pipeline = self._pipeline(user_id, pipeline_id)
+        step = self._step(pipeline, step_id)
+        stype, allowed = self._draft_scope(pipeline, step)
+        names = {s.id: s.name for s in allowed}
+        order = {s.id: i for i, s in enumerate(allowed)}
+        docs = [
+            d for d in self._store.documents(list(names))
+            if d.deleted_at is None and d.versions
+        ]
+        files: list[DraftFileChoice] = []
+        ticked = 0
+        # This step's files first; only as many are ticked as one draft may send.
+        for d in sorted(docs, key=lambda d: (-order[d.step_id], d.name.lower())):
+            newest = d.versions[0]
+            tick = newest.has_text and ticked < MAX_DRAFT_FILES
+            ticked += tick
+            files.append(
+                DraftFileChoice(
+                    d.id, d.name, d.step_id, names[d.step_id], newest.version_no,
+                    newest.filename, newest.has_text, newest.text_note, ticked=tick,
+                )
+            )
+        return DraftInputs(
+            step.id, step.name, pipeline.hospital_id, files,
+            allow_board_documents=stype is None or stype.input_board_documents,
+            guide_ids=tuple(stype.guide_ids) if stype else (),
+            form_template_id=stype.form_template_id if stype else None,
+            has_instructions=bool(stype and stype.instructions.strip()),
+        )
+
+    def context(self, user_id: str, step_id: int, files: list[tuple[int, int | None]]) -> StepContext:
+        """For the docs generator (docgen.types.StepReader): the step must be the user's own
+        and live; each file must be a live document of this step or an allowed earlier one, at
+        an existing version with readable text."""
+        found = self._store.get_step(step_id)
+        if found is None:
+            raise NotFoundError("step not found")
+        try:
+            pipeline = self._pipeline(user_id, found.pipeline_id)
+        except NotFoundError as exc:
+            raise NotFoundError("step not found") from exc
+        step = self._step(pipeline, step_id)
+        stype, allowed = self._draft_scope(pipeline, step)
+        wanted = list(dict.fromkeys((int(d), v) for d, v in files))
+        if len({d for d, _ in wanted}) != len(wanted):
+            raise ValidationError("a file is chosen twice")
+        if len(wanted) > MAX_DRAFT_FILES:
+            raise ValidationError(f"choose at most {MAX_DRAFT_FILES} of your files")
+        names = {s.id: s.name for s in allowed}
+        docs = {
+            d.id: d for d in self._store.documents(list(names)) if d.deleted_at is None
+        }
+        out: list[StepFile] = []
+        for document_id, version_no in wanted:
+            doc = docs.get(document_id)
+            if doc is None or not doc.versions:
+                raise NotFoundError(
+                    f"file {document_id} is not a document of this step or of a step before it"
+                )
+            version = (
+                doc.versions[0] if version_no is None
+                else next((v for v in doc.versions if v.version_no == version_no), None)
+            )
+            if version is None:
+                raise NotFoundError(f'"{doc.name}" has no version {version_no}')
+            text = self._store.version_text(version.id) if version.has_text else None
+            if not text or not text.strip():
+                reason = version.text_note or "no text could be read from it"
+                raise ValidationError(f'"{doc.name}" ({version.filename}) cannot be sent to the AI: {reason}')
+            out.append(
+                StepFile(
+                    StepFileRef(doc.id, version.version_no, doc.name, doc.step_id, names[doc.step_id]),
+                    version.filename,
+                    text,
+                )
+            )
+        return StepContext(
+            step_id=step.id,
+            step_name=step.name,
+            hospital_id=pipeline.hospital_id,
+            files=tuple(out),
+            instructions=stype.instructions if stype else "",
+            guide_ids=tuple(stype.guide_ids) if stype else (),
+            form_template_id=stype.form_template_id if stype else None,
+            allow_board_documents=stype is None or stype.input_board_documents,
+        )
+
+    def check_own_step(self, user_id: str, step_id: int) -> None:
+        """Raises "step not found" unless the step is in the active user's own pipeline
+        (before a job row names it)."""
+        step = self._store.get_step(step_id)
+        pipeline = self._store.get_pipeline(step.pipeline_id) if step is not None else None
+        self._user(user_id)
+        if pipeline is None or pipeline.user_id != user_id:
+            raise NotFoundError("step not found")
+
+    def draft_started(self, user_id: str, step_id: int, kind: str, job_id: str) -> None:
+        """The page's history shows that an AI draft (or revision) was started in a step.
+        Best effort: the job is already running and counted."""
+        try:
+            step = self._store.get_step(step_id)
+            if step is not None:
+                self._event(step.pipeline_id, step_id, user_id, f"draft.{kind}_started", {"job_id": job_id})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("draft start could not be written to the pipeline history: %s", type(exc).__name__)
+
+    def step_ids(self, user_id: str, pipeline_id: int) -> list[int]:
+        """Every step of the user's pipeline (removed ones too), for listing its drafts."""
+        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        return [s.id for s in self._store.steps([pipeline.id])]
 
     def remove(self, user_id: str, pipeline_id: int) -> Pipeline:
         self._pipeline(user_id, pipeline_id)

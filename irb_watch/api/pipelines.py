@@ -320,6 +320,48 @@ def update_step(
     return StepOut.of(service.update_step(user.id, pipeline_id, step_id, changes))
 
 
+class DraftFileOut(BaseModel):
+    document_id: int
+    name: str
+    step_id: int
+    step_name: str
+    version_no: int
+    filename: str
+    has_text: bool
+    text_note: str | None
+    ticked: bool
+
+
+class DraftInputsOut(BaseModel):
+    step_id: int
+    step_name: str
+    hospital_id: int
+    files: list[DraftFileOut]
+    allow_board_documents: bool
+    guide_ids: list[int]
+    form_template_id: int | None
+    has_instructions: bool
+
+
+@router.get("/pipelines/{pipeline_id}/steps/{step_id}/draft-inputs", response_model=DraftInputsOut)
+def draft_inputs(
+    pipeline_id: int,
+    step_id: int,
+    user: AuthUser = Depends(current_user),
+    service: Service = Depends(get_pipeline_service),
+) -> DraftInputsOut:
+    """What "Draft for this step" starts from: the user's own files of this step and the
+    earlier ones (newest versions; ticked when they have readable text) and the step type's
+    defaults. The draft itself is started with POST /docgen/steps/{step_id}/drafts."""
+    d = service.draft_inputs(user.id, pipeline_id, step_id)
+    return DraftInputsOut(
+        step_id=d.step_id, step_name=d.step_name, hospital_id=d.hospital_id,
+        files=[DraftFileOut(**vars(f)) for f in d.files],
+        allow_board_documents=d.allow_board_documents, guide_ids=list(d.guide_ids),
+        form_template_id=d.form_template_id, has_instructions=d.has_instructions,
+    )
+
+
 @router.delete("/pipelines/{pipeline_id}/steps/{step_id}", response_model=StepOut)
 def remove_step(
     pipeline_id: int,

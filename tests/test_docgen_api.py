@@ -3,12 +3,18 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_docgen_service, get_user_store, get_verifier
+from irb_watch.api.deps import (
+    get_docgen_service,
+    get_draft_job_service,
+    get_user_store,
+    get_verifier,
+)
 from irb_watch.main import app
 from irb_watch.parsers.docx import parse_docx
 from irb_watch.services.docgen import DocgenService
 from tests.fakes import FakeAudit, FakeStore
 from tests.fakes_docgen import NOW, FakeDocgenStore, FakeWriter
+from tests.fakes_jobs import finished_draft, inline_jobs
 from tests.test_admin_users_api import FakeVerifier
 
 DRAFT = "00000000-0000-0000-0000-000000000001"
@@ -35,6 +41,8 @@ def env():
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: users
     app.dependency_overrides[get_docgen_service] = service
+    jobs = inline_jobs()  # a job finishes inside the request
+    app.dependency_overrides[get_draft_job_service] = lambda: jobs
     yield TestClient(app), store, writer, audit
     app.dependency_overrides.clear()
 
@@ -91,8 +99,7 @@ def test_the_whole_flow(env):
             "instruction": "visits changed",
         },
     )
-    assert res.status_code == 201, res.text
-    body = res.json()
+    body = finished_draft(client, res, h)
     draft_id = body["draft"]["id"]
     assert body["draft"]["extra_guides"] == ["mine.txt"]
     assert body["guides"][0]["chars"] > 0
@@ -102,7 +109,10 @@ def test_the_whole_flow(env):
     res = client.put(f"/docgen/drafts/{draft_id}/markdown", headers=h, json={"markdown": edited})
     assert res.json()["version_no"] == 2
     res = client.post(f"/docgen/drafts/{draft_id}/revise", headers=h, json={"instruction": "shorter"})
-    assert res.json()["origin"] == "ai_revision"
+    assert res.json()["kind"] == "revision"
+    assert finished_draft(client, res, h)["versions"][-1]["origin"] == "ai_revision"
+    assert client.get(f"/docgen/jobs/{res.json()['id']}", headers=auth("user-2")).status_code == 404
+    assert client.get("/docgen/jobs", headers=h).json() == []  # nothing open, nothing failed
 
     res = client.post(f"/docgen/drafts/{draft_id}/export?version_no=2", headers=h)
     assert res.status_code == 200
@@ -127,7 +137,9 @@ def test_ai_off_source_answers_409_with_the_reason_then_works_with_the_box(env):
         headers=h,
         json={"documents": [{"document_id": 30}], "ai_override_source_ids": [3]},
     )
-    assert res.status_code == 201
+    assert res.status_code == 202 and res.json()["status"] == "done"
+    # The refusal left no job behind.
+    assert client.get("/docgen/jobs", headers=h).json() == []
 
 
 def test_more_than_three_attached_guides_are_refused_before_reading(env):
@@ -141,12 +153,18 @@ def test_more_than_three_attached_guides_are_refused_before_reading(env):
     assert res.status_code == 422
 
 
-def test_a_failed_model_call_is_502_with_a_reason(env):
-    client, _, writer, _ = env
+def test_a_failed_model_call_is_a_failed_job_with_a_reason(env):
+    client, store, writer, audit = env
+    h = auth("user-1")
     writer.fail = TimeoutError()
-    res = client.post("/docgen/drafts", headers=auth("user-1"), json={"documents": [{"document_id": 10}]})
-    assert res.status_code == 502
-    assert "TimeoutError" in res.json()["detail"]
+    res = client.post("/docgen/drafts", headers=h, json={"documents": [{"document_id": 10}]})
+    assert res.status_code == 202
+    job = res.json()
+    assert job["status"] == "failed" and "TimeoutError" in job["error"] and job["draft_id"] is None
+    assert store.drafts == {}
+    # The user can read the reason afterwards, and the attempt stays counted.
+    assert [j["error"] for j in client.get("/docgen/jobs", headers=h).json()] == [job["error"]]
+    assert client.get("/docgen/status", headers=h).json()["used"] == 1
 
 
 def test_admin_guide_library(env):

@@ -16,6 +16,8 @@ from irb_watch.docgen.types import (
     ExtraGuide,
     FieldValue,
     Guide,
+    StepContext,
+    StepFile,
     picked_list,
 )
 
@@ -207,6 +209,23 @@ def _document_block(doc: DocVersion, budget: int) -> tuple[str, bool]:
     return f"<document>\n{_escape(chr(10).join(parts), 'document')}\n</document>", cut
 
 
+def _step_file_block(f: StepFile, hospital_id: int | None, budget: int) -> tuple[str, bool]:
+    """One of the coordinator's own pipeline files. Untrusted like every document."""
+    body, cut = _cut(f.text, budget)
+    parts = [
+        (
+            f"the coordinator's own file, hospital id: "
+            f"{hospital_id if hospital_id is not None else 'none'}"
+        ),
+        f"step: {f.ref.step_name}",
+        f"name: {f.ref.name} (version {f.ref.version_no}, file {f.filename})",
+        "",
+        "TEXT:",
+        body,
+    ]
+    return f"<document>\n{_escape(chr(10).join(parts), 'document')}\n</document>", cut
+
+
 def build_input(
     docs: list[DocVersion],
     guides: list[Guide],
@@ -216,10 +235,13 @@ def build_input(
     admin_text: str = "",
     form: DraftTemplate | None = None,
     current_answers: dict[str, FieldValue] | None = None,
+    step: StepContext | None = None,
 ) -> tuple[str, str]:
     """Returns (instructions, input text). admin_text: the admins' added instructions, placed
     after every fixed rule. form: the template this draft fills (answers per field instead of
-    Markdown); current_answers: its current answers, for a revision."""
+    Markdown); current_answers: its current answers, for a revision. step: the pipeline step
+    the draft is made in; its files follow the board documents and its type's instructions
+    (admin-written) follow the admins' added instructions."""
     blocks: list[str] = []
     cut_any = False
     if form is not None:
@@ -237,9 +259,14 @@ def build_input(
         cut_any |= cut
     if not guides and not extra:
         blocks.append("(No guide was given.)")
-    budget = max(MIN_DOC_CHARS, DOCS_BUDGET // max(1, len(docs)))
+    own = step.files if step is not None else ()
+    budget = max(MIN_DOC_CHARS, DOCS_BUDGET // max(1, len(docs) + len(own)))
     for d in docs:
         block, cut = _document_block(d, budget)
+        blocks.append(block)
+        cut_any |= cut
+    for f in own:
+        block, cut = _step_file_block(f, step.hospital_id if step else None, budget)
         blocks.append(block)
         cut_any |= cut
     if form is not None:
@@ -265,4 +292,12 @@ def build_input(
             instructions += REVISION
         if cut_any:
             instructions += CUT_NOTE
-    return with_admin_text(instructions, admin_text), "\n\n".join(blocks)
+    instructions = with_admin_text(instructions, admin_text)
+    if step is not None and step.instructions.strip():
+        # A block of its own, so neither text is cut to make room for the other. The step's
+        # NAME is the user's own text and must not enter this trusted block: only the type's
+        # instructions (admin-written) do.
+        instructions = with_admin_text(
+            instructions, f"For this IRB step:\n{step.instructions.strip()}"
+        )
+    return instructions, "\n\n".join(blocks)

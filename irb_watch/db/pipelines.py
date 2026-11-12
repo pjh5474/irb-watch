@@ -139,6 +139,17 @@ class SupabasePipelineStore:
         rows = self._c.table("pipeline_steps").select(_STEP_COLUMNS).in_("pipeline_id", pipeline_ids).execute().data
         return [_step(r) for r in rows]
 
+    def get_step(self, step_id: int) -> Step | None:
+        rows = self._c.table("pipeline_steps").select(_STEP_COLUMNS).eq("id", step_id).limit(1).execute().data
+        return _step(rows[0]) if rows else None
+
+    def version_text(self, version_id: int) -> str | None:
+        rows = (
+            self._c.table("step_document_versions").select("body_text").eq("id", version_id)
+            .limit(1).execute().data
+        )
+        return rows[0].get("body_text") if rows else None
+
     def add_step(self, pipeline_id: int, values: dict) -> Step:
         rows = self._c.table("pipeline_steps").insert({**values, "pipeline_id": pipeline_id}).execute().data
         return _step(rows[0])

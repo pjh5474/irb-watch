@@ -87,6 +87,12 @@ class FakePipelineStore:
     def steps(self, pipeline_ids):
         return [s for s in self.step_rows.values() if s.pipeline_id in pipeline_ids]
 
+    def get_step(self, step_id):
+        return self.step_rows.get(step_id)
+
+    def version_text(self, version_id):
+        return self.texts.get(version_id)
+
     def add_step(self, pipeline_id, values):
         sid = next(self._ids)
         self.step_rows[sid] = Step(

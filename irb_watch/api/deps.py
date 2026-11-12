@@ -39,6 +39,7 @@ from irb_watch.db.documents import (
     SupabaseSummaryRepo,
 )
 from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
+from irb_watch.db.draft_jobs import SupabaseJobStore, ThreadRunner
 from irb_watch.db.hospitals import SupabaseHospitalStore
 from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.organizations import SupabaseOrganizationStore
@@ -60,6 +61,7 @@ from irb_watch.services.alerts import AlertService
 from irb_watch.services.digest import DigestService
 from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
+from irb_watch.services.draft_jobs import DraftJobService
 from irb_watch.services.errors import ConflictError, ValidationError
 from irb_watch.services.hospitals import HospitalService
 from irb_watch.services.manual import ManualService
@@ -133,6 +135,18 @@ def get_pipeline_service() -> PipelineService:
         link_ttl_seconds=settings.download_link_ttl_seconds,
         timezone=settings.scan_timezone,
     )
+
+
+@lru_cache
+def _job_runner() -> ThreadRunner:
+    """One small worker pool for the whole process (AI drafts and revisions)."""
+    return ThreadRunner(workers=2)
+
+
+def get_draft_job_service() -> DraftJobService:
+    # runner = APP_ENV: at its start a server fails only the open jobs it made itself.
+    store = SupabaseJobStore(get_supabase_client(), runner=get_settings().app_env)
+    return DraftJobService(store, _job_runner())
 
 
 def get_audit_sink() -> SupabaseAuditSink:
@@ -389,6 +403,7 @@ def get_docgen_service() -> DocgenService:
         get_settings().docgen_requests_per_day,
         extra_instructions=_extra("docgen"),
         files=SupabaseTemplateFiles(client),
+        steps=get_pipeline_service(),  # a pipeline step's own files and AI settings
     )
 
 

@@ -12,7 +12,12 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_docgen_service, get_user_store, get_verifier
+from irb_watch.api.deps import (
+    get_docgen_service,
+    get_draft_job_service,
+    get_user_store,
+    get_verifier,
+)
 from irb_watch.docgen.form_fields import MAX_FIELDS, FormError, detect_fields
 from irb_watch.docgen.form_fill import fill, render_markdown
 from irb_watch.docgen.prompt import FORM_INSTRUCTIONS
@@ -33,6 +38,7 @@ from irb_watch.services.errors import (
 )
 from tests.fakes import FakeAudit, FakeStore
 from tests.fakes_docgen import NOW, FakeDocgenStore, FakeTemplateFiles, FakeWriter
+from tests.fakes_jobs import finished_draft, inline_jobs
 from tests.test_admin_users_api import FakeVerifier
 
 A, B = 1, 2
@@ -555,6 +561,8 @@ def client(env):
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: service._users
     app.dependency_overrides[get_docgen_service] = lambda: service
+    jobs = inline_jobs()
+    app.dependency_overrides[get_draft_job_service] = lambda: jobs
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -585,8 +593,7 @@ def test_the_template_api(client, env):
     assert bad.status_code == 422 and "save it as .docx" in bad.json()["detail"]
 
     res = client.post("/docgen/drafts", headers=u, json={"documents": [{"document_id": 10}], "template_id": tid})
-    assert res.status_code == 201
-    draft = res.json()["draft"]
+    draft = finished_draft(client, res, u)["draft"]
     assert draft["template"]["template_id"] == tid and "storage_path" not in draft["template"]
     did = draft["id"]
     res = client.put(f"/docgen/drafts/{did}/markdown", headers=u, json={"fields": {"m:연구제목": "X", "c:body/1": ["최초"]}})

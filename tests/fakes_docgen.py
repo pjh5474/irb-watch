@@ -250,10 +250,13 @@ class FakeDocgenStore:
             now.isoformat(),
             now.isoformat(),
             new.template,
+            new.pipeline_step_id,
+            new.step_files,
         )
         self.drafts[did] = draft
         inputs = Inputs(
-            new.document_refs, new.guide_ids, new.extra_guides, new.ai_override_source_ids
+            new.document_refs, new.guide_ids, new.extra_guides, new.ai_override_source_ids,
+            new.step_files,
         )
         self.draft_versions[did] = [
             DraftVersion(
@@ -274,6 +277,12 @@ class FakeDocgenStore:
 
     def list_drafts(self, user_id, limit):
         return [d for d in self.drafts.values() if d.user_id == user_id][:limit]
+
+    def drafts_of_steps(self, user_id, step_ids):
+        found = [
+            d for d in self.drafts.values() if d.user_id == user_id and d.pipeline_step_id in step_ids
+        ]
+        return sorted(found, key=lambda d: d.id, reverse=True)
 
     def list_versions(self, draft_id):
         return list(self.draft_versions.get(draft_id, []))
@@ -325,7 +334,10 @@ class FakeDocgenStore:
         """Deletes drafts older than cutoff (by updated_at) and reports them like the real store;
         purge_result, when set, is the count reported for drafts not kept here."""
         self.purged_before = cutoff
-        gone = [d for d in self.drafts.values() if d.updated_at < cutoff.isoformat()]
+        gone = [
+            d for d in self.drafts.values()
+            if d.updated_at < cutoff.isoformat() and d.pipeline_step_id is None
+        ]
         paths = [
             d.template.storage_path
             for d in gone
