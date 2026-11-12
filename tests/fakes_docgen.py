@@ -30,7 +30,7 @@ class FakeDocgenStore:
         self.sources: dict[int, tuple[SourceRef, bool, set[str]]] = {}
         self.versions: dict[tuple[int, int], tuple[int, str, VersionContent]] = {}
         self.guides: dict[int, Guide] = {}
-        self.links: set[tuple[int, int]] = set()  # (source_id, guide_id)
+        self.links: set[tuple[int, int]] = set()  # (hospital_id, guide_id)
         self.drafts: dict[str, Draft] = {}
         self.draft_versions: dict[str, list[DraftVersion]] = {}
         self.prior_used = 0
@@ -41,13 +41,19 @@ class FakeDocgenStore:
         self.revisions: list[GuideRevision] = []
         self.selection_writes = 0
         self.templates: dict[int, FormTemplate] = {}
-        self.template_links: set[tuple[int, int]] = set()  # (source_id, template_id)
+        self.template_links: set[tuple[int, int]] = set()  # (hospital_id, template_id)
         self.fail_create_draft: Exception | None = None
         self._ids = itertools.count(1)
 
     # -- setup helpers ---------------------------------------------------------------
-    def add_source(self, sid, name="Board", ai_enabled=True, requires_login=False, members=()):
-        self.sources[sid] = (SourceRef(sid, name, ai_enabled), requires_login, set(members))
+    def add_source(
+        self, sid, name="Board", ai_enabled=True, requires_login=False, members=(), hospital=None
+    ):
+        """hospital: the board's hospital id; by default its own hospital with the same id."""
+        hospital_id = sid if hospital is None else hospital
+        self.sources[sid] = (
+            SourceRef(sid, name, ai_enabled, hospital_id), requires_login, set(members)
+        )
 
     def add_document(self, doc_id, source_id, title="Consent form", versions=2, files=("a.pdf",)):
         """Each file's text is '<name> visits: <n + 2>' and changes in every version."""
@@ -68,13 +74,13 @@ class FakeDocgenStore:
             )
 
     def add_guide(
-        self, gid, title="SNUH amendment guide", text="Sections: 1. Summary", sources=(), is_global=False
+        self, gid, title="SNUH amendment guide", text="Sections: 1. Summary", hospitals=(), is_global=False
     ):
         self.guides[gid] = Guide(
             gid, title, f"{title}.txt", text, "2026-11-01T00:00:00+00:00", is_global=is_global
         )
-        for s in sources:
-            self.links.add((s, gid))
+        for h in hospitals:
+            self.links.add((h, gid))
 
     # -- protocol --------------------------------------------------------------------
     def readable_sources(self, user_id, is_admin):
@@ -106,8 +112,8 @@ class FakeDocgenStore:
         return row[2] if row else None
 
     def _with_links(self, g: Guide) -> Guide:
-        sids = tuple(sorted(s for s, gid in self.links if gid == g.id))
-        return replace(g, source_ids=sids)
+        hids = tuple(sorted(h for h, gid in self.links if gid == g.id))
+        return replace(g, hospital_ids=hids)
 
     def create_guide(self, title, filename, body_text, sha256, created_by, now):
         gid = max(self.guides, default=0) + 1
@@ -124,16 +130,19 @@ class FakeDocgenStore:
     def get_guides(self, guide_ids):
         return [self._with_links(self.guides[g]) for g in guide_ids if g in self.guides]
 
-    def guides_for_sources(self, source_ids):
-        if not source_ids:
+    def guides_for_hospitals(self, hospital_ids):
+        if not hospital_ids:
             return []
         live = [g for g in sorted(self.guides) if self.guides[g].archived_at is None]
         global_ids = [g for g in live if self.guides[g].is_global]
-        linked = sorted({gid for s, gid in self.links if s in source_ids} - set(global_ids))
+        linked = sorted({gid for h, gid in self.links if h in hospital_ids} - set(global_ids))
         return [self._with_links(self.guides[g]) for g in global_ids + [g for g in linked if g in live]]
 
-    def list_sources(self):
-        return sorted((row[0] for row in self.sources.values()), key=lambda s: s.name)
+    def hospital_ids(self):
+        return {row[0].hospital_id for row in self.sources.values()}
+
+    def hospital_exists(self, hospital_id):
+        return hospital_id in self.hospital_ids()
 
     def update_guide(self, guide_id, title, is_global):
         g = self.guides[guide_id]
@@ -168,16 +177,16 @@ class FakeDocgenStore:
         self.guides[guide_id] = replace(g, archived_at=now.isoformat())
         self.links = {(s, gid) for s, gid in self.links if gid != guide_id}
 
-    def link_guide(self, source_id, guide_id, now):
-        self.links.add((source_id, guide_id))
+    def link_guide(self, hospital_id, guide_id, now):
+        self.links.add((hospital_id, guide_id))
 
-    def unlink_guide(self, source_id, guide_id):
-        self.links.discard((source_id, guide_id))
+    def unlink_guide(self, hospital_id, guide_id):
+        self.links.discard((hospital_id, guide_id))
 
     # -- form templates ----------------------------------------------------------------
     def _with_template_links(self, t: FormTemplate) -> FormTemplate:
-        sids = tuple(sorted(s for s, tid in self.template_links if tid == t.id))
-        return replace(t, source_ids=sids)
+        hids = tuple(sorted(h for h, tid in self.template_links if tid == t.id))
+        return replace(t, hospital_ids=hids)
 
     def create_template(self, title, doc_type, filename, storage_path, sha256, fields, created_by, now):
         tid = max(self.templates, default=0) + 1
@@ -198,15 +207,15 @@ class FakeDocgenStore:
         t = self.templates.get(template_id)
         return self._with_template_links(t) if t else None
 
-    def templates_for_sources(self, source_ids):
-        if not source_ids:
+    def templates_for_hospitals(self, hospital_ids):
+        if not hospital_ids:
             return []
         live = [
             t for t in sorted(self.templates.values(), key=lambda t: t.id)
             if t.archived_at is None and t.status == "ready"
         ]
         out = [t for t in live if t.is_global]
-        linked = {tid for s, tid in self.template_links if s in source_ids}
+        linked = {tid for h, tid in self.template_links if h in hospital_ids}
         out += [t for t in live if not t.is_global and t.id in linked]
         return [self._with_template_links(t) for t in out]
 
@@ -219,11 +228,11 @@ class FakeDocgenStore:
         self.templates[template_id] = replace(self.templates[template_id], archived_at=now.isoformat())
         self.template_links = {(s, t) for s, t in self.template_links if t != template_id}
 
-    def link_template(self, source_id, template_id, now):
-        self.template_links.add((source_id, template_id))
+    def link_template(self, hospital_id, template_id, now):
+        self.template_links.add((hospital_id, template_id))
 
-    def unlink_template(self, source_id, template_id):
-        self.template_links.discard((source_id, template_id))
+    def unlink_template(self, hospital_id, template_id):
+        self.template_links.discard((hospital_id, template_id))
 
     def create_draft(self, new, first, now):
         if self.fail_create_draft is not None:

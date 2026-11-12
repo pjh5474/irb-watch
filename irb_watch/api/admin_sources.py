@@ -39,6 +39,8 @@ class SourceOut(BaseModel):
     # The site name its stored login is filed under (PUT /admin/credentials/{label}/{site}):
     # snuh-<board key>, or rbay-<hospital code> (one login per R-BAY hospital).
     login_site: str | None = None
+    hospital_id: int | None = None  # the hospital this board belongs to
+    board_kind: str = "other"  # notice | forms | regulations | other
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -59,6 +61,8 @@ class SourceOut(BaseModel):
             scans_paused_reason=s.scans_paused_reason,
             ai_enabled=s.ai_enabled,
             login_site=login_site(s),
+            hospital_id=s.hospital_id,
+            board_kind=s.board_kind,
         )
 
 
@@ -68,6 +72,10 @@ class CreateSourceIn(BaseModel):
     login_user: str | None = None
     # Default: off for a members-only source (login_user set), on for a public one.
     ai_enabled: bool | None = None
+    # Default: the hospital of another board on the same site (R-BAY hospital code, SNUH),
+    # else the hospital named like the board (R-BAY: the part before " : "), created if missing.
+    hospital_id: int | None = None
+    board_kind: str | None = None  # default: from the R-BAY board code, else "other"
 
 
 class UpdateSourceIn(BaseModel):
@@ -75,6 +83,8 @@ class UpdateSourceIn(BaseModel):
     is_active: bool | None = None
     login_user: str | None = None  # "" removes the login
     ai_enabled: bool | None = None
+    hospital_id: int | None = None  # move the board to another hospital
+    board_kind: str | None = None
 
 
 @router.post("", status_code=201, response_model=SourceOut)
@@ -84,7 +94,10 @@ def create_source(
     service: SourceService = Depends(get_source_service),
 ) -> SourceOut:
     return SourceOut.from_source(
-        service.create(admin.id, body.name, body.url, body.login_user, body.ai_enabled)
+        service.create(
+            admin.id, body.name, body.url, body.login_user, body.ai_enabled,
+            body.hospital_id, body.board_kind,
+        )
     )
 
 
@@ -105,7 +118,8 @@ def update_source(
 ) -> SourceOut:
     return SourceOut.from_source(
         service.update(
-            admin.id, source_id, body.name, body.is_active, body.login_user, body.ai_enabled
+            admin.id, source_id, body.name, body.is_active, body.login_user, body.ai_enabled,
+            body.hospital_id, body.board_kind,
         )
     )
 

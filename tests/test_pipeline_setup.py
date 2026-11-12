@@ -147,7 +147,7 @@ def test_save_global_and_hospital_orders():
     service.save_template("admin", 4, [1, 2, 6])
     assert service.template_for(4).step_type_ids == (1, 2, 6)
     assert service.template_for(5).step_type_ids == (1, 3, 6)  # falls back to global
-    assert [t.source_id for t in service.templates()] == [None, 4]
+    assert [t.hospital_id for t in service.templates()] == [None, 4]
     service.delete_template("admin", 4)
     assert service.template_for(4).step_type_ids == (1, 3, 6)
     with pytest.raises(NotFoundError):
@@ -164,7 +164,7 @@ def test_save_order_refuses_bad_lists(ids, match):
         service.save_template("admin", None, ids)
 
 
-def test_save_order_refuses_archived_types_and_unknown_sources():
+def test_save_order_refuses_archived_types_and_unknown_hospitals():
     service, *_ = make()
     service.archive_step_type("admin", 4)
     with pytest.raises(ValidationError):
@@ -233,11 +233,11 @@ def test_api_step_types(api):
 def test_api_templates(api):
     client, _ = api
     r = client.put("/admin/pipeline/templates/global", headers=ADMIN, json={"step_type_ids": [1, 6]})
-    assert r.status_code == 200 and r.json()["source_id"] is None
-    r = client.put("/admin/pipeline/templates/sources/4", headers=ADMIN, json={"step_type_ids": [1, 2]})
+    assert r.status_code == 200 and r.json()["hospital_id"] is None
+    r = client.put("/admin/pipeline/templates/hospitals/4", headers=ADMIN, json={"step_type_ids": [1, 2]})
     assert r.status_code == 200
     listed = client.get("/admin/pipeline/templates", headers=ADMIN).json()
-    assert [t["source_id"] for t in listed] == [None, 4]
-    assert client.delete("/admin/pipeline/templates/sources/4", headers=ADMIN).status_code == 204
-    assert client.delete("/admin/pipeline/templates/sources/4", headers=ADMIN).status_code == 404
+    assert [t["hospital_id"] for t in listed] == [None, 4]
+    assert client.delete("/admin/pipeline/templates/hospitals/4", headers=ADMIN).status_code == 204
+    assert client.delete("/admin/pipeline/templates/hospitals/4", headers=ADMIN).status_code == 404
     assert client.put("/admin/pipeline/templates/global", headers=ADMIN, json={"step_type_ids": []}).status_code == 422

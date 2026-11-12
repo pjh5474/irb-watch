@@ -8,6 +8,7 @@ from irb_watch.core.detect import Observation
 from irb_watch.core.state import StoredDocument, VersionContent
 from irb_watch.crawlers.snuh_reader import ScanReading
 from irb_watch.db.documents import _snapshot
+from irb_watch.services.hospitals import DuplicateHospitalError, Hospital, HospitalService
 from irb_watch.services.scan import KEEP_PAUSE, LoadedStore, ScanService
 from irb_watch.services.sources import DuplicateSourceError, Source
 from tests.fakes import FakeAudit
@@ -38,12 +39,56 @@ def make_obs(external_id="1", title="Title", body="body", files=(), warnings=())
     )
 
 
+class FakeHospitalStore:
+    def __init__(self) -> None:
+        self.hospitals: dict[int, Hospital] = {}
+
+    def list(self):
+        return list(self.hospitals.values())
+
+    def get(self, hospital_id):
+        return self.hospitals.get(hospital_id)
+
+    def create(self, name, note, created_by):
+        if any(h.name.lower() == name.lower() for h in self.hospitals.values()):
+            raise DuplicateHospitalError
+        hospital = Hospital(len(self.hospitals) + 1, name, note, "2026-11-12", "2026-11-12")
+        self.hospitals[hospital.id] = hospital
+        return hospital
+
+    def delete(self, hospital_id):
+        self.hospitals.pop(hospital_id, None)
+
+    def update(self, hospital_id, values):
+        if "name" in values and any(
+            h.id != hospital_id and h.name.lower() == values["name"].lower()
+            for h in self.hospitals.values()
+        ):
+            raise DuplicateHospitalError
+        updated = replace(self.hospitals[hospital_id], **values)
+        self.hospitals[hospital_id] = updated
+        return updated
+
+
+def fake_hospitals(store: FakeHospitalStore | None = None) -> HospitalService:
+    return HospitalService(store or FakeHospitalStore(), FakeAudit())
+
+
 class FakeSourceStore:
     def __init__(self) -> None:
         self.sources: dict[int, Source] = {}
 
     def create(
-        self, name, adapter, url, config, created_by, requires_login=False, ai_enabled=True
+        self,
+        name,
+        adapter,
+        url,
+        config,
+        created_by,
+        requires_login=False,
+        ai_enabled=True,
+        hospital_id=None,
+        board_kind="other",
     ):
         # Same rule as the database's unique index: one url per login label.
         key = (url, config.get("login_user", ""))
@@ -57,6 +102,8 @@ class FakeSourceStore:
             config=config,
             requires_login=requires_login,
             ai_enabled=ai_enabled,
+            hospital_id=hospital_id,
+            board_kind=board_kind,
         )
         self.sources[source.id] = source
         return source

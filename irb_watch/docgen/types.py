@@ -21,6 +21,7 @@ class SourceRef:
     id: int
     name: str
     ai_enabled: bool
+    hospital_id: int | None = None  # guides and form templates are linked to hospitals
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class DocVersion:
     page_text: bool = True
     previous_no: int | None = None
     compare: bool = True
+    hospital_id: int | None = None  # the board's hospital (matches a guide's scope)
 
 
 @dataclass(frozen=True)
@@ -51,8 +53,8 @@ class Guide:
     body_text: str
     created_at: str
     archived_at: str | None = None
-    source_ids: tuple[int, ...] = ()  # sources that use it by default (unused while global)
-    is_global: bool = False  # a default of every draft, for every source
+    hospital_ids: tuple[int, ...] = ()  # hospitals that use it by default (unused while global)
+    is_global: bool = False  # a default of every draft, for every hospital
     text_updated_at: str | None = None  # when the file was last replaced; None = never
 
 
@@ -213,7 +215,7 @@ class FormTemplate:
     created_at: str
     updated_at: str
     archived_at: str | None = None
-    source_ids: tuple[int, ...] = ()  # sites that offer it (unused while global)
+    hospital_ids: tuple[int, ...] = ()  # hospitals that offer it (unused while global)
 
 
 @dataclass(frozen=True)
@@ -329,12 +331,16 @@ class DocgenStore(Protocol):
     ) -> Guide: ...
     def list_guides(self, include_archived: bool) -> list[Guide]: ...
     def get_guides(self, guide_ids: list[int]) -> list[Guide]: ...
-    def guides_for_sources(self, source_ids: list[int]) -> list[Guide]:
-        """Non-archived guides linked to any of these sources, plus every non-archived global
-        guide (global ones first). Empty source list: nothing."""
+    def guides_for_hospitals(self, hospital_ids: list[int]) -> list[Guide]:
+        """Non-archived guides linked to any of these hospitals, plus every non-archived global
+        guide (global ones first). Empty hospital list: nothing."""
         ...
 
-    def list_sources(self) -> list[SourceRef]: ...
+    def hospital_ids(self) -> set[int]:
+        """Every hospital id (to check an admin's link list)."""
+        ...
+
+    def hospital_exists(self, hospital_id: int) -> bool: ...
     def update_guide(self, guide_id: int, title: str | None, is_global: bool | None) -> None: ...
     def replace_guide_text(
         self, guide: Guide, filename: str, body_text: str, sha256: str, by: str, now: datetime
@@ -351,8 +357,8 @@ class DocgenStore(Protocol):
         """Set archived_at and remove all its links."""
         ...
 
-    def link_guide(self, source_id: int, guide_id: int, now: datetime) -> None: ...
-    def unlink_guide(self, source_id: int, guide_id: int) -> None: ...
+    def link_guide(self, hospital_id: int, guide_id: int, now: datetime) -> None: ...
+    def unlink_guide(self, hospital_id: int, guide_id: int) -> None: ...
 
     # -- form templates ----------------------------------------------------------------
     def create_template(
@@ -371,8 +377,8 @@ class DocgenStore(Protocol):
 
     def list_templates(self, include_archived: bool) -> list[FormTemplate]: ...
     def get_template(self, template_id: int) -> FormTemplate | None: ...
-    def templates_for_sources(self, source_ids: list[int]) -> list[FormTemplate]:
-        """Ready, non-archived templates linked to any of these sources plus every ready,
+    def templates_for_hospitals(self, hospital_ids: list[int]) -> list[FormTemplate]:
+        """Ready, non-archived templates linked to any of these hospitals plus every ready,
         non-archived global one (global first)."""
         ...
 
@@ -385,8 +391,8 @@ class DocgenStore(Protocol):
         """Set archived_at and remove all its links."""
         ...
 
-    def link_template(self, source_id: int, template_id: int, now: datetime) -> None: ...
-    def unlink_template(self, source_id: int, template_id: int) -> None: ...
+    def link_template(self, hospital_id: int, template_id: int, now: datetime) -> None: ...
+    def unlink_template(self, hospital_id: int, template_id: int) -> None: ...
     # -- drafts ----------------------------------------------------------------------
     def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft: ...
     def get_draft(self, draft_id: str) -> Draft | None: ...

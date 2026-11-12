@@ -81,13 +81,13 @@ class StepTypeIn(BaseModel):
 
 
 class TemplateOut(BaseModel):
-    source_id: int | None
+    hospital_id: int | None
     step_type_ids: list[int]
     updated_at: str
 
     @classmethod
     def of(cls, t: PipelineTemplate) -> "TemplateOut":
-        return cls(source_id=t.source_id, step_type_ids=list(t.step_type_ids), updated_at=t.updated_at)
+        return cls(hospital_id=t.hospital_id, step_type_ids=list(t.step_type_ids), updated_at=t.updated_at)
 
 
 class TemplateIn(BaseModel):
@@ -224,21 +224,21 @@ def save_global_template(
     return TemplateOut.of(service.save_template(admin.id, None, body.step_type_ids))
 
 
-@router.put("/templates/sources/{source_id}", response_model=TemplateOut)
-def save_source_template(
-    source_id: int,
+@router.put("/templates/hospitals/{hospital_id}", response_model=TemplateOut)
+def save_hospital_template(
+    hospital_id: int,
     body: TemplateIn,
     admin: AuthUser = Depends(require_admin),
     service: Service = Depends(get_pipeline_setup_service),
 ) -> TemplateOut:
-    return TemplateOut.of(service.save_template(admin.id, source_id, body.step_type_ids))
+    return TemplateOut.of(service.save_template(admin.id, hospital_id, body.step_type_ids))
 
 
-@router.delete("/templates/sources/{source_id}", status_code=204)
-def delete_source_template(
-    source_id: int,
+@router.delete("/templates/hospitals/{hospital_id}", status_code=204)
+def delete_hospital_template(
+    hospital_id: int,
     admin: AuthUser = Depends(require_admin),
     service: Service = Depends(get_pipeline_setup_service),
 ) -> Response:
-    service.delete_template(admin.id, source_id)
+    service.delete_template(admin.id, hospital_id)
     return Response(status_code=204)

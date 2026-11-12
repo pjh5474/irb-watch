@@ -88,6 +88,8 @@ Also built:
 
 - **R-BAY boards (2026-11-10):** hospital e-IRBs on www.r-bay.co.kr, first 관련규정 / 양식함 / 공지 of 대구가톨릭대학교의료원 and 이화의대부속목동병원, one members-only source per board, login stored per hospital (site `rbay-<hospital code>`), one shared login per hospital per run; zip attachments unpacked for all sources. Built and checked live read-only on both hospitals; migration `rbay_adapter` applied; no source created yet. See decisions.md "R-BAY boards".
 
+- **Hospitals (2026-11-12):** a platform-wide `hospitals` catalog groups boards (`sources.hospital_id`, `sources.board_kind`); projects (`project_hospitals`), pipelines, per-hospital step orders, guides (`hospital_guides`) and forms (`hospital_form_templates`) are per hospital; any hospital may be added to a project, board documents stay gated per board. Code: `services/hospitals.py`, `api/admin_hospitals.py`. A members-only manual source must name its hospital (hospital names are public). Built, offline tests only; migration `hospitals` applied 2026-11-12 (32 migrations applied now); it dropped `project_sources`, `source_guides`, `source_form_templates`, so both repos must be deployed. See decisions.md "Hospitals".
+
 - **Manual sources (2026-11-11):** adapter `manual` for hospitals with no e-IRB site; admins upload documents and new versions by hand; saved through the scan path (`commit_scan`, cards, AI summaries); never scanned. Code: `services/manual.py`, `api/admin_manual.py`. Migration `manual_sources` applied 2026-11-11. See decisions.md "Manual sources".
 
 Next candidates:

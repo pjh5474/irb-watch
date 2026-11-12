@@ -46,7 +46,7 @@ from irb_watch.crawlers.sessions import valid_name
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.sources import RBAY_ADAPTER, SourceService, detect_adapter
 from tests.fakes import FakeAudit
-from tests.fakes_scan import FakeSourceStore
+from tests.fakes_scan import FakeSourceStore, fake_hospitals
 
 FIX = Path(__file__).parent / "fixtures" / "rbay"
 GATE = (FIX / "gate.html").read_text(encoding="utf-8")
@@ -637,7 +637,7 @@ def test_an_rbay_board_address_becomes_a_source():
 
 
 def test_an_rbay_source_always_has_a_login():
-    service = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url)
+    service = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url, hospitals=fake_hospitals())
     url = f"https://www.r-bay.co.kr/agency/main/{AGENCY}?board=NOTI"
     with pytest.raises(ValidationError, match="login_user"):
         service.create("admin", "공지", url)
@@ -650,7 +650,7 @@ def test_an_rbay_source_always_has_a_login():
 def test_the_admin_api_tells_where_each_source_login_is_stored():
     from irb_watch.api.admin_sources import SourceOut
 
-    service = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url)
+    service = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url, hospitals=fake_hospitals())
     rbay = service.create("admin", "공지", f"https://www.r-bay.co.kr/agency/main/{AGENCY}?board=NOTI", "owner")
     snuh = service.create("admin", "SNUH", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277029")
     study = service.create("admin", "Study", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277031", "s1")

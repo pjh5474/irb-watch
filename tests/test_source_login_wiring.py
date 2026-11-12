@@ -17,6 +17,7 @@ from tests.fakes_scan import (
     FakeScanRepo,
     FakeSourceStore,
     MemCreds,
+    fake_hospitals,
     make_source,
     scan_once,
 )
@@ -29,7 +30,7 @@ URL = "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277031"
 
 
 def make_sources():
-    return SourceService(FakeSourceStore(), FakeAudit(), lambda url: url)
+    return SourceService(FakeSourceStore(), FakeAudit(), lambda url: url, hospitals=fake_hospitals())
 
 
 def test_create_with_login_user_stores_it_in_config():

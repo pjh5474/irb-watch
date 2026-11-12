@@ -55,7 +55,6 @@ def make():
     store = FakePipelineStore()
     store.add_project(1, "u1", {4, 6})
     store.add_project(2, "u2", {4})
-    store.readable = {"u1": {4, 5}, "u2": {4}}
     files = FakePipelineFiles()
     clock = Clock()
     service = PipelineService(users, store, setup, files, max_file_bytes=200_000, clock=clock)
@@ -89,8 +88,8 @@ def test_start_rules():
         service.start("u2", 1, 4)  # not the owner
     with pytest.raises(ValidationError, match="not in the project"):
         service.start("u1", 1, 5)
-    with pytest.raises(NotFoundError, match="source"):
-        service.start("u1", 1, 6)  # in the project but no longer readable
+    # Any hospital in the project may get a pipeline, readable boards or not (owner, 2026-11-12).
+    service.start("u1", 1, 6)
     service.start("u1", 1, 4)
     with pytest.raises(ConflictError, match="already has a pipeline"):
         service.start("u1", 1, 4)
@@ -98,17 +97,16 @@ def test_start_rules():
         service.start("gone", 1, 4)
 
 
-def test_list_and_detail_are_owner_only_and_show_lost_hospitals():
+def test_list_and_detail_are_owner_only_and_show_hospitals_removed_from_the_project():
     service, store, *_ = make()
     pipeline = service.start("u1", 1, 4)
     with pytest.raises(NotFoundError):
         service.detail("u2", pipeline.id)
     with pytest.raises(NotFoundError):
         service.list_for_project("u2", 1)
-    store.project_sources[1].discard(4)
-    store.readable["u1"].discard(4)
+    store.project_hospitals[1].discard(4)
     [summary] = service.list_for_project("u1", 1)
-    assert summary.in_project is False and summary.source_name is None and summary.steps == 4
+    assert summary.in_project is False and summary.hospital_name == "SNUH" and summary.steps == 4
     detail = service.detail("u1", pipeline.id)
     assert len(detail.steps) == 4 and detail.step_types
 
@@ -420,24 +418,23 @@ class _Client:
         return _Query(self, name)
 
 
-def test_store_reads_source_access_in_two_queries():
+def test_store_reads_hospitals_of_a_project_and_their_names():
     from irb_watch.db.pipelines import SupabasePipelineStore
 
     client = _Client(
         {
-            "sources": [
-                {"id": 4, "name": "Public", "requires_login": False},
-                {"id": 6, "name": "Study A", "requires_login": True},
-                {"id": 7, "name": "Study B", "requires_login": True},
+            "hospitals": [{"id": 4, "name": "SNUH"}, {"id": 6, "name": "Kimpo"}, {"id": 7, "name": "Ewha"}],
+            "project_hospitals": [
+                {"project_id": 1, "hospital_id": 4}, {"project_id": 1, "hospital_id": 7},
+                {"project_id": 2, "hospital_id": 6},
             ],
-            "source_members": [{"source_id": 6, "user_id": "u1"}, {"source_id": 7, "user_id": "u2"}],
         }
     )
     store = SupabasePipelineStore(client)
-    assert store.source_names([4, 6, 7], "u1", False) == {4: "Public", 6: "Study A"}
-    assert client.queries == ["sources", "source_members"]
-    assert store.source_names([4, 6, 7], "u1", True) == {4: "Public", 6: "Study A", 7: "Study B"}
-    assert store.can_read_source("u1", 7, False) is False
+    assert store.project_hospital_ids(1) == {4, 7}
+    assert store.hospital_names([4, 6, 6]) == {4: "SNUH", 6: "Kimpo"}
+    assert store.hospital_names([]) == {}
+    assert client.queries == ["project_hospitals", "hospitals"]
 
 
 def test_pipeline_upload_is_refused_by_declared_size_before_reading():
@@ -467,11 +464,11 @@ U2 = {"Authorization": "Bearer tok-u2"}
 def test_api_flow(api):
     client, store = api
     assert client.get("/projects/1/pipelines").status_code == 401
-    r = client.post("/projects/1/pipelines", headers=U1, json={"source_id": 4})
-    assert r.status_code == 201
+    r = client.post("/projects/1/pipelines", headers=U1, json={"hospital_id": 4})
+    assert r.status_code == 201 and r.json()["hospital_id"] == 4
     pid = r.json()["id"]
     listed = client.get("/projects/1/pipelines", headers=U1).json()
-    assert listed[0]["source_name"] == "SNUH board" and listed[0]["steps"] == 4
+    assert listed[0]["hospital_name"] == "SNUH" and listed[0]["steps"] == 4
     assert client.get(f"/pipelines/{pid}", headers=U2).status_code == 404
     detail = client.get(f"/pipelines/{pid}", headers=U1).json()
     step_id = detail["steps"][0]["id"]

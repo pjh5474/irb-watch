@@ -4,14 +4,14 @@ from irb_watch.security.url_guard import UnsafeURLError
 from irb_watch.services.errors import ConflictError, NotFoundError, ValidationError
 from irb_watch.services.sources import SourceService, detect_adapter
 from tests.fakes import FakeAudit
-from tests.fakes_scan import FakeSourceStore
+from tests.fakes_scan import FakeSourceStore, fake_hospitals
 
 URL = "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277029"
 
 
 def make_service(checker=lambda url: url):
     audit = FakeAudit()
-    return SourceService(FakeSourceStore(), audit, checker), audit
+    return SourceService(FakeSourceStore(), audit, checker, hospitals=fake_hospitals()), audit
 
 
 # ---- detect_adapter ------------------------------------------------------------------

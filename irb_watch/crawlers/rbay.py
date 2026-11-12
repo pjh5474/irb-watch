@@ -37,6 +37,8 @@ AGENCY_PATH = re.compile(r"^/agency/main/([A-Za-z0-9_\-=]{8,128})$")
 # Boards the owner chose (2026-11-10). Others (LAWS, ETC, NEWS, FAQ, ...) can be added later;
 # board codes outside this list are refused so the adapter never opens an unknown page.
 BOARDS = {"REGLA": "관련규정", "FORM_BOX": "양식함", "NOTI": "공지"}
+# The board kind (sources.board_kind) each board starts with.
+BOARD_KINDS = {"REGLA": "regulations", "FORM_BOX": "forms", "NOTI": "notice"}
 ROWS_PER_PAGE = 200  # the largest page size the site offers
 CHECK_MAX_BYTES = 64_000  # the file check answers a few dozen bytes of JSON
 MAX_PAGES = 20

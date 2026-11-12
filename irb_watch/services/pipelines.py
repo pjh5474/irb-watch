@@ -4,9 +4,11 @@ Rules (owner, 2026-11-11; see docs/decisions.md "IRB pipeline: user pipelines"):
   * One pipeline per project and hospital, started by the project's owner with a button. It
     copies the hospital's step order (or the global one); archived step types are skipped. New
     steps start in the first live open status. Owner only: anyone else gets "not found".
-  * Starting needs the hospital in the project and readable by the user. Afterwards the
-    pipeline stays usable even if the hospital leaves the project or the user loses access to
-    it (it is the user's own data); only the board documents become unavailable (phase 3).
+  * A pipeline belongs to a hospital (which groups its boards), not to one board (owner,
+    2026-11-12). Starting needs the hospital in the project; any hospital may be used, even one
+    with no board the user can read (then only their own uploads). Afterwards the pipeline
+    stays usable even if the hospital leaves the project (it is the user's own data). Board
+    documents stay gated per board (phase 3).
   * Steps: add from a live step type (its name by default) or free (a name only), rename,
     reorder, remove softly and restore. Status must be a live status. Dates: setting the status
     `submitted` fills the submitted date with today and a closed status fills the decision date,
@@ -58,7 +60,7 @@ class Pipeline:
     id: int
     user_id: str
     project_id: int
-    source_id: int
+    hospital_id: int
     created_at: str
     updated_at: str
     deleted_at: str | None = None
@@ -142,7 +144,7 @@ class StepView:
 @dataclass(frozen=True)
 class PipelineSummary:
     pipeline: Pipeline
-    source_name: str | None  # None: the user can no longer read the hospital
+    hospital_name: str | None  # None: the hospital row is gone (should not happen)
     in_project: bool
     steps: int
     closed_steps: int
@@ -157,15 +159,14 @@ class PipelineDetail:
 
 
 class PipelineStore(Protocol):
-    # projects and sources
+    # projects and hospitals
     def project_owner(self, project_id: int) -> str | None: ...
-    def project_source_ids(self, project_id: int) -> set[int]: ...
-    def can_read_source(self, user_id: str, source_id: int, is_admin: bool) -> bool: ...
-    def source_names(self, source_ids: list[int], user_id: str, is_admin: bool) -> dict[int, str]: ...
+    def project_hospital_ids(self, project_id: int) -> set[int]: ...
+    def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]: ...
     # pipelines
     def pipelines_of_project(self, project_id: int) -> list[Pipeline]: ...
     def get_pipeline(self, pipeline_id: int) -> Pipeline | None: ...
-    def create_pipeline(self, user_id: str, project_id: int, source_id: int, steps: list[dict]) -> Pipeline: ...
+    def create_pipeline(self, user_id: str, project_id: int, hospital_id: int, steps: list[dict]) -> Pipeline: ...
     def set_pipeline_deleted(self, pipeline_id: int, deleted_at: str | None) -> Pipeline: ...
     def touch_pipeline(self, pipeline_id: int) -> None: ...
     # steps
@@ -312,9 +313,9 @@ class PipelineService:
 
     # -- pipelines ----------------------------------------------------------------------------
 
-    def _summaries(self, user_id: str, is_admin: bool, project_id: int, pipelines: list[Pipeline]) -> list[PipelineSummary]:
-        in_project = self._store.project_source_ids(project_id)
-        names = self._store.source_names([p.source_id for p in pipelines], user_id, is_admin)
+    def _summaries(self, project_id: int, pipelines: list[Pipeline]) -> list[PipelineSummary]:
+        in_project = self._store.project_hospital_ids(project_id)
+        names = self._store.hospital_names([p.hospital_id for p in pipelines])
         closed = {s.key for s in self._setup.statuses(include_archived=True) if s.closed}
         steps = [s for s in self._store.steps([p.id for p in pipelines]) if s.deleted_at is None]
         out = []
@@ -322,34 +323,32 @@ class PipelineService:
             own = [s for s in steps if s.pipeline_id == p.id]
             out.append(
                 PipelineSummary(
-                    p, names.get(p.source_id), p.source_id in in_project, len(own),
+                    p, names.get(p.hospital_id), p.hospital_id in in_project, len(own),
                     sum(1 for s in own if s.status_key in closed),
                 )
             )
         return out
 
     def list_for_project(self, user_id: str, project_id: int, include_removed: bool = False) -> list[PipelineSummary]:
-        is_admin = self._user(user_id)
+        self._user(user_id)
         self._own_project(user_id, project_id)
         pipelines = [
             p for p in self._store.pipelines_of_project(project_id)
             if p.user_id == user_id and (include_removed or p.deleted_at is None)
         ]
-        return self._summaries(user_id, is_admin, project_id, pipelines)
+        return self._summaries(project_id, pipelines)
 
-    def start(self, user_id: str, project_id: int, source_id: int) -> Pipeline:
-        is_admin = self._user(user_id)
+    def start(self, user_id: str, project_id: int, hospital_id: int) -> Pipeline:
+        self._user(user_id)
         self._own_project(user_id, project_id)
-        if source_id not in self._store.project_source_ids(project_id):
+        if hospital_id not in self._store.project_hospital_ids(project_id):
             raise ValidationError("this hospital is not in the project; add it first")
-        if not self._store.can_read_source(user_id, source_id, is_admin):
-            raise NotFoundError("source not found")
         if any(
-            p.source_id == source_id and p.deleted_at is None
+            p.hospital_id == hospital_id and p.deleted_at is None
             for p in self._store.pipelines_of_project(project_id)
         ):
             raise ConflictError("this hospital already has a pipeline in the project")
-        order = self._setup.template_for(source_id)
+        order = self._setup.template_for(hospital_id)
         live = {t.id: t for t in self._setup.step_types()}
         status = self._first_open_status()
         steps = [
@@ -357,19 +356,22 @@ class PipelineService:
             for i, tid in enumerate((t for t in order.step_type_ids if t in live), start=1)
         ]
         try:
-            pipeline = self._store.create_pipeline(user_id, project_id, source_id, steps)
+            pipeline = self._store.create_pipeline(user_id, project_id, hospital_id, steps)
         except NameTakenError as exc:
             raise ConflictError("this hospital already has a pipeline in the project") from exc
         self._event(
             pipeline.id, None, user_id, "pipeline.started",
-            {"source_id": source_id, "steps": [s["name"] for s in steps], "from": "hospital" if order.source_id else "global"},
+            {
+                "hospital_id": hospital_id, "steps": [s["name"] for s in steps],
+                "from": "hospital" if order.hospital_id else "global",
+            },
         )
         return pipeline
 
     def detail(self, user_id: str, pipeline_id: int) -> PipelineDetail:
-        is_admin = self._user(user_id)
+        self._user(user_id)
         pipeline = self._pipeline(user_id, pipeline_id, live=False)
-        summary = self._summaries(user_id, is_admin, pipeline.project_id, [pipeline])[0]
+        summary = self._summaries(pipeline.project_id, [pipeline])[0]
         steps = sorted(self._store.steps([pipeline.id]), key=lambda s: (s.deleted_at is not None, s.position, s.id))
         docs = self._store.documents([s.id for s in steps])
         all_types = {t.id: t for t in self._setup.step_types(include_archived=True)}

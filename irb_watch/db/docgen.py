@@ -79,7 +79,7 @@ def _template(row: dict, links: tuple[int, ...]) -> FormTemplate:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row.get("archived_at"),
-        source_ids=links,
+        hospital_ids=links,
     )
 
 
@@ -136,7 +136,7 @@ class SupabaseDocgenStore:
         """Same rule as private.can_read_source; AI-off sources are included."""
         rows = (
             self._c.table("sources")
-            .select("id, name, requires_login, ai_enabled")
+            .select("id, name, requires_login, ai_enabled, hospital_id")
             .order("id")
             .execute()
             .data
@@ -152,7 +152,7 @@ class SupabaseDocgenStore:
             )
             member_of = {m["source_id"] for m in member_rows}
         return {
-            r["id"]: SourceRef(r["id"], r["name"], bool(r["ai_enabled"]))
+            r["id"]: SourceRef(r["id"], r["name"], bool(r["ai_enabled"]), r.get("hospital_id"))
             for r in rows
             if is_admin or not r["requires_login"] or r["id"] in member_of
         }
@@ -160,13 +160,16 @@ class SupabaseDocgenStore:
     def get_source(self, source_id: int) -> SourceRef | None:
         rows = (
             self._c.table("sources")
-            .select("id, name, ai_enabled")
+            .select("id, name, ai_enabled, hospital_id")
             .eq("id", source_id)
             .limit(1)
             .execute()
             .data
         )
-        return SourceRef(rows[0]["id"], rows[0]["name"], bool(rows[0]["ai_enabled"])) if rows else None
+        if not rows:
+            return None
+        r = rows[0]
+        return SourceRef(r["id"], r["name"], bool(r["ai_enabled"]), r.get("hospital_id"))
 
     def get_doc_version(
         self, document_id: int, version_no: int | None, previous: bool = True
@@ -212,15 +215,15 @@ class SupabaseDocgenStore:
         if not guide_ids:
             return {}
         rows = (
-            self._c.table("source_guides")
-            .select("source_id, guide_id")
+            self._c.table("hospital_guides")
+            .select("hospital_id, guide_id")
             .in_("guide_id", guide_ids)
             .execute()
             .data
         )
         out: dict[int, list[int]] = {}
         for r in rows:
-            out.setdefault(r["guide_id"], []).append(r["source_id"])
+            out.setdefault(r["guide_id"], []).append(r["hospital_id"])
         return {g: tuple(sorted(s)) for g, s in out.items()}
 
     def _guides(self, rows: list[dict]) -> list[Guide]:
@@ -233,7 +236,7 @@ class SupabaseDocgenStore:
                 body_text=r["body_text"],
                 created_at=r["created_at"],
                 archived_at=r.get("archived_at"),
-                source_ids=links.get(r["id"], ()),
+                hospital_ids=links.get(r["id"], ()),
                 is_global=bool(r.get("is_global")),
                 text_updated_at=r.get("text_updated_at"),
             )
@@ -271,13 +274,13 @@ class SupabaseDocgenStore:
         by_id = {g.id: g for g in self._guides(rows)}
         return [by_id[g] for g in guide_ids if g in by_id]
 
-    def guides_for_sources(self, source_ids: list[int]) -> list[Guide]:
-        if not source_ids:
+    def guides_for_hospitals(self, hospital_ids: list[int]) -> list[Guide]:
+        if not hospital_ids:
             return []
         links = (
-            self._c.table("source_guides")
+            self._c.table("hospital_guides")
             .select("guide_id")
-            .in_("source_id", source_ids)
+            .in_("hospital_id", hospital_ids)
             .execute()
             .data
         )
@@ -306,9 +309,13 @@ class SupabaseDocgenStore:
         )
         return self._guides(global_rows + rows)
 
-    def list_sources(self) -> list[SourceRef]:
-        rows = self._c.table("sources").select("id, name, ai_enabled").order("name").execute().data
-        return [SourceRef(r["id"], r["name"], bool(r["ai_enabled"])) for r in rows]
+    def hospital_ids(self) -> set[int]:
+        rows = self._c.table("hospitals").select("id").execute().data
+        return {int(r["id"]) for r in rows}
+
+    def hospital_exists(self, hospital_id: int) -> bool:
+        rows = self._c.table("hospitals").select("id").eq("id", hospital_id).limit(1).execute().data
+        return bool(rows)
 
     def update_guide(self, guide_id: int, title: str | None, is_global: bool | None) -> None:
         changes: dict = {}
@@ -401,17 +408,17 @@ class SupabaseDocgenStore:
 
     def archive_guide(self, guide_id: int, now: datetime) -> None:
         self._c.table("guides").update({"archived_at": now.isoformat()}).eq("id", guide_id).execute()
-        self._c.table("source_guides").delete().eq("guide_id", guide_id).execute()
+        self._c.table("hospital_guides").delete().eq("guide_id", guide_id).execute()
 
-    def link_guide(self, source_id: int, guide_id: int, now: datetime) -> None:
-        self._c.table("source_guides").upsert(
-            {"source_id": source_id, "guide_id": guide_id, "created_at": now.isoformat()},
-            on_conflict="source_id,guide_id",
+    def link_guide(self, hospital_id: int, guide_id: int, now: datetime) -> None:
+        self._c.table("hospital_guides").upsert(
+            {"hospital_id": hospital_id, "guide_id": guide_id, "created_at": now.isoformat()},
+            on_conflict="hospital_id,guide_id",
             ignore_duplicates=True,
         ).execute()
 
-    def unlink_guide(self, source_id: int, guide_id: int) -> None:
-        self._c.table("source_guides").delete().eq("source_id", source_id).eq(
+    def unlink_guide(self, hospital_id: int, guide_id: int) -> None:
+        self._c.table("hospital_guides").delete().eq("hospital_id", hospital_id).eq(
             "guide_id", guide_id
         ).execute()
 
@@ -421,15 +428,15 @@ class SupabaseDocgenStore:
         if not ids:
             return {}
         rows = (
-            self._c.table("source_form_templates")
-            .select("source_id, template_id")
+            self._c.table("hospital_form_templates")
+            .select("hospital_id, template_id")
             .in_("template_id", ids)
             .execute()
             .data
         )
         out: dict[int, list[int]] = {}
         for r in rows:
-            out.setdefault(r["template_id"], []).append(r["source_id"])
+            out.setdefault(r["template_id"], []).append(r["hospital_id"])
         return {t: tuple(sorted(s)) for t, s in out.items()}
 
     def _templates(self, rows: list[dict]) -> list[FormTemplate]:
@@ -477,8 +484,8 @@ class SupabaseDocgenStore:
         )
         return self._templates(rows)[0] if rows else None
 
-    def templates_for_sources(self, source_ids: list[int]) -> list[FormTemplate]:
-        if not source_ids:
+    def templates_for_hospitals(self, hospital_ids: list[int]) -> list[FormTemplate]:
+        if not hospital_ids:
             return []
         global_rows = (
             self._c.table("form_templates")
@@ -491,9 +498,9 @@ class SupabaseDocgenStore:
             .data
         )
         links = (
-            self._c.table("source_form_templates")
+            self._c.table("hospital_form_templates")
             .select("template_id")
-            .in_("source_id", source_ids)
+            .in_("hospital_id", hospital_ids)
             .execute()
             .data
         )
@@ -524,17 +531,17 @@ class SupabaseDocgenStore:
         self._c.table("form_templates").update(
             {"archived_at": now.isoformat(), "updated_at": now.isoformat()}
         ).eq("id", template_id).execute()
-        self._c.table("source_form_templates").delete().eq("template_id", template_id).execute()
+        self._c.table("hospital_form_templates").delete().eq("template_id", template_id).execute()
 
-    def link_template(self, source_id: int, template_id: int, now: datetime) -> None:
-        self._c.table("source_form_templates").upsert(
-            {"source_id": source_id, "template_id": template_id, "created_at": now.isoformat()},
-            on_conflict="source_id,template_id",
+    def link_template(self, hospital_id: int, template_id: int, now: datetime) -> None:
+        self._c.table("hospital_form_templates").upsert(
+            {"hospital_id": hospital_id, "template_id": template_id, "created_at": now.isoformat()},
+            on_conflict="hospital_id,template_id",
             ignore_duplicates=True,
         ).execute()
 
-    def unlink_template(self, source_id: int, template_id: int) -> None:
-        self._c.table("source_form_templates").delete().eq("source_id", source_id).eq(
+    def unlink_template(self, hospital_id: int, template_id: int) -> None:
+        self._c.table("hospital_form_templates").delete().eq("hospital_id", hospital_id).eq(
             "template_id", template_id
         ).execute()
 

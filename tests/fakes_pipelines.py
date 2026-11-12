@@ -23,9 +23,8 @@ def _now() -> str:
 class FakePipelineStore:
     def __init__(self) -> None:
         self.projects: dict[int, str] = {}  # project id -> owner
-        self.project_sources: dict[int, set[int]] = {}
-        self.readable: dict[str, set[int]] = {}  # user -> readable sources
-        self.names = {4: "SNUH board", 5: "Ewha board", 6: "Study"}
+        self.project_hospitals: dict[int, set[int]] = {}
+        self.names = {4: "SNUH", 5: "Ewha", 6: "Kimpo"}  # hospital id -> name
         self.pipes: dict[int, Pipeline] = {}
         self.step_rows: dict[int, Step] = {}
         self.docs: dict[int, StepDocument] = {}
@@ -38,22 +37,19 @@ class FakePipelineStore:
         self.steps_changed_meanwhile = False
         self.fail_purge_rows: set[str] = set()
 
-    def add_project(self, project_id: int, owner: str, sources: set[int]) -> None:
+    def add_project(self, project_id: int, owner: str, hospitals: set[int]) -> None:
         self.projects[project_id] = owner
-        self.project_sources[project_id] = set(sources)
+        self.project_hospitals[project_id] = set(hospitals)
 
-    # projects and sources
+    # projects and hospitals
     def project_owner(self, project_id):
         return self.projects.get(project_id)
 
-    def project_source_ids(self, project_id):
-        return set(self.project_sources.get(project_id, set()))
+    def project_hospital_ids(self, project_id):
+        return set(self.project_hospitals.get(project_id, set()))
 
-    def can_read_source(self, user_id, source_id, is_admin):
-        return source_id in self.names if is_admin else source_id in self.readable.get(user_id, set())
-
-    def source_names(self, source_ids, user_id, is_admin):
-        return {s: self.names[s] for s in source_ids if is_admin or s in self.readable.get(user_id, set())}
+    def hospital_names(self, hospital_ids):
+        return {h: self.names[h] for h in hospital_ids if h in self.names}
 
     # pipelines
     def pipelines_of_project(self, project_id):
@@ -62,14 +58,14 @@ class FakePipelineStore:
     def get_pipeline(self, pipeline_id):
         return self.pipes.get(pipeline_id)
 
-    def create_pipeline(self, user_id, project_id, source_id, steps):
+    def create_pipeline(self, user_id, project_id, hospital_id, steps):
         if any(
-            p.project_id == project_id and p.source_id == source_id and p.deleted_at is None
+            p.project_id == project_id and p.hospital_id == hospital_id and p.deleted_at is None
             for p in self.pipes.values()
         ):
             raise NameTakenError
         pid = next(self._ids)
-        self.pipes[pid] = Pipeline(pid, user_id, project_id, source_id, _now(), _now())
+        self.pipes[pid] = Pipeline(pid, user_id, project_id, hospital_id, _now(), _now())
         for s in steps:
             self.add_step(pid, s)
         return self.pipes[pid]
@@ -77,7 +73,7 @@ class FakePipelineStore:
     def set_pipeline_deleted(self, pipeline_id, deleted_at):
         p = self.pipes[pipeline_id]
         if deleted_at is None and any(
-            o.id != p.id and o.project_id == p.project_id and o.source_id == p.source_id and o.deleted_at is None
+            o.id != p.id and o.project_id == p.project_id and o.hospital_id == p.hospital_id and o.deleted_at is None
             for o in self.pipes.values()
         ):
             raise NameTakenError

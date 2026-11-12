@@ -11,6 +11,7 @@ from irb_watch.api import (
     admin_credentials,
     admin_documents,
     admin_guides,
+    admin_hospitals,
     admin_mail,
     admin_manual,
     admin_members,
@@ -102,6 +103,7 @@ app.include_router(admin_pipeline.router)
 # Before admin_sources: "/admin/sources/manual" must not be read as a source id.
 app.include_router(admin_manual.router)
 app.include_router(admin_sources.router)
+app.include_router(admin_hospitals.router)
 app.include_router(admin_scans.router)
 app.include_router(admin_credentials.router)
 app.include_router(admin_documents.router)

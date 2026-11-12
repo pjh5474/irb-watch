@@ -31,7 +31,7 @@ class FakePipelineSetupStore:
         self.template_rows: dict[int | None, PipelineTemplate] = {None: PipelineTemplate(None, (1, 2, 3, 6))}
         self.guides = {10, 11}  # live guide ids
         self.ready_forms = {20}
-        self.sources = {4, 5}
+        self.hospitals = {4, 5}
         self.updated_by: dict[int, str] = {}
 
     def statuses(self):
@@ -86,12 +86,12 @@ class FakePipelineSetupStore:
     def templates(self):
         return list(self.template_rows.values())
 
-    def save_template(self, source_id, step_type_ids, actor_id):
-        self.template_rows[source_id] = PipelineTemplate(source_id, tuple(step_type_ids))
-        return self.template_rows[source_id]
+    def save_template(self, hospital_id, step_type_ids, actor_id):
+        self.template_rows[hospital_id] = PipelineTemplate(hospital_id, tuple(step_type_ids))
+        return self.template_rows[hospital_id]
 
-    def delete_template(self, source_id):
-        return self.template_rows.pop(source_id, None) is not None
+    def delete_template(self, hospital_id):
+        return self.template_rows.pop(hospital_id, None) is not None
 
     def live_guide_ids(self, ids):
         return {i for i in ids if i in self.guides}
@@ -99,5 +99,5 @@ class FakePipelineSetupStore:
     def form_template_ready(self, template_id):
         return template_id in self.ready_forms
 
-    def source_exists(self, source_id):
-        return source_id in self.sources
+    def hospital_exists(self, hospital_id):
+        return hospital_id in self.hospitals

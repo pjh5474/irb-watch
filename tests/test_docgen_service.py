@@ -48,8 +48,8 @@ def env():
     store.add_document(10, PUBLIC, "Consent form")
     store.add_document(20, STUDY, "Protocol")
     store.add_document(30, OFF, "Secret protocol")
-    store.add_guide(1, "SNUH guide", "Sections: summary, changes", sources=[PUBLIC])
-    store.add_guide(2, "Study guide", "Study sections", sources=[STUDY])
+    store.add_guide(1, "SNUH guide", "Sections: summary, changes", hospitals=[PUBLIC])
+    store.add_guide(2, "Study guide", "Study sections", hospitals=[STUDY])
     store.add_guide(3, "Unlinked guide", "Other")
     writer = FakeWriter()
     service = DocgenService(users, store, writer, audit, daily_limit=3, clock=lambda: NOW)
@@ -333,11 +333,11 @@ def test_admin_uploads_links_and_archives_a_guide(env):
     guide = service.create_guide("admin-1", "New guide", UploadedFile("g.txt", b64("Write X")))
     assert guide.body_text == "Write X"
     service.link_guide("admin-1", PUBLIC, guide.id)
-    assert guide.id in [g.id for g in service.source_guides("admin-1", PUBLIC)]
+    assert guide.id in [g.id for g in service.hospital_guides("admin-1", PUBLIC)]
     service.unlink_guide("admin-1", PUBLIC, guide.id)
     service.link_guide("admin-1", STUDY, guide.id)
     service.archive_guide("admin-1", guide.id)
-    assert guide.id not in [g.id for g in service.source_guides("admin-1", STUDY)]
+    assert guide.id not in [g.id for g in service.hospital_guides("admin-1", STUDY)]
     with pytest.raises(ConflictError):
         service.link_guide("admin-1", PUBLIC, guide.id)
     kinds = [e["event_type"] for e in audit.entries]

@@ -329,7 +329,7 @@ def test_docgen_preview_allows_ai_off_sources_and_saves_nothing():
     store = FakeDocgenStore()
     store.add_source(3, "AI-off", ai_enabled=False, requires_login=True)
     store.add_document(30, 3)
-    store.add_guide(1, "Guide", sources=[3])
+    store.add_guide(1, "Guide", hospitals=[3])
     writer = FakeWriter()
     service = DocgenService(users, store, writer, FakeAudit(), clock=lambda: NOW,
                             extra_instructions=lambda: "SAVED")

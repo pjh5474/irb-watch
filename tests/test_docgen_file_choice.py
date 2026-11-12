@@ -34,7 +34,7 @@ def env():
     store.add_document(10, PUBLIC, "Amendment notice", versions=3, files=("protocol.pdf", "consent.hwp"))
     store.add_document(11, PUBLIC, "Other notice")
     store.add_document(30, OFF, "Secret")
-    store.add_guide(1, "SNUH guide", "Guide text", sources=[PUBLIC])
+    store.add_guide(1, "SNUH guide", "Guide text", hospitals=[PUBLIC])
     store.add_guide(2, "Unlinked guide", "Other")
     writer = FakeWriter()
     service = DocgenService(users, store, writer, audit, daily_limit=10, clock=lambda: NOW)

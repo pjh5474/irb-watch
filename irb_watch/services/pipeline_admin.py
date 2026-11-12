@@ -76,7 +76,7 @@ class StepTypeEdit:
 
 @dataclass(frozen=True)
 class PipelineTemplate:
-    source_id: int | None  # None = the global default
+    hospital_id: int | None  # None = the global default
     step_type_ids: tuple[int, ...]
     updated_at: str = ""
 
@@ -94,11 +94,11 @@ class PipelineSetupStore(Protocol):
     def create_step_type(self, edit: StepTypeEdit, actor_id: str) -> StepType: ...
     def update_step_type(self, type_id: int, values: dict, actor_id: str) -> StepType: ...
     def templates(self) -> list[PipelineTemplate]: ...
-    def save_template(self, source_id: int | None, step_type_ids: list[int], actor_id: str) -> PipelineTemplate: ...
-    def delete_template(self, source_id: int) -> bool: ...
+    def save_template(self, hospital_id: int | None, step_type_ids: list[int], actor_id: str) -> PipelineTemplate: ...
+    def delete_template(self, hospital_id: int) -> bool: ...
     def live_guide_ids(self, ids: list[int]) -> set[int]: ...
     def form_template_ready(self, template_id: int) -> bool: ...
-    def source_exists(self, source_id: int) -> bool: ...
+    def hospital_exists(self, hospital_id: int) -> bool: ...
 
 
 def _text(value: str, limit: int, what: str, *, required: bool = False) -> str:
@@ -304,7 +304,9 @@ class PipelineSetupService:
             raise ConflictError("this step type is already archived")
         used = [t for t in self._store.templates() if type_id in t.step_type_ids]
         if used:
-            where = ", ".join("global" if t.source_id is None else f"source #{t.source_id}" for t in used)
+            where = ", ".join(
+                "global" if t.hospital_id is None else f"hospital #{t.hospital_id}" for t in used
+            )
             raise ConflictError(f"remove it from the default step order first ({where})")
         updated = self._store.update_step_type(
             type_id, {"archived_at": self._clock().isoformat()}, actor_id
@@ -332,22 +334,22 @@ class PipelineSetupService:
     # -- default step order -------------------------------------------------------------------
 
     def templates(self) -> list[PipelineTemplate]:
-        """The global list first, then per-hospital lists by source id."""
+        """The global list first, then per-hospital lists by hospital id."""
         return sorted(
-            self._store.templates(), key=lambda t: (t.source_id is not None, t.source_id or 0)
+            self._store.templates(), key=lambda t: (t.hospital_id is not None, t.hospital_id or 0)
         )
 
-    def template_for(self, source_id: int) -> PipelineTemplate:
+    def template_for(self, hospital_id: int) -> PipelineTemplate:
         """The list a new pipeline at this hospital starts from (phase 2)."""
         rows = self._store.templates()
-        own = next((t for t in rows if t.source_id == source_id), None)
-        found = own or next((t for t in rows if t.source_id is None), None)
+        own = next((t for t in rows if t.hospital_id == hospital_id), None)
+        found = own or next((t for t in rows if t.hospital_id is None), None)
         if found is None:
             raise ConflictError("no default step order is set; ask an admin")
         return found
 
     def save_template(
-        self, actor_id: str, source_id: int | None, step_type_ids: list[int]
+        self, actor_id: str, hospital_id: int | None, step_type_ids: list[int]
     ) -> PipelineTemplate:
         if not 1 <= len(step_type_ids) <= MAX_TEMPLATE_STEPS:
             raise ValidationError(f"the step order needs 1 to {MAX_TEMPLATE_STEPS} steps")
@@ -357,20 +359,20 @@ class PipelineSetupService:
         unknown = [i for i in step_type_ids if i not in live]
         if unknown:
             raise ValidationError(f"step types not found or archived: {unknown}")
-        if source_id is not None and not self._store.source_exists(source_id):
-            raise NotFoundError("source not found")
-        saved = self._store.save_template(source_id, step_type_ids, actor_id)
+        if hospital_id is not None and not self._store.hospital_exists(hospital_id):
+            raise NotFoundError("hospital not found")
+        saved = self._store.save_template(hospital_id, step_type_ids, actor_id)
         self._record(
             actor_id, "pipeline.template_saved",
-            "Default step order saved" if source_id is None else f"Step order for source #{source_id} saved",
-            {"source_id": source_id, "step_type_ids": step_type_ids},
+            "Default step order saved" if hospital_id is None else f"Step order for hospital #{hospital_id} saved",
+            {"hospital_id": hospital_id, "step_type_ids": step_type_ids},
         )
         return saved
 
-    def delete_template(self, actor_id: str, source_id: int) -> None:
-        if not self._store.delete_template(source_id):
+    def delete_template(self, actor_id: str, hospital_id: int) -> None:
+        if not self._store.delete_template(hospital_id):
             raise NotFoundError("this hospital has no step order of its own")
         self._record(
-            actor_id, "pipeline.template_deleted", f"Step order for source #{source_id} removed",
-            {"source_id": source_id},
+            actor_id, "pipeline.template_deleted", f"Step order for hospital #{hospital_id} removed",
+            {"hospital_id": hospital_id},
         )

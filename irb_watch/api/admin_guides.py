@@ -34,8 +34,8 @@ class GuideFileIn(BaseModel):
     file: FileIn
 
 
-class GuideSourcesIn(BaseModel):
-    source_ids: list[int] = Field(max_length=1000)
+class GuideHospitalsIn(BaseModel):
+    hospital_ids: list[int] = Field(max_length=1000)
 
 
 class RevisionOut(BaseModel):
@@ -128,15 +128,15 @@ def guide_history(
     return [RevisionOut.of(r) for r in service.guide_history(admin.id, guide_id)]
 
 
-@router.put("/guides/{guide_id}/sources", response_model=GuideOut)
-def set_guide_sources(
+@router.put("/guides/{guide_id}/hospitals", response_model=GuideOut)
+def set_guide_hospitals(
     guide_id: int,
-    body: GuideSourcesIn,
+    body: GuideHospitalsIn,
     admin: AuthUser = Depends(require_admin),
     service: DocgenService = Depends(get_docgen_service),
 ) -> GuideOut:
-    """The full list of sites that use this guide by default (replaces the current list)."""
-    return GuideOut.of(service.set_guide_sources(admin.id, guide_id, body.source_ids))
+    """The full list of hospitals that use this guide by default (replaces the current list)."""
+    return GuideOut.of(service.set_guide_hospitals(admin.id, guide_id, body.hospital_ids))
 
 
 @router.delete("/guides/{guide_id}", status_code=204)
@@ -149,30 +149,30 @@ def archive_guide(
     service.archive_guide(admin.id, guide_id)
 
 
-@router.get("/sources/{source_id}/guides", response_model=list[GuideOut])
-def source_guides(
-    source_id: int,
+@router.get("/hospitals/{hospital_id}/guides", response_model=list[GuideOut])
+def hospital_guides(
+    hospital_id: int,
     admin: AuthUser = Depends(require_admin),
     service: DocgenService = Depends(get_docgen_service),
 ) -> list[GuideOut]:
-    return [GuideOut.of(g) for g in service.source_guides(admin.id, source_id)]
+    return [GuideOut.of(g) for g in service.hospital_guides(admin.id, hospital_id)]
 
 
-@router.put("/sources/{source_id}/guides/{guide_id}", status_code=204)
+@router.put("/hospitals/{hospital_id}/guides/{guide_id}", status_code=204)
 def link_guide(
-    source_id: int,
+    hospital_id: int,
     guide_id: int,
     admin: AuthUser = Depends(require_admin),
     service: DocgenService = Depends(get_docgen_service),
 ) -> None:
-    service.link_guide(admin.id, source_id, guide_id)
+    service.link_guide(admin.id, hospital_id, guide_id)
 
 
-@router.delete("/sources/{source_id}/guides/{guide_id}", status_code=204)
+@router.delete("/hospitals/{hospital_id}/guides/{guide_id}", status_code=204)
 def unlink_guide(
-    source_id: int,
+    hospital_id: int,
     guide_id: int,
     admin: AuthUser = Depends(require_admin),
     service: DocgenService = Depends(get_docgen_service),
 ) -> None:
-    service.unlink_guide(admin.id, source_id, guide_id)
+    service.unlink_guide(admin.id, hospital_id, guide_id)

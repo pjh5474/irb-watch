@@ -300,7 +300,7 @@ def ready_template(service, sources=(A,)):
         "admin-1", t.id, [FieldEdit(f.key, f.label, f.hint, f.multi) for f in t.fields]
     )
     if sources:
-        service.set_template_sources("admin-1", t.id, list(sources))
+        service.set_template_hospitals("admin-1", t.id, list(sources))
     return service.template("admin-1", t.id)
 
 
@@ -309,7 +309,7 @@ def test_a_new_template_waits_for_the_field_check(env):
     t = service.create_template("admin-1", "변경신청서", "amendment", upload())
     assert t.status == "review" and t.storage_path in files.files
     assert audit.entries[-1]["event_type"] == "docgen.template_created"
-    service.set_template_sources("admin-1", t.id, [A])
+    service.set_template_hospitals("admin-1", t.id, [A])
     assert service.templates_for("user-1", [A]) == []
     with pytest.raises(NotFoundError):
         service.create_draft("user-1", [DocChoice(10)], None, [], "", [], template_id=t.id)
@@ -354,7 +354,7 @@ def test_which_templates_a_user_is_offered(env):
     service.archive_template("admin-1", linked.id)
     assert [t.id for t in service.templates_for("user-1", [A])] == [glob.id]
     with pytest.raises(ConflictError, match="global"):
-        service.set_template_sources("admin-1", glob.id, [A])
+        service.set_template_hospitals("admin-1", glob.id, [A])
 
 
 def test_a_template_draft_is_one_checked_answer_per_field(env):
@@ -542,7 +542,7 @@ def test_template_sources_are_logged_before_they_change(env):
     t = ready_template(service, sources=())
     audit.fail_required = True
     with pytest.raises(AuditUnavailableError):
-        service.set_template_sources("admin-1", t.id, [A])
+        service.set_template_hospitals("admin-1", t.id, [A])
     assert store.template_links == set()
 
 
@@ -573,8 +573,8 @@ def test_the_template_api(client, env):
     assert len(client.get(f"/admin/templates/{tid}/detected", headers=h).json()) == len(fields)
     body = {"fields": [{"key": f["key"], "label": f["label"]} for f in fields]}
     assert client.put(f"/admin/templates/{tid}/fields", headers=h, json=body).json()["status"] == "ready"
-    res = client.put(f"/admin/templates/{tid}/sources", headers=h, json={"source_ids": [A]})
-    assert res.json()["source_ids"] == [A]
+    res = client.put(f"/admin/templates/{tid}/hospitals", headers=h, json={"hospital_ids": [A]})
+    assert res.json()["hospital_ids"] == [A]
 
     u = auth("user-1")
     offered = client.get(f"/docgen/templates?source_id={A}", headers=u).json()
@@ -600,5 +600,5 @@ def test_template_admin_routes_are_admin_only(client):
     assert client.get("/admin/templates", headers=h).status_code == 403
     assert client.get("/admin/templates/1", headers=h).status_code == 403
     assert client.put("/admin/templates/1/fields", headers=h, json={"fields": []}).status_code == 403
-    assert client.put("/admin/templates/1/sources", headers=h, json={"source_ids": []}).status_code == 403
+    assert client.put("/admin/templates/1/hospitals", headers=h, json={"hospital_ids": []}).status_code == 403
     assert client.delete("/admin/templates/1", headers=h).status_code == 403

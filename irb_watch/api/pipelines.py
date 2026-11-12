@@ -33,8 +33,8 @@ Service = PipelineService
 class PipelineOut(BaseModel):
     id: int
     project_id: int
-    source_id: int
-    source_name: str | None
+    hospital_id: int
+    hospital_name: str | None
     in_project: bool
     steps: int
     closed_steps: int
@@ -46,7 +46,7 @@ class PipelineOut(BaseModel):
     def of(cls, s: PipelineSummary) -> "PipelineOut":
         p = s.pipeline
         return cls(
-            id=p.id, project_id=p.project_id, source_id=p.source_id, source_name=s.source_name,
+            id=p.id, project_id=p.project_id, hospital_id=p.hospital_id, hospital_name=s.hospital_name,
             in_project=s.in_project, steps=s.steps, closed_steps=s.closed_steps,
             created_at=p.created_at, updated_at=p.updated_at, deleted_at=p.deleted_at,
         )
@@ -55,12 +55,12 @@ class PipelineOut(BaseModel):
 class PipelineRef(BaseModel):
     id: int
     project_id: int
-    source_id: int
+    hospital_id: int
     deleted_at: str | None
 
     @classmethod
     def of(cls, p: Pipeline) -> "PipelineRef":
-        return cls(id=p.id, project_id=p.project_id, source_id=p.source_id, deleted_at=p.deleted_at)
+        return cls(id=p.id, project_id=p.project_id, hospital_id=p.hospital_id, deleted_at=p.deleted_at)
 
 
 class VersionOut(BaseModel):
@@ -158,7 +158,7 @@ class DetailOut(BaseModel):
 
 
 class StartIn(BaseModel):
-    source_id: int
+    hospital_id: int
 
 
 class NewStepIn(BaseModel):
@@ -244,7 +244,7 @@ def start_pipeline(
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
 ) -> PipelineRef:
-    return PipelineRef.of(service.start(user.id, project_id, body.source_id))
+    return PipelineRef.of(service.start(user.id, project_id, body.hospital_id))
 
 
 @router.get("/pipelines/{pipeline_id}", response_model=DetailOut)

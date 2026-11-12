@@ -44,8 +44,8 @@ class FieldsIn(BaseModel):
     fields: list[FieldEditIn] = Field(max_length=200)
 
 
-class SourcesIn(BaseModel):
-    source_ids: list[int] = Field(max_length=1000)
+class HospitalsIn(BaseModel):
+    hospital_ids: list[int] = Field(max_length=1000)
 
 
 @router.get("/templates", response_model=list[TemplateOut])
@@ -130,15 +130,15 @@ def replace_template_file(
     return TemplateOut.of(t)
 
 
-@router.put("/templates/{template_id}/sources", response_model=TemplateOut)
-def set_template_sources(
+@router.put("/templates/{template_id}/hospitals", response_model=TemplateOut)
+def set_template_hospitals(
     template_id: int,
-    body: SourcesIn,
+    body: HospitalsIn,
     admin: AuthUser = Depends(require_admin),
     service: DocgenService = Depends(get_docgen_service),
 ) -> TemplateOut:
-    """The full list of sites that offer this form (replaces the current list)."""
-    return TemplateOut.of(service.set_template_sources(admin.id, template_id, body.source_ids))
+    """The full list of hospitals that offer this form (replaces the current list)."""
+    return TemplateOut.of(service.set_template_hospitals(admin.id, template_id, body.hospital_ids))
 
 
 @router.delete("/templates/{template_id}", status_code=204)

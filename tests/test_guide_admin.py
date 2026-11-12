@@ -35,7 +35,7 @@ def env():
     store.add_document(10, A)
     store.add_document(20, B)
     store.add_document(30, STUDY)
-    store.add_guide(1, "SNUH guide", "Hospital sections", sources=[A])
+    store.add_guide(1, "SNUH guide", "Hospital sections", hospitals=[A])
     store.add_guide(2, "Global guide", "Global sections", is_global=True)
     store.add_guide(3, "Unused guide", "Other")
     writer = FakeWriter()
@@ -55,18 +55,19 @@ def test_a_global_guide_is_a_default_for_every_source_and_goes_first(env):
     service.create_draft("user-1", [DocChoice(10)], None, [], "", [])
     text = writer.calls[-1][1]
     assert text.index("Global sections") < text.index("Hospital sections")
-    assert "scope: global" in text and "scope: hospital, source ids: 1" in text
+    assert "scope: global" in text and "scope: hospital, hospital ids: 1" in text
     assert "for other documents it does not override a global guide" in writer.calls[-1][0]
 
 
 def test_scope_lines_name_each_hospital_guides_sources(env):
     """A draft over two hospitals: each hospital guide says which sources it speaks for."""
     service, store, writer, _ = env
-    store.add_guide(4, "Forms guide", "Forms sections", sources=[B])
+    store.add_guide(4, "Forms guide", "Forms sections", hospitals=[B])
     service.create_draft("admin-1", [DocChoice(10), DocChoice(20)], [2, 1, 4, 3], [], "", [])
     text = writer.calls[-1][1]
-    assert "scope: hospital, source ids: 1\n" in text
-    assert "scope: hospital, source ids: 2\n" in text
+    assert "scope: hospital, hospital ids: 1\n" in text
+    assert "scope: hospital, hospital ids: 2\n" in text
+    assert "source id: 1, hospital id: 1" in text  # each document names its hospital
     assert "scope: this draft (chosen for it)" in text  # guide 3 is linked to no source
     assert "source id: 1" in text and "source id: 2" in text  # the documents name theirs
 
@@ -81,12 +82,12 @@ def test_a_user_may_untick_a_global_guide(env):
 def test_making_a_guide_global_and_back_keeps_its_links(env):
     service, store, _, audit = env
     g = service.update_guide("admin-1", 1, None, True)
-    assert g.is_global and g.source_ids == (A,)
+    assert g.is_global and g.hospital_ids == (A,)
     assert [x.id for x in service.default_guides("user-1", [B])] == [1, 2]
     assert audit.entries[-1]["event_type"] == "docgen.guide_updated"
     assert audit.entries[-1]["payload"] == {"guide_id": 1, "is_global": True}
     g = service.update_guide("admin-1", 1, None, False)
-    assert not g.is_global and g.source_ids == (A,)
+    assert not g.is_global and g.hospital_ids == (A,)
     assert [x.id for x in service.default_guides("user-1", [B])] == [2]
 
 
@@ -101,7 +102,7 @@ def test_an_archived_global_guide_is_no_longer_a_default(env):
 def test_a_global_guide_cannot_be_linked_to_sites(env):
     service, _, _, _ = env
     with pytest.raises(ConflictError, match="global"):
-        service.set_guide_sources("admin-1", 2, [A])
+        service.set_guide_hospitals("admin-1", 2, [A])
     with pytest.raises(ConflictError, match="global"):
         service.link_guide("admin-1", B, 2)
 
@@ -121,23 +122,23 @@ def test_a_draft_keeps_a_global_guide_on_revise_after_it_became_site_specific(en
 
 def test_set_sources_adds_and_removes_in_one_call_with_one_entry(env):
     service, store, _, audit = env
-    g = service.set_guide_sources("admin-1", 1, [B, STUDY])
-    assert g.source_ids == (B, STUDY)
+    g = service.set_guide_hospitals("admin-1", 1, [B, STUDY])
+    assert g.hospital_ids == (B, STUDY)
     entry = audit.entries[-1]
-    assert entry["event_type"] == "docgen.guide_sources_set"
+    assert entry["event_type"] == "docgen.guide_hospitals_set"
     assert entry["payload"] == {"guide_id": 1, "added": [B, STUDY], "removed": [A]}
     count = len(audit.entries)
-    service.set_guide_sources("admin-1", 1, [STUDY, B])  # same list: nothing to do
+    service.set_guide_hospitals("admin-1", 1, [STUDY, B])  # same list: nothing to do
     assert len(audit.entries) == count
 
 
 def test_set_sources_refuses_unknown_sources_and_archived_guides(env):
     service, _, _, _ = env
-    with pytest.raises(NotFoundError, match="source 99"):
-        service.set_guide_sources("admin-1", 1, [A, 99])
+    with pytest.raises(NotFoundError, match="hospital 99"):
+        service.set_guide_hospitals("admin-1", 1, [A, 99])
     service.archive_guide("admin-1", 3)
     with pytest.raises(ConflictError, match="archived"):
-        service.set_guide_sources("admin-1", 3, [A])
+        service.set_guide_hospitals("admin-1", 3, [A])
 
 
 # -- rename, replace, history ---------------------------------------------------------------
@@ -155,7 +156,7 @@ def test_replacing_the_file_keeps_the_old_text_in_the_history(env):
     service, store, writer, audit = env
     g = service.replace_guide_file("admin-1", 1, UploadedFile("new.txt", b64("New sections")))
     assert g.body_text == "New sections" and g.filename == "new.txt" and g.text_updated_at
-    assert g.source_ids == (A,)
+    assert g.hospital_ids == (A,)
     history = service.guide_history("admin-1", 1)
     assert [(r.filename, r.body_text, r.replaced_by) for r in history] == [
         ("SNUH guide.txt", "Hospital sections", "admin-1")
@@ -195,8 +196,8 @@ def test_site_changes_are_logged_before_they_are_made(env):
     service, store, _, audit = env
     audit.fail_required = True
     with pytest.raises(AuditUnavailableError):
-        service.set_guide_sources("admin-1", 1, [B])
-    assert store.guides_for_sources([B]) == [store._with_links(store.guides[2])]  # only the global one
+        service.set_guide_hospitals("admin-1", 1, [B])
+    assert store.guides_for_hospitals([B]) == [store._with_links(store.guides[2])]  # only the global one
 
 
 class _Q:
@@ -274,7 +275,7 @@ def test_only_admins(env):
     service, _, _, _ = env
     for call in (
         lambda: service.update_guide("user-1", 1, "x", None),
-        lambda: service.set_guide_sources("user-1", 1, [A]),
+        lambda: service.set_guide_hospitals("user-1", 1, [A]),
         lambda: service.replace_guide_file("user-1", 1, UploadedFile("a.txt", b64("a"))),
         lambda: service.guide_history("user-1", 1),
         lambda: service.guide("user-1", 1),
@@ -305,9 +306,9 @@ def test_the_admin_api(client):
     assert client.get("/admin/guides/1", headers=h).json()["body_text"] == "Hospital sections"
     res = client.patch("/admin/guides/3", headers=h, json={"title": "Renamed", "is_global": True})
     assert res.status_code == 200 and res.json()["is_global"] is True and res.json()["title"] == "Renamed"
-    res = client.put("/admin/guides/1/sources", headers=h, json={"source_ids": [A, B]})
-    assert res.status_code == 200 and res.json()["source_ids"] == [A, B]
-    assert client.put("/admin/guides/3/sources", headers=h, json={"source_ids": [A]}).status_code == 409
+    res = client.put("/admin/guides/1/hospitals", headers=h, json={"hospital_ids": [A, B]})
+    assert res.status_code == 200 and res.json()["hospital_ids"] == [A, B]
+    assert client.put("/admin/guides/3/hospitals", headers=h, json={"hospital_ids": [A]}).status_code == 409
     res = client.put("/admin/guides/1/file", headers=h, json={"file": {"filename": "n.md", "content_base64": b64("# New")}})
     assert res.status_code == 200 and res.json()["body_text"] == "# New"
     history = client.get("/admin/guides/1/history", headers=h).json()
@@ -321,5 +322,5 @@ def test_new_routes_are_admin_only(client):
     h = auth("user-1")
     assert client.get("/admin/guides/1", headers=h).status_code == 403
     assert client.patch("/admin/guides/1", headers=h, json={"title": "x"}).status_code == 403
-    assert client.put("/admin/guides/1/sources", headers=h, json={"source_ids": []}).status_code == 403
+    assert client.put("/admin/guides/1/hospitals", headers=h, json={"hospital_ids": []}).status_code == 403
     assert client.get("/admin/guides/1/history", headers=h).status_code == 403

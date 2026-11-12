@@ -26,7 +26,7 @@ def env():
     store.add_source(3, "AI-off", ai_enabled=False)
     store.add_document(10, 1)
     store.add_document(30, 3)
-    store.add_guide(1, "SNUH guide", sources=[1])
+    store.add_guide(1, "SNUH guide", hospitals=[1])
     writer = FakeWriter(title="변경 신청서")
 
     def service():
@@ -58,9 +58,9 @@ def test_every_route_needs_a_login(env):
         ("get", "/admin/guides"),
         ("post", "/admin/guides"),
         ("delete", "/admin/guides/1"),
-        ("get", "/admin/sources/1/guides"),
-        ("put", "/admin/sources/1/guides/1"),
-        ("delete", "/admin/sources/1/guides/1"),
+        ("get", "/admin/hospitals/1/guides"),
+        ("put", "/admin/hospitals/1/guides/1"),
+        ("delete", "/admin/hospitals/1/guides/1"),
     ]:
         assert getattr(client, method)(path).status_code == 401, (method, path)
 
@@ -68,7 +68,7 @@ def test_every_route_needs_a_login(env):
 def test_admin_routes_refuse_users(env):
     client, *_ = env
     assert client.get("/admin/guides", headers=auth("user-1")).status_code == 403
-    assert client.put("/admin/sources/1/guides/1", headers=auth("user-1")).status_code == 403
+    assert client.put("/admin/hospitals/1/guides/1", headers=auth("user-1")).status_code == 403
 
 
 def test_the_whole_flow(env):
@@ -160,10 +160,10 @@ def test_admin_guide_library(env):
     assert res.status_code == 201, res.text
     gid = res.json()["id"]
     assert res.json()["body_text"] == "## 섹션"
-    assert client.put(f"/admin/sources/1/guides/{gid}", headers=h).status_code == 204
-    ids = [g["id"] for g in client.get("/admin/sources/1/guides", headers=h).json()]
+    assert client.put(f"/admin/hospitals/1/guides/{gid}", headers=h).status_code == 204
+    ids = [g["id"] for g in client.get("/admin/hospitals/1/guides", headers=h).json()]
     assert gid in ids
-    assert client.delete(f"/admin/sources/1/guides/{gid}", headers=h).status_code == 204
+    assert client.delete(f"/admin/hospitals/1/guides/{gid}", headers=h).status_code == 204
     assert client.delete(f"/admin/guides/{gid}", headers=h).status_code == 204
     listed = client.get("/admin/guides?include_archived=true", headers=h).json()
     assert next(g for g in listed if g["id"] == gid)["archived_at"] is not None

@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 from irb_watch.ai.factory import build_enricher, build_summarizer
-from irb_watch.api.deps import build_reader
+from irb_watch.api.deps import build_reader, get_hospital_service
 from irb_watch.config import get_settings
 from irb_watch.db.client import get_supabase_client
 from irb_watch.db.documents import (
@@ -54,7 +54,8 @@ def test_scan_real_board_end_to_end():
     enricher = build_enricher()
     assert enricher.active, "set OPENAI_API_KEY, OPENAI_MODEL and TYPESAFE_API_KEY for this test"
     scans = ScanService(SupabaseScanRepo(client), storage, build_reader, audit, enricher=enricher)
-    sources = SourceService(SupabaseSourceStore(client), audit)
+    # A SNUH board joins the existing SNUH hospital (no new hospital row is left behind).
+    sources = SourceService(SupabaseSourceStore(client), audit, hospitals=get_hospital_service())
     auth = SupabaseAuthAdmin(client)
 
     source = sources.create(None, f"live test {uuid.uuid4().hex[:8]}", URL)

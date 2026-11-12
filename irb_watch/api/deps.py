@@ -39,6 +39,7 @@ from irb_watch.db.documents import (
     SupabaseSummaryRepo,
 )
 from irb_watch.db.downloads import SupabaseDownloadRepo, SupabaseUrlSigner
+from irb_watch.db.hospitals import SupabaseHospitalStore
 from irb_watch.db.members import SupabaseMemberStore
 from irb_watch.db.organizations import SupabaseOrganizationStore
 from irb_watch.db.pipeline_admin import SupabasePipelineSetupStore
@@ -60,6 +61,7 @@ from irb_watch.services.digest import DigestService
 from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
 from irb_watch.services.errors import ConflictError, ValidationError
+from irb_watch.services.hospitals import HospitalService
 from irb_watch.services.manual import ManualService
 from irb_watch.services.members import MemberService
 from irb_watch.services.organizations import OrganizationService
@@ -198,9 +200,16 @@ def build_reader(source: Source) -> SourceReader:
     )
 
 
+def get_hospital_service() -> HospitalService:
+    client = get_supabase_client()
+    return HospitalService(SupabaseHospitalStore(client), SupabaseAuditSink(client))
+
+
 def get_source_service() -> SourceService:
     client = get_supabase_client()
-    return SourceService(SupabaseSourceStore(client), SupabaseAuditSink(client))
+    return SourceService(
+        SupabaseSourceStore(client), SupabaseAuditSink(client), hospitals=get_hospital_service()
+    )
 
 
 def get_member_service() -> MemberService:

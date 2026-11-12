@@ -31,7 +31,7 @@ _VERSION_COLUMNS = (
 def _pipeline(r: dict) -> Pipeline:
     return Pipeline(
         id=int(r["id"]), user_id=str(r["user_id"]), project_id=int(r["project_id"]),
-        source_id=int(r["source_id"]), created_at=r["created_at"], updated_at=r["updated_at"],
+        hospital_id=int(r["hospital_id"]), created_at=r["created_at"], updated_at=r["updated_at"],
         deleted_at=r.get("deleted_at"),
     )
 
@@ -62,38 +62,27 @@ class SupabasePipelineStore:
     def __init__(self, client: Client) -> None:
         self._c = client
 
-    # projects and sources
+    # projects and hospitals
     def project_owner(self, project_id: int) -> str | None:
         rows = self._c.table("projects").select("user_id").eq("id", project_id).limit(1).execute().data
         return str(rows[0]["user_id"]) if rows else None
 
-    def project_source_ids(self, project_id: int) -> set[int]:
-        rows = self._c.table("project_sources").select("source_id").eq("project_id", project_id).execute().data
-        return {int(r["source_id"]) for r in rows}
+    def project_hospital_ids(self, project_id: int) -> set[int]:
+        rows = (
+            self._c.table("project_hospitals").select("hospital_id").eq("project_id", project_id)
+            .execute().data
+        )
+        return {int(r["hospital_id"]) for r in rows}
 
-    def can_read_source(self, user_id: str, source_id: int, is_admin: bool) -> bool:
-        return source_id in self.source_names([source_id], user_id, is_admin)
-
-    def source_names(self, source_ids: list[int], user_id: str, is_admin: bool) -> dict[int, str]:
-        """Names of the sources the user may read (same rule as private.can_read_source):
-        admins all, everyone public ones, members-only ones only for assigned members. Two
-        queries whatever the number of sources."""
-        if not source_ids:
+    def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]:
+        """Hospital names are readable by every signed-in user (platform-wide catalog)."""
+        if not hospital_ids:
             return {}
-        ids = sorted(set(source_ids))
-        rows = self._c.table("sources").select("id, name, requires_login").in_("id", ids).execute().data
-        member_of: set[int] = set()
-        if not is_admin and any(r["requires_login"] for r in rows):
-            members = (
-                self._c.table("source_members").select("source_id").eq("user_id", user_id)
-                .in_("source_id", ids).execute().data
-            )
-            member_of = {int(m["source_id"]) for m in members}
-        return {
-            int(r["id"]): r["name"]
-            for r in rows
-            if is_admin or not r["requires_login"] or int(r["id"]) in member_of
-        }
+        rows = (
+            self._c.table("hospitals").select("id, name").in_("id", sorted(set(hospital_ids)))
+            .execute().data
+        )
+        return {int(r["id"]): r["name"] for r in rows}
 
     # pipelines
     def pipelines_of_project(self, project_id: int) -> list[Pipeline]:
@@ -104,12 +93,12 @@ class SupabasePipelineStore:
         rows = self._c.table("pipelines").select("*").eq("id", pipeline_id).limit(1).execute().data
         return _pipeline(rows[0]) if rows else None
 
-    def create_pipeline(self, user_id: str, project_id: int, source_id: int, steps: list[dict]) -> Pipeline:
+    def create_pipeline(self, user_id: str, project_id: int, hospital_id: int, steps: list[dict]) -> Pipeline:
         org = (
             self._c.table("organization_members").select("organization_id").eq("user_id", user_id)
             .limit(1).execute().data
         )
-        values = {"user_id": user_id, "project_id": project_id, "source_id": source_id}
+        values = {"user_id": user_id, "project_id": project_id, "hospital_id": hospital_id}
         if org:
             values["organization_id"] = org[0]["organization_id"]
         try:

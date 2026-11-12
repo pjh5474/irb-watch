@@ -75,6 +75,8 @@ class ManualSourceIn(BaseModel):
     members_only: bool = False
     # Default: off for a members-only source, on for a public one.
     ai_enabled: bool | None = None
+    hospital_id: int | None = None  # default: the hospital with this name, created if missing
+    board_kind: str | None = None  # default: "other"
 
 
 class ManualFileIn(BaseModel):
@@ -133,7 +135,9 @@ def create_manual_source(
 ) -> SourceOut:
     """A source an admin fills by hand. It is never scanned."""
     return SourceOut.from_source(
-        service.create_manual(admin.id, body.name, body.members_only, body.ai_enabled)
+        service.create_manual(
+            admin.id, body.name, body.members_only, body.ai_enabled, body.hospital_id, body.board_kind
+        )
     )
 
 

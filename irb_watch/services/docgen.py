@@ -4,9 +4,10 @@ Rules (owner decisions 2026-11-10, see docs/decisions.md "Docs generator"):
   * Inputs are stored document versions the user may read (same rule as everywhere: admins
     read every source, anyone a public one, a study only its assigned members). A document the
     user may not read answers "not found".
-  * Guides: an admin keeps a library and links guides to sources. A draft uses the guides of its
-    documents' sources by default; the user may leave any of them out (guide_ids) and attach up
-    to MAX_EXTRA_GUIDES one-off guide files.
+  * Guides: an admin keeps a library and links guides to hospitals (since 2026-11-12; a
+    hospital groups its boards). A draft uses the guides of its documents' hospitals by default;
+    the user may leave any of them out (guide_ids) and attach up to MAX_EXTRA_GUIDES one-off
+    guide files. Form templates are offered per hospital the same way.
   * A source with AI switched off may be used only when the user ticked the warning box for
     that source (ai_override_source_ids). Every use is in the audit log with the source ids.
   * Every AI call (first draft and each revision) counts toward a per-user daily limit and is
@@ -411,19 +412,27 @@ class DocgenService:
             previous=previous,
             previous_no=previous_no,
             compare=c.compare,
+            hospital_id=sources[doc.source_id].hospital_id,
         )
+
+    @staticmethod
+    def _hospitals(used: set[int], sources: dict[int, SourceRef]) -> set[int]:
+        """The hospitals of these (readable) sources."""
+        return {
+            h for h in (sources[s].hospital_id for s in used if s in sources) if h is not None
+        }
 
     def _guides(
         self,
-        used: set[int],
+        hospitals: set[int],
         guide_ids: list[int] | None,
         is_admin: bool,
         already: tuple[int, ...] = (),
     ) -> list[Guide]:
-        """By default all of the sources' guides. A user may leave some out; only an admin may
-        add a library guide that is not linked to these sources. `already`: guides the draft
+        """By default all of the hospitals' guides. A user may leave some out; only an admin may
+        add a library guide that is not linked to these hospitals. `already`: guides the draft
         uses now, which may stay even if they were unlinked or archived since."""
-        defaults = {g.id: g for g in self._store.guides_for_sources(sorted(used))}
+        defaults = {g.id: g for g in self._store.guides_for_hospitals(sorted(hospitals))}
         if guide_ids is None:
             return list(defaults.values())
         wanted = list(dict.fromkeys(guide_ids))
@@ -483,14 +492,14 @@ class DocgenService:
         return found
 
     def _draft_template(
-        self, template_id: int, used: set[int], is_admin: bool
+        self, template_id: int, hospitals: set[int], is_admin: bool
     ) -> DraftTemplate:
-        """A library template the user may fill for documents from these sources: ready, not
-        archived, and global or offered by one of the sources (an admin may use any ready one)."""
+        """A library template the user may fill for documents from these hospitals: ready, not
+        archived, and global or offered by one of the hospitals (an admin may use any ready one)."""
         self._need_files()
         t = self._store.get_template(template_id)
         offered = t is not None and t.archived_at is None and (
-            is_admin or t.is_global or bool(set(t.source_ids) & used)
+            is_admin or t.is_global or bool(set(t.hospital_ids) & hospitals)
         )
         if t is None or not offered or (t.status != "ready" and not is_admin):
             raise NotFoundError(f"form template {template_id} not found")
@@ -527,7 +536,9 @@ class DocgenService:
         its source's guides). Nothing is saved or counted here; the caller limits and logs test
         runs. Sources with AI off are allowed (owner's choice for admin tests)."""
         docs = self.check_preview(admin_id, document_id)
-        guides = self._store.guides_for_sources([docs[0].source_id])
+        ref = self._store.get_source(docs[0].source_id)
+        hospital = ref.hospital_id if ref is not None else None
+        guides = self._store.guides_for_hospitals([hospital]) if hospital is not None else []
         return self._write(docs, guides, [], request, admin_text=extra).markdown
 
     def check_preview(self, admin_id: str, document_id: int | None) -> list[DocVersion]:
@@ -543,24 +554,24 @@ class DocgenService:
     # -- guides for users -------------------------------------------------------------
 
     def default_guides(self, user_id: str, source_ids: list[int]) -> list[Guide]:
-        """The guides a draft from these sources would use by default."""
+        """The guides a draft from these sources would use by default (their hospitals')."""
         profile = self._profile(user_id)
         readable = self._store.readable_sources(user_id, profile.role == "admin")
-        wanted = [s for s in dict.fromkeys(source_ids) if s in readable]
-        return self._store.guides_for_sources(wanted) if wanted else []
+        hospitals = self._hospitals(set(source_ids), readable)
+        return self._store.guides_for_hospitals(sorted(hospitals)) if hospitals else []
 
     # -- form templates for users -------------------------------------------------------
 
     def templates_for(self, user_id: str, source_ids: list[int]) -> list[FormTemplate]:
         """The ready forms a draft from these sources may fill: global ones and those the
-        sources offer. An admin also gets every other ready one (after these)."""
+        sources' hospitals offer. An admin also gets every other ready one (after these)."""
         profile = self._profile(user_id)
         if self._files is None:
             return []
         is_admin = profile.role == "admin"
         readable = self._store.readable_sources(user_id, is_admin)
-        wanted = [s for s in dict.fromkeys(source_ids) if s in readable]
-        found = self._store.templates_for_sources(wanted) if wanted else []
+        hospitals = self._hospitals(set(source_ids), readable)
+        found = self._store.templates_for_hospitals(sorted(hospitals)) if hospitals else []
         if is_admin:
             ids = {t.id for t in found}
             found += [
@@ -612,8 +623,9 @@ class DocgenService:
         used = {d.source_id for d in docs}
         override = set(ai_override_source_ids) & used
         self._ai_check(sources, used, override)
-        guides = self._guides(used, guide_ids, is_admin)
-        form = self._draft_template(template_id, used, is_admin) if template_id is not None else None
+        hospitals = self._hospitals(used, sources)
+        guides = self._guides(hospitals, guide_ids, is_admin)
+        form = self._draft_template(template_id, hospitals, is_admin) if template_id is not None else None
 
         # The limit is checked before the attached files are read (reading a PDF or HWP costs
         # time and memory); the log entry that counts the call comes after, just before it.
@@ -792,7 +804,9 @@ class DocgenService:
         if change is None:
             guides = self._store.get_guides(list(draft.guide_ids)) if draft.guide_ids else []
         else:
-            guides = self._guides(used, change.guide_ids, is_admin, draft.guide_ids)
+            guides = self._guides(
+                self._hospitals(used, sources), change.guide_ids, is_admin, draft.guide_ids
+            )
 
         now = self._clock()
         self._check_limit(user_id, now)
@@ -933,34 +947,33 @@ class DocgenService:
             "docgen.guide_archived",
             admin_id,
             title=guide.title,
-            payload={"guide_id": guide_id, "unlinked_source_ids": list(guide.source_ids)},
+            payload={"guide_id": guide_id, "unlinked_hospital_ids": list(guide.hospital_ids)},
         )
 
-    def source_guides(self, admin_id: str, source_id: int) -> list[Guide]:
+    def hospital_guides(self, admin_id: str, hospital_id: int) -> list[Guide]:
         self._admin(admin_id)
-        if self._store.get_source(source_id) is None:
-            raise NotFoundError("source not found")
-        return self._store.guides_for_sources([source_id])
+        if not self._store.hospital_exists(hospital_id):
+            raise NotFoundError("hospital not found")
+        return self._store.guides_for_hospitals([hospital_id])
 
-    def link_guide(self, admin_id: str, source_id: int, guide_id: int) -> None:
+    def link_guide(self, admin_id: str, hospital_id: int, guide_id: int) -> None:
         self._admin(admin_id)
-        if self._store.get_source(source_id) is None:
-            raise NotFoundError("source not found")
+        if not self._store.hospital_exists(hospital_id):
+            raise NotFoundError("hospital not found")
         guide = self._guide(guide_id)
         if guide.archived_at is not None:
             raise ConflictError("this guide is archived; upload it again to use it")
         if guide.is_global:
-            raise ConflictError("this guide is global and applies to every site already")
-        if source_id in guide.source_ids:
+            raise ConflictError("this guide is global and applies to every hospital already")
+        if hospital_id in guide.hospital_ids:
             return
-        self._store.link_guide(source_id, guide_id, self._clock())
+        self._store.link_guide(hospital_id, guide_id, self._clock())
         self._audit.record(
             "admin",
             "docgen.guide_linked",
             admin_id,
             title=guide.title,
-            payload={"guide_id": guide_id},
-            source_id=source_id,
+            payload={"guide_id": guide_id, "hospital_id": hospital_id},
         )
 
     def guide(self, admin_id: str, guide_id: int) -> Guide:
@@ -971,7 +984,7 @@ class DocgenService:
         self, admin_id: str, guide_id: int, title: str | None, is_global: bool | None
     ) -> Guide:
         """Rename a guide and/or make it global (a default of every draft for every source) or
-        site-specific again. Its source links are kept either way (unused while global)."""
+        hospital-specific again. Its hospital links are kept either way (unused while global)."""
         self._admin(admin_id)
         guide = self._guide(guide_id)
         if guide.archived_at is not None:
@@ -1032,21 +1045,21 @@ class DocgenService:
         self._guide(guide_id)
         return self._store.list_guide_revisions(guide_id)
 
-    def set_guide_sources(self, admin_id: str, guide_id: int, source_ids: list[int]) -> Guide:
-        """The full list of sources that use this guide by default (added and removed in one
+    def set_guide_hospitals(self, admin_id: str, guide_id: int, hospital_ids: list[int]) -> Guide:
+        """The full list of hospitals that use this guide by default (added and removed in one
         call, one audit entry). Refused for a global or archived guide."""
         self._admin(admin_id)
         guide = self._guide(guide_id)
         if guide.archived_at is not None:
             raise ConflictError("this guide is archived; upload it again to use it")
         if guide.is_global:
-            raise ConflictError("this guide is global and applies to every site; make it site-specific first")
-        known = {s.id for s in self._store.list_sources()}
-        wanted = set(source_ids)
+            raise ConflictError("this guide is global and applies to every hospital; make it hospital-specific first")
+        known = self._store.hospital_ids()
+        wanted = set(hospital_ids)
         unknown = sorted(wanted - known)
         if unknown:
-            raise NotFoundError(f"source {unknown[0]} not found")
-        current = set(guide.source_ids)
+            raise NotFoundError(f"hospital {unknown[0]} not found")
+        current = set(guide.hospital_ids)
         added, removed = sorted(wanted - current), sorted(current - wanted)
         if not added and not removed:
             return guide
@@ -1054,31 +1067,30 @@ class DocgenService:
         # separate writes; if one fails part-way, the entry already names every intended change.
         self._audit.record_required(
             "admin",
-            "docgen.guide_sources_set",
+            "docgen.guide_hospitals_set",
             admin_id,
             title=guide.title,
             payload={"guide_id": guide_id, "added": added, "removed": removed},
         )
         now = self._clock()
-        for sid in added:
-            self._store.link_guide(sid, guide_id, now)
-        for sid in removed:
-            self._store.unlink_guide(sid, guide_id)
+        for hid in added:
+            self._store.link_guide(hid, guide_id, now)
+        for hid in removed:
+            self._store.unlink_guide(hid, guide_id)
         return self._guide(guide_id)
 
-    def unlink_guide(self, admin_id: str, source_id: int, guide_id: int) -> None:
+    def unlink_guide(self, admin_id: str, hospital_id: int, guide_id: int) -> None:
         self._admin(admin_id)
         guide = self._guide(guide_id)
-        if source_id not in guide.source_ids:
-            raise NotFoundError("this guide is not linked to that source")
-        self._store.unlink_guide(source_id, guide_id)
+        if hospital_id not in guide.hospital_ids:
+            raise NotFoundError("this guide is not linked to that hospital")
+        self._store.unlink_guide(hospital_id, guide_id)
         self._audit.record(
             "admin",
             "docgen.guide_unlinked",
             admin_id,
             title=guide.title,
-            payload={"guide_id": guide_id},
-            source_id=source_id,
+            payload={"guide_id": guide_id, "hospital_id": hospital_id},
         )
 
     # -- the admin's form templates -----------------------------------------------------
@@ -1280,32 +1292,32 @@ class DocgenService:
             # else: the admin dropped this same field before; it stays dropped
         return tuple(out) or fields  # never an empty list: the admin reviews it anyway
 
-    def set_template_sources(self, admin_id: str, template_id: int, source_ids: list[int]) -> FormTemplate:
-        """The full list of sites that offer this form (one audit entry, written first)."""
+    def set_template_hospitals(self, admin_id: str, template_id: int, hospital_ids: list[int]) -> FormTemplate:
+        """The full list of hospitals that offer this form (one audit entry, written first)."""
         t = self._template_open(admin_id, template_id)
         if t.is_global:
-            raise ConflictError("this form is global and offered to every site; make it site-specific first")
-        known = {s.id for s in self._store.list_sources()}
-        wanted = set(source_ids)
+            raise ConflictError("this form is global and offered to every hospital; make it hospital-specific first")
+        known = self._store.hospital_ids()
+        wanted = set(hospital_ids)
         unknown = sorted(wanted - known)
         if unknown:
-            raise NotFoundError(f"source {unknown[0]} not found")
-        current = set(t.source_ids)
+            raise NotFoundError(f"hospital {unknown[0]} not found")
+        current = set(t.hospital_ids)
         added, removed = sorted(wanted - current), sorted(current - wanted)
         if not added and not removed:
             return t
         self._audit.record_required(
             "admin",
-            "docgen.template_sources_set",
+            "docgen.template_hospitals_set",
             admin_id,
             title=t.title,
             payload={"template_id": template_id, "added": added, "removed": removed},
         )
         now = self._clock()
-        for sid in added:
-            self._store.link_template(sid, template_id, now)
-        for sid in removed:
-            self._store.unlink_template(sid, template_id)
+        for hid in added:
+            self._store.link_template(hid, template_id, now)
+        for hid in removed:
+            self._store.unlink_template(hid, template_id)
         return self._template(template_id)
 
     def archive_template(self, admin_id: str, template_id: int) -> None:
@@ -1319,5 +1331,5 @@ class DocgenService:
             "docgen.template_archived",
             admin_id,
             title=t.title,
-            payload={"template_id": template_id, "unlinked_source_ids": list(t.source_ids)},
+            payload={"template_id": template_id, "unlinked_hospital_ids": list(t.hospital_ids)},
         )

@@ -82,6 +82,8 @@ def _source(row: dict) -> Source:
         requires_login=bool(row.get("requires_login", False)),
         scans_paused_reason=row.get("scans_paused_reason"),
         ai_enabled=bool(row.get("ai_enabled", True)),
+        hospital_id=row.get("hospital_id"),
+        board_kind=row.get("board_kind") or "other",
     )
 
 
@@ -90,7 +92,16 @@ class SupabaseSourceStore:
         self._c = client
 
     def create(
-        self, name, adapter, url, config, created_by, requires_login=False, ai_enabled=True
+        self,
+        name,
+        adapter,
+        url,
+        config,
+        created_by,
+        requires_login=False,
+        ai_enabled=True,
+        hospital_id=None,
+        board_kind="other",
     ) -> Source:
         try:
             rows = (
@@ -104,6 +115,8 @@ class SupabaseSourceStore:
                         "created_by": created_by,
                         "requires_login": requires_login,
                         "ai_enabled": ai_enabled,
+                        "hospital_id": hospital_id,
+                        "board_kind": board_kind,
                     }
                 )
                 .execute()

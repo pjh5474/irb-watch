@@ -12,7 +12,7 @@ from irb_watch.main import app
 from irb_watch.services.errors import ConflictError, NotFoundError
 from irb_watch.services.sources import SourceService
 from tests.fakes import FakeAudit, FakeStore
-from tests.fakes_scan import FakeSourceStore, make_source
+from tests.fakes_scan import FakeSourceStore, fake_hospitals, make_source
 from tests.test_admin_users_api import FakeVerifier
 
 URL = "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2605277029"
@@ -54,7 +54,7 @@ def api():
     users = FakeStore()
     users.add("admin-1", "boss@example.com", role="admin")
     users.add("user-1", "plain@example.com")
-    sources = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url)
+    sources = SourceService(FakeSourceStore(), FakeAudit(), lambda url: url, hospitals=fake_hospitals())
     scans = StubScanService()
     scans.alerts = StubAlerts()
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()

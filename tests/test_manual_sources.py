@@ -22,7 +22,13 @@ from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService
 from irb_watch.services.sources import MANUAL_ADAPTER, SourceService
 from tests.fakes import FakeAudit, FakeStore
-from tests.fakes_scan import FakeFileStorage, FakeScanRepo, FakeSourceStore, make_source
+from tests.fakes_scan import (
+    FakeFileStorage,
+    FakeScanRepo,
+    FakeSourceStore,
+    fake_hospitals,
+    make_source,
+)
 from tests.test_admin_users_api import FakeVerifier
 
 NOW = datetime(2026, 11, 11, 3, 0, tzinfo=UTC)
@@ -69,8 +75,15 @@ def events(repo):
 
 def test_create_a_manual_source():
     audit = FakeAudit()
-    service = SourceService(FakeSourceStore(), audit)
-    s = service.create_manual("admin-1", " Hanyang IRB ", members_only=True)
+    hospitals = fake_hospitals()
+    service = SourceService(FakeSourceStore(), audit, hospitals=hospitals)
+    # Hospital names are public: a members-only source never becomes one by itself.
+    with pytest.raises(ValidationError, match="choose the hospital"):
+        service.create_manual("admin-1", "Sponsor X study", members_only=True)
+    assert hospitals.list() == []
+    hanyang = hospitals.create("admin-1", "Hanyang")
+    s = service.create_manual("admin-1", " Hanyang IRB ", members_only=True, hospital_id=hanyang.id)
+    assert s.hospital_id == hanyang.id
     assert s.adapter == MANUAL_ADAPTER and s.url.startswith("manual:") and s.name == "Hanyang IRB"
     assert s.requires_login is True and s.ai_enabled is False  # like a study
     public = service.create_manual("admin-1", "Other", members_only=False)
@@ -256,7 +269,9 @@ def test_the_api(env):
     users = FakeStore()
     users.add("admin-1", "a@example.com", role="admin")
     users.add("user-1", "u@example.com")
-    sources = SourceService(FakeSourceStore(), FakeAudit())
+    hospitals = fake_hospitals()
+    hospital_id = hospitals.create("admin-1", "Hanyang").id
+    sources = SourceService(FakeSourceStore(), FakeAudit(), hospitals=hospitals)
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: users
     app.dependency_overrides[get_manual_service] = lambda: service
@@ -266,7 +281,9 @@ def test_the_api(env):
     try:
         client = TestClient(app)
         h_admin = {"Authorization": "Bearer tok-admin-1"}
-        res = client.post("/admin/sources/manual", headers=h_admin, json={"name": "Hanyang", "members_only": True})
+        new = {"name": "Hanyang", "members_only": True}
+        assert client.post("/admin/sources/manual", headers=h_admin, json=new).status_code == 422
+        res = client.post("/admin/sources/manual", headers=h_admin, json={**new, "hospital_id": hospital_id})
         assert res.status_code == 201 and res.json()["adapter"] == "manual" and res.json()["requires_login"] is True
         body = {"title": "Consent", "files": [{"filename": "a.txt", "content_base64": base64.b64encode(b"A").decode()}]}
         res = client.post("/admin/sources/7/manual-documents", headers=h_admin, json=body)

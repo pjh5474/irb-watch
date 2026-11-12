@@ -47,10 +47,10 @@ class GuideOut(BaseModel):
     title: str
     filename: str
     chars: int
-    source_ids: list[int]
+    hospital_ids: list[int]
     created_at: str
     archived_at: str | None = None
-    is_global: bool = False  # a default of every draft; source_ids are unused while true
+    is_global: bool = False  # a default of every draft; hospital_ids are unused while true
     text_updated_at: str | None = None  # when the file was last replaced
 
     @classmethod
@@ -60,7 +60,7 @@ class GuideOut(BaseModel):
             title=g.title,
             filename=g.filename,
             chars=len(g.body_text),
-            source_ids=list(g.source_ids),
+            hospital_ids=list(g.hospital_ids),
             created_at=g.created_at,
             archived_at=g.archived_at,
             is_global=g.is_global,
@@ -137,7 +137,7 @@ class TemplateOut(BaseModel):
     filename: str
     is_global: bool
     status: str  # review | ready
-    source_ids: list[int]
+    hospital_ids: list[int]
     fields: list[FormFieldOut]
     created_at: str
     updated_at: str
@@ -152,7 +152,7 @@ class TemplateOut(BaseModel):
             filename=t.filename,
             is_global=t.is_global,
             status=t.status,
-            source_ids=list(t.source_ids),
+            hospital_ids=list(t.hospital_ids),
             fields=[FormFieldOut.of(f) for f in t.fields],
             created_at=t.created_at,
             updated_at=t.updated_at,

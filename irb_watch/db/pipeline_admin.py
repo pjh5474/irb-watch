@@ -48,7 +48,7 @@ def _type(row: dict) -> StepType:
 
 def _template(row: dict) -> PipelineTemplate:
     return PipelineTemplate(
-        source_id=row.get("source_id"),
+        hospital_id=row.get("hospital_id"),
         step_type_ids=tuple(int(i) for i in row.get("step_type_ids") or []),
         updated_at=row.get("updated_at") or "",
     )
@@ -118,10 +118,10 @@ class SupabasePipelineSetupStore:
 
     # default step order
     def templates(self) -> list[PipelineTemplate]:
-        rows = self._c.table("pipeline_templates").select("source_id, step_type_ids, updated_at").execute().data
+        rows = self._c.table("pipeline_templates").select("hospital_id, step_type_ids, updated_at").execute().data
         return [_template(r) for r in rows]
 
-    def save_template(self, source_id: int | None, step_type_ids: list[int], actor_id: str) -> PipelineTemplate:
+    def save_template(self, hospital_id: int | None, step_type_ids: list[int], actor_id: str) -> PipelineTemplate:
         values = {
             "step_type_ids": step_type_ids,
             "updated_by": actor_id,
@@ -129,14 +129,14 @@ class SupabasePipelineSetupStore:
         }
         table = self._c.table("pipeline_templates")
         query = table.update(values)
-        query = query.is_("source_id", "null") if source_id is None else query.eq("source_id", source_id)
+        query = query.is_("hospital_id", "null") if hospital_id is None else query.eq("hospital_id", hospital_id)
         rows = query.execute().data
         if not rows:
-            rows = table.insert({**values, "source_id": source_id}).execute().data
+            rows = table.insert({**values, "hospital_id": hospital_id}).execute().data
         return _template(rows[0])
 
-    def delete_template(self, source_id: int) -> bool:
-        rows = self._c.table("pipeline_templates").delete().eq("source_id", source_id).execute().data
+    def delete_template(self, hospital_id: int) -> bool:
+        rows = self._c.table("pipeline_templates").delete().eq("hospital_id", hospital_id).execute().data
         return bool(rows)
 
     # checks
@@ -161,6 +161,6 @@ class SupabasePipelineSetupStore:
         )
         return bool(rows)
 
-    def source_exists(self, source_id: int) -> bool:
-        rows = self._c.table("sources").select("id").eq("id", source_id).limit(1).execute().data
+    def hospital_exists(self, hospital_id: int) -> bool:
+        rows = self._c.table("hospitals").select("id").eq("id", hospital_id).limit(1).execute().data
         return bool(rows)
