@@ -264,11 +264,14 @@ class SupabasePipelineStore:
             {"pipeline_id": pipeline_id, "step_id": step_id, "actor_id": actor_id, "event_type": event_type, "payload": payload}
         ).execute()
 
-    def events(self, pipeline_id: int, limit: int) -> list[Event]:
-        rows = (
+    def events(self, pipeline_id: int, limit: int, step_id: int | None = None) -> list[Event]:
+        query = (
             self._c.table("pipeline_events").select("id, step_id, actor_id, event_type, payload, created_at")
-            .eq("pipeline_id", pipeline_id).order("id", desc=True).limit(limit).execute().data
+            .eq("pipeline_id", pipeline_id)
         )
+        if step_id is not None:
+            query = query.eq("step_id", step_id)
+        rows = query.order("id", desc=True).limit(limit).execute().data
         return [
             Event(int(r["id"]), r.get("step_id"), r.get("actor_id"), r["event_type"], r.get("payload") or {}, r["created_at"])
             for r in rows

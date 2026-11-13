@@ -310,6 +310,18 @@ def test_api_flow(env):
         draft = finished_draft(client, res, U1)["draft"]
         assert draft["pipeline_step_id"] == env.first.id and draft["step_files"][0]["name"] == "Protocol"
 
+        opened = client.get(f"/docgen/drafts/{draft['id']}", headers=U1).json()
+        assert opened["pipeline_id"] == env.pipeline.id  # the draft page's "Back to step" link
+        assert env.pipelines.pipeline_of_step("u2", env.first.id) is None
+        assert env.pipelines.pipeline_of_step("u1", 99999) is None
+        broken = env.pstore.get_step
+        env.pstore.get_step = lambda step_id: (_ for _ in ()).throw(RuntimeError("database down"))
+        try:  # only a link: a failed read leaves it out, the draft page still opens
+            reopened = client.get(f"/docgen/drafts/{draft['id']}", headers=U1)
+            assert reopened.status_code == 200 and reopened.json()["pipeline_id"] is None
+        finally:
+            env.pstore.get_step = broken
+
         listed = client.get(f"/docgen/pipelines/{env.pipeline.id}/drafts", headers=U1).json()
         assert [d["id"] for d in listed] == [draft["id"]]
         assert client.get(f"/docgen/pipelines/{env.pipeline.id}/drafts", headers=U2).status_code == 404
@@ -340,5 +352,45 @@ def test_one_open_job_per_step(env):
         runner.run()
         assert client.get(f"/docgen/jobs/{first.json()['id']}", headers=U1).json()["status"] == "done"
         assert client.post(url, headers=U1, json=body).status_code == 202  # free again
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_overview_counts_and_step_page_list_this_steps_drafts_and_jobs(env):
+    from datetime import UTC, datetime
+
+    from irb_watch.services.draft_jobs import DraftJobService
+
+    runner = LaterRunner()
+    jobs = DraftJobService(FakeJobStore(), runner, clock=lambda: datetime(2026, 11, 12, 1, tzinfo=UTC))
+    client = api(env, jobs)
+    try:
+        doc, _ = env.upload(env.first, "Protocol", "text")
+        body = {"step_files": [{"document_id": doc.id}]}
+        done = client.post(f"/docgen/steps/{env.first.id}/drafts", headers=U1, json=body)
+        runner.run()
+        draft_id = client.get(f"/docgen/jobs/{done.json()['id']}", headers=U1).json()["draft_id"]
+        waiting = client.post(f"/docgen/steps/{env.second.id}/drafts", headers=U1, json=body)
+        assert waiting.json()["status"] == "queued"
+
+        overview = client.get(f"/pipelines/{env.pipeline.id}", headers=U1).json()
+        counts = {s["id"]: (s["documents"], s["drafts"], s["open_jobs"]) for s in overview["steps"]}
+        assert counts[env.first.id] == (1, 1, 0) and counts[env.second.id] == (0, 0, 1)
+
+        first = client.get(f"/pipelines/{env.pipeline.id}/steps/{env.first.id}", headers=U1).json()
+        assert [d["id"] for d in first["drafts"]] == [draft_id] and first["jobs"] == []
+        second = client.get(f"/pipelines/{env.pipeline.id}/steps/{env.second.id}", headers=U1).json()
+        assert second["drafts"] == [] and [j["id"] for j in second["jobs"]] == [waiting.json()["id"]]
+        assert client.get(f"/pipelines/{env.pipeline.id}/steps/{env.first.id}", headers=U2).status_code == 404
+
+        # A revision job names its draft, not the step: it still belongs to the draft's step.
+        runner.run()  # the second step's draft is written; one job slot is free again
+        revising = client.post(f"/docgen/drafts/{draft_id}/revise", headers=U1, json={"instruction": "shorter"})
+        assert revising.status_code == 202 and revising.json()["pipeline_step_id"] is None
+        first = client.get(f"/pipelines/{env.pipeline.id}/steps/{env.first.id}", headers=U1).json()
+        assert [j["id"] for j in first["jobs"]] == [revising.json()["id"]]
+        overview = client.get(f"/pipelines/{env.pipeline.id}", headers=U1).json()
+        counts = {s["id"]: s["open_jobs"] for s in overview["steps"]}
+        assert counts[env.first.id] == 1 and counts[env.second.id] == 0
     finally:
         app.dependency_overrides.clear()

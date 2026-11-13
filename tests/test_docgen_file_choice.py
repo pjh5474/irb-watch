@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from irb_watch.api.deps import (
     get_docgen_service,
     get_draft_job_service,
+    get_pipeline_service,
     get_user_store,
     get_verifier,
 )
@@ -20,6 +21,7 @@ from tests.fakes import FakeAudit, FakeStore
 from tests.fakes_docgen import NOW, FakeDocgenStore, FakeWriter
 from tests.fakes_jobs import finished_draft, inline_jobs
 from tests.test_admin_users_api import FakeVerifier
+from tests.test_docgen_api import NoPipelines
 
 PUBLIC, OFF = 1, 3
 
@@ -247,6 +249,7 @@ def client(env):
     app.dependency_overrides[get_docgen_service] = lambda: service
     jobs = inline_jobs()
     app.dependency_overrides[get_draft_job_service] = lambda: jobs
+    app.dependency_overrides[get_pipeline_service] = NoPipelines  # standalone drafts only
     yield TestClient(app)
     app.dependency_overrides.clear()
 

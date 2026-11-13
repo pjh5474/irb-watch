@@ -2,13 +2,22 @@
 
 import base64
 import binascii
+from collections import Counter
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from irb_watch.api.deps import current_user, get_pipeline_service
+from irb_watch.api.deps import (
+    current_user,
+    get_docgen_service,
+    get_draft_job_service,
+    get_pipeline_service,
+)
+from irb_watch.api.docgen import DraftOut, JobOut
 from irb_watch.auth.jwt import AuthUser
+from irb_watch.services.docgen import DocgenService
+from irb_watch.services.draft_jobs import DraftJobService, Job
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.pipeline_admin import StepStatus, StepType
 from irb_watch.services.pipelines import (
@@ -23,6 +32,7 @@ from irb_watch.services.pipelines import (
     PipelineSummary,
     Step,
     StepDocument,
+    StepView,
 )
 
 router = APIRouter(tags=["pipelines"])
@@ -106,18 +116,37 @@ class StepOut(BaseModel):
     decided_on: str | None
     note: str
     deleted_at: str | None
-    documents: list[DocumentOut] = []
-    checklist: list[dict] = []
 
     @classmethod
-    def of(cls, s: Step, type_name: str | None = None, docs=(), checklist=()) -> "StepOut":
+    def of(cls, s: Step, type_name: str | None = None) -> "StepOut":
         return cls(
             id=s.id, step_type_id=s.step_type_id, step_type_name=type_name, name=s.name,
             position=s.position, status_key=s.status_key, due_on=s.due_on, submitted_on=s.submitted_on,
             decided_on=s.decided_on, note=s.note, deleted_at=s.deleted_at,
-            documents=[DocumentOut.of(d) for d in docs],
-            checklist=[{"name": c.name, "uploaded": c.uploaded} for c in checklist],
         )
+
+
+class OverviewStepOut(StepOut):
+    """A step row of the overview: counts only, no documents (they are on the step page)."""
+
+    documents: int  # live documents with at least one file
+    required: int  # checklist names of the step type
+    required_missing: int
+    drafts: int  # the user's drafts made in this step
+    open_jobs: int  # draft jobs queued or running for this step
+
+    @classmethod
+    def of_view(cls, v: StepView, drafts: int, open_jobs: int) -> "OverviewStepOut":
+        return cls(
+            **StepOut.of(v.step, v.step_type_name).model_dump(),
+            documents=v.documents_with_files, required=len(v.checklist),
+            required_missing=v.required_missing, drafts=drafts, open_jobs=open_jobs,
+        )
+
+
+class ChecklistOut(BaseModel):
+    name: str
+    uploaded: bool
 
 
 class StatusOut(BaseModel):
@@ -142,19 +171,36 @@ class StepTypeOut(BaseModel):
 
 
 class DetailOut(BaseModel):
+    """The pipeline overview (phase A): steps with counts; documents are on each step page."""
+
     pipeline: PipelineOut
-    steps: list[StepOut]
+    steps: list[OverviewStepOut]
     statuses: list[StatusOut]
     step_types: list[StepTypeOut]
 
     @classmethod
-    def of(cls, d: PipelineDetail) -> "DetailOut":
+    def of(cls, d: PipelineDetail, drafts: Counter, open_jobs: Counter) -> "DetailOut":
         return cls(
             pipeline=PipelineOut.of(d.summary),
-            steps=[StepOut.of(v.step, v.step_type_name, v.documents, v.checklist) for v in d.steps],
+            steps=[OverviewStepOut.of_view(v, drafts[v.step.id], open_jobs[v.step.id]) for v in d.steps],
             statuses=[StatusOut.of(s) for s in d.statuses],
             step_types=[StepTypeOut.of(t) for t in d.step_types],
         )
+
+
+class StepPageOut(BaseModel):
+    """The step page in one call: the step, its documents with every version, the checklist,
+    the user's drafts of the step and its open or recently failed draft jobs."""
+
+    pipeline: PipelineOut
+    step: StepOut
+    documents: list[DocumentOut]
+    checklist: list[ChecklistOut]
+    drafts: list[DraftOut]
+    jobs: list[JobOut]
+    previous_step_id: int | None
+    next_step_id: int | None
+    statuses: list[StatusOut]
 
 
 class StartIn(BaseModel):
@@ -252,8 +298,27 @@ def pipeline_detail(
     pipeline_id: int,
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
+    docgen: DocgenService = Depends(get_docgen_service),
+    jobs: DraftJobService = Depends(get_draft_job_service),
 ) -> DetailOut:
-    return DetailOut.of(service.detail(user.id, pipeline_id))
+    detail = service.detail(user.id, pipeline_id)  # first: a stranger gets 404 here
+    step_ids = [v.step.id for v in detail.steps]
+    step_drafts = docgen.step_drafts(user.id, step_ids)
+    drafts = Counter(d.pipeline_step_id for d in step_drafts)
+    draft_steps = {d.id: d.pipeline_step_id for d in step_drafts}
+    mine = set(step_ids)
+    open_jobs = Counter(
+        s for j in jobs.list(user.id) if j.open and (s := _job_step(j, draft_steps)) in mine
+    )
+    return DetailOut.of(detail, drafts, open_jobs)
+
+
+def _job_step(job: Job, draft_steps: dict[str, int | None]) -> int | None:
+    """The step a job works for: a draft job names it; a revision job names its draft, which
+    belongs to a step when it was made in one."""
+    if job.pipeline_step_id is not None:
+        return job.pipeline_step_id
+    return draft_steps.get(job.draft_id) if job.draft_id else None
 
 
 @router.delete("/pipelines/{pipeline_id}", response_model=PipelineRef)
@@ -278,13 +343,44 @@ def restore_pipeline(
 def pipeline_history(
     pipeline_id: int,
     limit: int = Query(200, ge=1, le=500),
+    step_id: int | None = None,
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
 ) -> list[EventOut]:
-    return [EventOut.of(e, user.id) for e in service.history(user.id, pipeline_id, limit)]
+    """Newest first; with step_id, only that step's events."""
+    return [EventOut.of(e, user.id) for e in service.history(user.id, pipeline_id, limit, step_id)]
 
 
 # -- steps --------------------------------------------------------------------------------------
+
+
+@router.get("/pipelines/{pipeline_id}/steps/{step_id}", response_model=StepPageOut)
+def step_page(
+    pipeline_id: int,
+    step_id: int,
+    user: AuthUser = Depends(current_user),
+    service: Service = Depends(get_pipeline_service),
+    docgen: DocgenService = Depends(get_docgen_service),
+    jobs: DraftJobService = Depends(get_draft_job_service),
+) -> StepPageOut:
+    """One step for its own page. A removed step, or a step of a removed pipeline, still
+    answers (the page shows it read-only); a stranger's or unknown id answers 404."""
+    page = service.step_page(user.id, pipeline_id, step_id)  # first: owner check
+    v = page.view
+    drafts = docgen.step_drafts(user.id, [step_id])
+    draft_steps = {d.id: d.pipeline_step_id for d in drafts}
+    return StepPageOut(
+        pipeline=PipelineOut.of(page.summary),
+        step=StepOut.of(v.step, v.step_type_name),
+        documents=[DocumentOut.of(d) for d in v.documents],
+        checklist=[ChecklistOut(name=c.name, uploaded=c.uploaded) for c in v.checklist],
+        drafts=[DraftOut.of(d) for d in drafts],
+        # Draft jobs of this step and revisions of its drafts: open, or failed with a reason.
+        jobs=[JobOut.of(j) for j in jobs.list(user.id) if _job_step(j, draft_steps) == step_id],
+        previous_step_id=page.previous_step_id,
+        next_step_id=page.next_step_id,
+        statuses=[StatusOut.of(s) for s in page.statuses],
+    )
 
 
 @router.post("/pipelines/{pipeline_id}/steps", status_code=201, response_model=StepOut)

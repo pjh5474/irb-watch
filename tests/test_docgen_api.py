@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from irb_watch.api.deps import (
     get_docgen_service,
     get_draft_job_service,
+    get_pipeline_service,
     get_user_store,
     get_verifier,
 )
@@ -18,6 +19,11 @@ from tests.fakes_jobs import finished_draft, inline_jobs
 from tests.test_admin_users_api import FakeVerifier
 
 DRAFT = "00000000-0000-0000-0000-000000000001"
+
+
+class NoPipelines:
+    def pipeline_of_step(self, user_id, step_id):
+        return None
 
 
 @pytest.fixture
@@ -43,6 +49,7 @@ def env():
     app.dependency_overrides[get_docgen_service] = service
     jobs = inline_jobs()  # a job finishes inside the request
     app.dependency_overrides[get_draft_job_service] = lambda: jobs
+    app.dependency_overrides[get_pipeline_service] = NoPipelines  # standalone drafts only
     yield TestClient(app), store, writer, audit
     app.dependency_overrides.clear()
 

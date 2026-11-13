@@ -8,7 +8,13 @@ import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 
-from irb_watch.api.deps import get_pipeline_service, get_user_store, get_verifier
+from irb_watch.api.deps import (
+    get_docgen_service,
+    get_draft_job_service,
+    get_pipeline_service,
+    get_user_store,
+    get_verifier,
+)
 from irb_watch.main import app
 from irb_watch.services.errors import (
     ConflictError,
@@ -190,6 +196,63 @@ def test_reorder_remove_and_restore_steps():
     live = [s for s in store.steps([pipeline.id]) if s.deleted_at is None]
     assert restored.deleted_at is None and restored.position == max(s.position for s in live)  # goes last
     assert len({s.position for s in live}) == len(live)
+
+
+# -- step page (phase A) -----------------------------------------------------------------------
+
+
+def test_step_page_has_its_documents_and_neighbours_in_overview_order():
+    service, store, _, setup_store, *_ = make()
+    setup_store.types[1] = setup_store.types[1].__class__(
+        **{**setup_store.types[1].__dict__, "required_documents": ("연구계획서", "동의서")}
+    )
+    pipeline = service.start("u1", 1, 4)
+    ids = [s.id for s in sorted(store.steps([pipeline.id]), key=lambda s: s.position)]
+    service.upload("u1", pipeline.id, ids[0], "연구계획서", "p.xlsx", b"abc")
+    service.upload("u1", pipeline.id, ids[1], "Other step", "o.xlsx", b"abc")
+
+    page = service.step_page("u1", pipeline.id, ids[0])
+    assert [d.name for d in page.view.documents] == ["연구계획서"]  # this step's only
+    assert (page.view.documents_with_files, page.view.required_missing) == (1, 1)
+    assert (page.previous_step_id, page.next_step_id) == (None, ids[1])
+    assert page.summary.hospital_name == "SNUH" and page.statuses
+
+    service.remove_step("u1", pipeline.id, ids[1])  # removed steps are skipped
+    page = service.step_page("u1", pipeline.id, ids[2])
+    assert (page.previous_step_id, page.next_step_id) == (ids[0], ids[3])
+    removed = service.step_page("u1", pipeline.id, ids[1])  # still opens, read-only in the page
+    assert removed.view.step.deleted_at is not None
+    assert (removed.previous_step_id, removed.next_step_id) == (None, None)
+
+
+def test_step_page_of_a_removed_pipeline_opens_and_strangers_get_not_found():
+    service, store, *_ = make()
+    pipeline = service.start("u1", 1, 4)
+    other = service.start("u2", 2, 4)
+    step_id = min(store.steps([pipeline.id]), key=lambda s: s.position).id
+    service.remove("u1", pipeline.id)
+    page = service.step_page("u1", pipeline.id, step_id)
+    assert page.summary.pipeline.deleted_at is not None
+    with pytest.raises(NotFoundError):
+        service.step_page("u2", pipeline.id, step_id)
+    other_step = min(store.steps([other.id]), key=lambda s: s.position).id
+    with pytest.raises(NotFoundError, match="step not found"):
+        service.step_page("u1", pipeline.id, other_step)  # a step of another pipeline
+    with pytest.raises(NotFoundError, match="step not found"):
+        service.step_page("u1", pipeline.id, 99999)
+
+
+def test_history_of_one_step():
+    service, store, *_ = make()
+    pipeline = service.start("u1", 1, 4)
+    first, second = sorted(store.steps([pipeline.id]), key=lambda s: s.position)[:2]
+    service.update_step("u1", pipeline.id, first.id, {"note": "a"})
+    service.update_step("u1", pipeline.id, second.id, {"note": "b"})
+    events = service.history("u1", pipeline.id, step_id=first.id)
+    assert events and {e.step_id for e in events} == {first.id}
+    assert len(service.history("u1", pipeline.id)) > len(events)
+    with pytest.raises(NotFoundError):
+        service.history("u1", pipeline.id, step_id=99999)
 
 
 # -- documents ---------------------------------------------------------------------------------
@@ -449,12 +512,25 @@ def test_pipeline_upload_is_refused_by_declared_size_before_reading():
 # -- API ---------------------------------------------------------------------------------------
 
 
+class NoDrafts:
+    """The overview and the step page also read drafts and jobs; tests/test_step_drafts.py
+    covers them with the real services."""
+
+    def step_drafts(self, user_id, step_ids):
+        return []
+
+    def list(self, user_id):
+        return []
+
+
 @pytest.fixture
 def api():
     service, store, *_ = make()
     app.dependency_overrides[get_verifier] = lambda: FakeVerifier()
     app.dependency_overrides[get_user_store] = lambda: service._users
     app.dependency_overrides[get_pipeline_service] = lambda: service
+    app.dependency_overrides[get_docgen_service] = NoDrafts
+    app.dependency_overrides[get_draft_job_service] = NoDrafts
     yield TestClient(app), store
     app.dependency_overrides.clear()
 
@@ -475,6 +551,8 @@ def test_api_flow(api):
     detail = client.get(f"/pipelines/{pid}", headers=U1).json()
     step_id = detail["steps"][0]["id"]
     assert detail["statuses"][0]["key"] == "not_started"
+    first = detail["steps"][0]
+    assert "checklist" not in first and (first["documents"], first["drafts"], first["open_jobs"]) == (0, 0, 0)
     r = client.patch(f"/pipelines/{pid}/steps/{step_id}", headers=U1, json={"status_key": "submitted"})
     assert r.status_code == 200 and r.json()["submitted_on"] == "2026-11-21"
     r = client.patch(f"/pipelines/{pid}/steps/{step_id}", headers=U1, json={"submitted_on": None})
@@ -483,6 +561,17 @@ def test_api_flow(api):
     r = client.post(f"/pipelines/{pid}/steps/{step_id}/documents", headers=U1, json=body)
     assert r.status_code == 201 and r.json()["version_no"] == 1
     doc_id = r.json()["document"]["id"]
+    assert client.get(f"/pipelines/{pid}", headers=U1).json()["steps"][0]["documents"] == 1
+    page = client.get(f"/pipelines/{pid}/steps/{step_id}", headers=U1)
+    assert page.status_code == 200
+    page = page.json()
+    assert page["step"]["id"] == step_id and page["documents"][0]["versions"][0]["version_no"] == 1
+    assert page["previous_step_id"] is None and page["next_step_id"] == detail["steps"][1]["id"]
+    assert (page["drafts"], page["jobs"], page["pipeline"]["hospital_name"]) == ([], [], "SNUH")
+    assert client.get(f"/pipelines/{pid}/steps/{step_id}", headers=U2).status_code == 404
+    assert client.get(f"/pipelines/{pid}/steps/99999", headers=U1).status_code == 404
+    steps_history = client.get(f"/pipelines/{pid}/history?step_id={step_id}", headers=U1).json()
+    assert steps_history and {e["step_id"] for e in steps_history} == {step_id}
     r = client.post(f"/pipelines/{pid}/steps/{step_id}/documents/{doc_id}/versions/1/download-url", headers=U1)
     assert r.status_code == 200 and r.json()["url"].startswith("https://files.example/")
     assert client.post(f"/pipelines/{pid}/steps/{step_id}/documents/{doc_id}/remove", headers=U1).status_code == 200

@@ -167,8 +167,9 @@ class FakePipelineStore:
         self.event_rows[-1] = replace(self.event_rows[-1])
         self.event_pipeline = pipeline_id
 
-    def events(self, pipeline_id, limit):
-        return list(reversed(self.event_rows))[:limit]
+    def events(self, pipeline_id, limit, step_id=None):
+        rows = [e for e in reversed(self.event_rows) if step_id is None or e.step_id == step_id]
+        return rows[:limit]
 
     # purge
     def _rows(self, kind):

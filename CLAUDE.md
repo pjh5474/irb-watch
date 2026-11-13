@@ -96,7 +96,7 @@ Also built:
 - **Manual sources (2026-11-11):** adapter `manual` for hospitals with no e-IRB site; admins upload documents and new versions by hand; saved through the scan path (`commit_scan`, cards, AI summaries); never scanned. Code: `services/manual.py`, `api/admin_manual.py`. Migration `manual_sources` applied 2026-11-11. See decisions.md "Manual sources".
 
 Next candidates:
-- IRB pipeline redesign (`docs/pipeline-design.md`, design only, 2026-11-13): phase A (one step per page, no migration) first; ask the phase's open choices (section 10) before building
+- IRB pipeline redesign (`docs/pipeline-design.md`, 2026-11-13): phase A (one step per page, no migration) built 2026-11-13, offline tests only, not deployed (deploy both repos together); next phase A2; ask each phase's open choices (section 10) before building
 - search over stored document text
 - check Jev's accuracy against about 20 hand-labelled real revisions
 - verify RLS and the endpoints with a real user's login token (needs the project's publishable key)

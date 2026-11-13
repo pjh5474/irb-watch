@@ -142,6 +142,15 @@ class StepView:
     documents: list[StepDocument]
     checklist: list[ChecklistItem]
 
+    @property
+    def documents_with_files(self) -> int:
+        """Live documents that hold at least one version (the overview's count)."""
+        return sum(1 for d in self.documents if d.deleted_at is None and d.versions)
+
+    @property
+    def required_missing(self) -> int:
+        return sum(1 for c in self.checklist if not c.uploaded)
+
 
 @dataclass(frozen=True)
 class PipelineSummary:
@@ -158,6 +167,18 @@ class PipelineDetail:
     steps: list[StepView]
     statuses: list[StepStatus]
     step_types: list[StepType] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class StepPage:
+    """One step with its documents (phase A: one step per page). previous / next follow the
+    overview's order over live steps; a removed step has neither."""
+
+    summary: PipelineSummary
+    view: StepView
+    previous_step_id: int | None
+    next_step_id: int | None
+    statuses: list[StepStatus]
 
 
 class PipelineStore(Protocol):
@@ -193,7 +214,9 @@ class PipelineStore(Protocol):
         ...
     # history
     def add_event(self, pipeline_id: int, step_id: int | None, actor_id: str, event_type: str, payload: dict) -> None: ...
-    def events(self, pipeline_id: int, limit: int) -> list[Event]: ...
+    def events(self, pipeline_id: int, limit: int, step_id: int | None = None) -> list[Event]:
+        """Newest first; with step_id, only that step's events."""
+        ...
     # purge, one kind ("pipelines" | "steps" | "documents") at a time
     def purge_candidates(self, kind: str, cutoff: str) -> tuple[list[int], list[str]]:
         """Ids removed before `cutoff` and the file paths of every version under them."""
@@ -404,11 +427,11 @@ class PipelineService:
         )
         return pipeline
 
-    def detail(self, user_id: str, pipeline_id: int) -> PipelineDetail:
-        self._user(user_id)
-        pipeline = self._pipeline(user_id, pipeline_id, live=False)
-        summary = self._summaries(pipeline.project_id, [pipeline])[0]
-        steps = sorted(self._store.steps([pipeline.id]), key=lambda s: (s.deleted_at is not None, s.position, s.id))
+    def _ordered_steps(self, pipeline: Pipeline) -> list[Step]:
+        """The overview's order: live steps by position, then removed ones."""
+        return sorted(self._store.steps([pipeline.id]), key=lambda s: (s.deleted_at is not None, s.position, s.id))
+
+    def _views(self, steps: list[Step]) -> list[StepView]:
         docs = self._store.documents([s.id for s in steps])
         all_types = {t.id: t for t in self._setup.step_types(include_archived=True)}
         views = []
@@ -425,8 +448,36 @@ class PipelineService:
                     [ChecklistItem(r, r.lower() in live_names) for r in required],
                 )
             )
+        return views
+
+    def detail(self, user_id: str, pipeline_id: int) -> PipelineDetail:
+        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        summary = self._summaries(pipeline.project_id, [pipeline])[0]
+        views = self._views(self._ordered_steps(pipeline))
         return PipelineDetail(
             summary, views, self._setup.statuses(include_archived=True), self._setup.step_types()
+        )
+
+    def step_page(self, user_id: str, pipeline_id: int, step_id: int) -> StepPage:
+        """One step for its own page. A removed step or a step of a removed pipeline still
+        opens (read-only in the page; files stay downloadable); a stranger gets not found."""
+        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        steps = self._ordered_steps(pipeline)
+        step = next((s for s in steps if s.id == step_id), None)
+        if step is None:
+            raise NotFoundError("step not found")
+        previous_id = next_id = None
+        if step.deleted_at is None:
+            live = [s.id for s in steps if s.deleted_at is None]
+            at = live.index(step.id)
+            previous_id = live[at - 1] if at > 0 else None
+            next_id = live[at + 1] if at + 1 < len(live) else None
+        return StepPage(
+            self._summaries(pipeline.project_id, [pipeline])[0],
+            self._views([step])[0],
+            previous_id,
+            next_id,
+            self._setup.statuses(include_archived=True),
         )
 
     # -- AI drafts of a step (phase 3) ---------------------------------------------------------
@@ -543,11 +594,17 @@ class PipelineService:
     def check_own_step(self, user_id: str, step_id: int) -> None:
         """Raises "step not found" unless the step is in the active user's own pipeline
         (before a job row names it)."""
+        owner_pipeline = self._own_pipeline_of_step(user_id, step_id)
+        self._user(user_id)
+        if owner_pipeline is None:
+            raise NotFoundError("step not found")
+
+    def _own_pipeline_of_step(self, user_id: str, step_id: int) -> int | None:
+        """The one place that says whether a step (found by id alone) is in the user's own
+        pipeline: its pipeline id, or None."""
         step = self._store.get_step(step_id)
         pipeline = self._store.get_pipeline(step.pipeline_id) if step is not None else None
-        self._user(user_id)
-        if pipeline is None or pipeline.user_id != user_id:
-            raise NotFoundError("step not found")
+        return pipeline.id if pipeline is not None and pipeline.user_id == user_id else None
 
     def draft_started(self, user_id: str, step_id: int, kind: str, job_id: str) -> None:
         """The page's history shows that an AI draft (or revision) was started in a step.
@@ -558,6 +615,16 @@ class PipelineService:
                 self._event(step.pipeline_id, step_id, user_id, f"draft.{kind}_started", {"job_id": job_id})
         except Exception as exc:  # noqa: BLE001
             log.warning("draft start could not be written to the pipeline history: %s", type(exc).__name__)
+
+    def pipeline_of_step(self, user_id: str, step_id: int) -> int | None:
+        """The pipeline holding this step, when it is the user's own (removed ones too); None
+        otherwise. For the draft page's "Back to step" link only, so it never raises: a failed
+        read leaves the link out instead of failing the draft page."""
+        try:
+            return self._own_pipeline_of_step(user_id, step_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("the pipeline of step %s could not be read: %s", step_id, type(exc).__name__)
+            return None
 
     def step_ids(self, user_id: str, pipeline_id: int) -> list[int]:
         """Every step of the user's pipeline (removed ones too), for listing its drafts."""
@@ -791,9 +858,11 @@ class PipelineService:
         )
         return url
 
-    def history(self, user_id: str, pipeline_id: int, limit: int = 200) -> list[Event]:
+    def history(self, user_id: str, pipeline_id: int, limit: int = 200, step_id: int | None = None) -> list[Event]:
         pipeline = self._pipeline(user_id, pipeline_id, live=False)
-        return self._store.events(pipeline.id, limit)
+        if step_id is not None:
+            self._step(pipeline, step_id, live=False)
+        return self._store.events(pipeline.id, limit, step_id)
 
     # -- purge --------------------------------------------------------------------------------
 

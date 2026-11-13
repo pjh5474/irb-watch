@@ -257,13 +257,17 @@ class DraftDetailOut(BaseModel):
     draft: DraftOut
     versions: list[VersionOut]
     guides: list[GuideOut]
+    # The pipeline of the draft's step, for the "Back to step" link; None for a standalone
+    # draft or a step that no longer exists.
+    pipeline_id: int | None = None
 
     @classmethod
-    def of(cls, d: DraftDetail) -> "DraftDetailOut":
+    def of(cls, d: DraftDetail, pipeline_id: int | None = None) -> "DraftDetailOut":
         return cls(
             draft=DraftOut.of(d.draft),
             versions=[VersionOut.of(v) for v in d.versions],
             guides=[GuideOut.of(g) for g in d.guides],
+            pipeline_id=pipeline_id,
         )
 
 
@@ -506,8 +510,12 @@ def get_draft(
     draft_id: UUID,
     user: AuthUser = Depends(current_user),
     service: DocgenService = Depends(get_docgen_service),
+    pipelines: PipelineService = Depends(get_pipeline_service),
 ) -> DraftDetailOut:
-    return DraftDetailOut.of(service.get_draft(user.id, str(draft_id)))
+    detail = service.get_draft(user.id, str(draft_id))  # first: owner check
+    step_id = detail.draft.pipeline_step_id
+    pipeline_id = pipelines.pipeline_of_step(user.id, step_id) if step_id is not None else None
+    return DraftDetailOut.of(detail, pipeline_id)
 
 
 @router.put("/drafts/{draft_id}/markdown", response_model=VersionOut)
