@@ -64,6 +64,7 @@ from irb_watch.services.errors import (
     UpstreamError,
     ValidationError,
 )
+from irb_watch.services.project_access import NEEDS, REFUSALS
 from irb_watch.services.users import AuditSink, UserStore, active_profile
 
 log = logging.getLogger(__name__)
@@ -548,16 +549,39 @@ class DocgenService:
         except Exception as exc:  # noqa: BLE001
             log.warning("could not delete %d form file(s): %s", len(paths), type(exc).__name__)
 
-    def _own(self, user_id: str, draft_id: str) -> Draft:
+    def _own(self, user_id: str, draft_id: str, need: str = "edit") -> Draft:
+        """A standalone draft is its author's only. A draft made in a pipeline step belongs to
+        the project (phase B1, D13): whoever may open the project reads it, and whoever may edit
+        the project edits, revises and removes it. Its author keeps it if the step is gone."""
         draft = self._store.get_draft(draft_id)
-        if draft is None or draft.user_id != user_id:
+        if draft is None:
+            raise NotFoundError("draft not found")
+        if draft.pipeline_step_id is not None and self._steps is not None:
+            found = self._steps.step_access(user_id, draft.pipeline_step_id)
+            if found is not None:
+                if found[1] not in NEEDS[need]:
+                    raise ForbiddenError(REFUSALS[need])
+                return draft
+            # The step still exists but the user may no longer open its project (removed from
+            # it, moved to another organization): the draft goes with the project, even for
+            # its author. Only a draft whose step is gone stays with its author.
+            if self._steps.step_exists(draft.pipeline_step_id):
+                raise NotFoundError("draft not found")
+        if draft.user_id != user_id:
             raise NotFoundError("draft not found")
         return draft
 
     def check_own_draft(self, user_id: str, draft_id: str) -> None:
-        """Raises unless the draft is the active user's own (before a job row names it)."""
+        """Raises unless the active user may change the draft (before a job row names it)."""
         self._profile(user_id)
         self._own(user_id, draft_id)
+
+    def can_edit_draft(self, user_id: str, draft_id: str) -> bool:
+        try:
+            self._own(user_id, draft_id)
+            return True
+        except (ForbiddenError, NotFoundError):
+            return False
 
     def preview(self, admin_id: str, extra: str, document_id: int | None, request: str) -> str:
         """Admin test run with UNSAVED instructions on one document (its newest version, with
@@ -783,7 +807,7 @@ class DocgenService:
 
     def get_draft(self, user_id: str, draft_id: str) -> DraftDetail:
         self._profile(user_id)
-        draft = self._own(user_id, draft_id)
+        draft = self._own(user_id, draft_id, "read")
         guides = self._store.get_guides(list(draft.guide_ids)) if draft.guide_ids else []
         return DraftDetail(draft, self._store.list_versions(draft_id), guides)
 
@@ -1002,17 +1026,18 @@ class DocgenService:
         return work
 
     def step_drafts(self, user_id: str, step_ids: list[int]) -> list[Draft]:
-        """The user's drafts made in these pipeline steps, newest first."""
+        """The drafts made in these pipeline steps by anyone (shared with the project, phase B1),
+        newest first. The caller has checked that the user may open the steps."""
         self._profile(user_id)
         if not step_ids:
             return []
-        return self._store.drafts_of_steps(user_id, step_ids)
+        return self._store.drafts_of_steps(step_ids)
 
     def export_docx(
         self, user_id: str, draft_id: str, version_no: int | None
     ) -> tuple[bytes, str]:
         self._profile(user_id)
-        draft = self._own(user_id, draft_id)
+        draft = self._own(user_id, draft_id, "read")
         versions = self._store.list_versions(draft_id)
         if version_no is None:
             chosen = versions[-1] if versions else None
@@ -1044,6 +1069,14 @@ class DocgenService:
     def delete_draft(self, user_id: str, draft_id: str) -> None:
         self._profile(user_id)
         draft = self._own(user_id, draft_id)
+        # Deleting cannot be undone: a shared pipeline draft goes only by its author, the
+        # project's owner or an organization admin (members edit and revise it).
+        if draft.user_id != user_id and draft.pipeline_step_id is not None and self._steps is not None:
+            found = self._steps.step_access(user_id, draft.pipeline_step_id)
+            if found is None or found[1] not in NEEDS["manage"]:
+                raise ForbiddenError(
+                    "only the draft's author, the project's owner or an organization admin can delete it"
+                )
         self._store.delete_draft(draft_id)
         # A one-off form file belongs to this draft only; a library file is shared.
         if draft.template is not None and draft.template.template_id is None:

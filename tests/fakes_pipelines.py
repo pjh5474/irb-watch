@@ -51,8 +51,11 @@ class FakePipelineStore:
     def hospital_names(self, hospital_ids):
         return {h: self.names[h] for h in hospital_ids if h in self.names}
 
-    def project_names(self, project_ids):
-        return {p: f"Project {p}" for p in project_ids if p in self.projects}
+    def projects_info(self, project_ids):
+        return {p: (f"Project {p}", self.projects[p]) for p in project_ids if p in self.projects}
+
+    def live_pipelines_of_projects(self, project_ids):
+        return [p for p in self.pipes.values() if p.project_id in set(project_ids) and p.deleted_at is None]
 
     # pipelines
     def pipelines_of_project(self, project_id):

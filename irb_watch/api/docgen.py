@@ -179,12 +179,16 @@ class JobOut(BaseModel):
     pipeline_step_id: int | None = None
     created_at: str
     finished_at: str | None = None
+    mine: bool = True  # False: started by another member of a shared project
+    started_by: str | None = None  # their name, for a job of another member
 
     @classmethod
-    def of(cls, j: Job) -> "JobOut":
+    def of(cls, j: Job, user_id: str | None = None, names: dict[str, str] | None = None) -> "JobOut":
+        mine = user_id is None or j.user_id == user_id
         return cls(
             id=j.id, kind=j.kind, status=j.status, error=j.error, draft_id=j.draft_id,
             pipeline_step_id=j.pipeline_step_id, created_at=j.created_at, finished_at=j.finished_at,
+            mine=mine, started_by=None if mine else (names or {}).get(j.user_id),
         )
 
 
@@ -209,10 +213,12 @@ class DraftOut(BaseModel):
     template: DraftTemplateOut | None = None  # None = a Markdown draft
     pipeline_step_id: int | None = None  # made in this pipeline step
     step_files: list[StepFileOut] = Field(default_factory=list)  # the user's own files it uses
+    author: str | None = None  # a shared pipeline draft of another member: their name
 
     @classmethod
-    def of(cls, d: Draft) -> "DraftOut":
+    def of(cls, d: Draft, user_id: str | None = None, names: dict[str, str] | None = None) -> "DraftOut":
         return cls(
+            author=None if user_id is None or d.user_id == user_id else (names or {}).get(d.user_id, ""),
             id=d.id,
             title=d.title,
             instruction=d.instruction,
@@ -260,14 +266,17 @@ class DraftDetailOut(BaseModel):
     # The pipeline of the draft's step, for the "Back to step" link; None for a standalone
     # draft or a step that no longer exists.
     pipeline_id: int | None = None
+    # False: the user may only read it (a platform admin's support access, phase B1).
+    can_edit: bool = True
 
     @classmethod
-    def of(cls, d: DraftDetail, pipeline_id: int | None = None) -> "DraftDetailOut":
+    def of(cls, d: DraftDetail, pipeline_id: int | None = None, can_edit: bool = True) -> "DraftDetailOut":
         return cls(
             draft=DraftOut.of(d.draft),
             versions=[VersionOut.of(v) for v in d.versions],
             guides=[GuideOut.of(g) for g in d.guides],
             pipeline_id=pipeline_id,
+            can_edit=can_edit,
         )
 
 
@@ -512,10 +521,10 @@ def get_draft(
     service: DocgenService = Depends(get_docgen_service),
     pipelines: PipelineService = Depends(get_pipeline_service),
 ) -> DraftDetailOut:
-    detail = service.get_draft(user.id, str(draft_id))  # first: owner check
+    detail = service.get_draft(user.id, str(draft_id))  # first: access check
     step_id = detail.draft.pipeline_step_id
     pipeline_id = pipelines.pipeline_of_step(user.id, step_id) if step_id is not None else None
-    return DraftDetailOut.of(detail, pipeline_id)
+    return DraftDetailOut.of(detail, pipeline_id, service.can_edit_draft(user.id, str(draft_id)))
 
 
 @router.put("/drafts/{draft_id}/markdown", response_model=VersionOut)

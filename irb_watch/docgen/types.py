@@ -141,6 +141,15 @@ class StepReader(Protocol):
         ValidationError for a file outside the step's rules or without readable text."""
         ...
 
+    def step_access(self, user_id: str, step_id: int) -> tuple[int, str] | None:
+        """(pipeline id, the user's level on its project), or None: who may open a pipeline
+        draft (shared with the project's members, phase B1)."""
+        ...
+
+    def step_exists(self, step_id: int) -> bool:
+        """The step row is still there (removed or not); False once it is purged."""
+        ...
+
 
 def ref_to_json(r: DocRef) -> dict:
     return {
@@ -462,8 +471,9 @@ class DocgenStore(Protocol):
     def create_draft(self, new: NewDraft, first: DraftVersion, now: datetime) -> Draft: ...
     def get_draft(self, draft_id: str) -> Draft | None: ...
     def list_drafts(self, user_id: str, limit: int) -> list[Draft]: ...
-    def drafts_of_steps(self, user_id: str, step_ids: list[int]) -> list[Draft]:
-        """This user's drafts made in these pipeline steps, newest first (at most 200)."""
+    def drafts_of_steps(self, step_ids: list[int]) -> list[Draft]:
+        """Everyone's drafts made in these pipeline steps (shared with the project), newest
+        first (at most 200)."""
         ...
 
     def list_versions(self, draft_id: str) -> list[DraftVersion]: ...

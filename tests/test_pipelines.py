@@ -12,6 +12,7 @@ from irb_watch.api.deps import (
     get_docgen_service,
     get_draft_job_service,
     get_pipeline_service,
+    get_project_access_service,
     get_user_store,
     get_verifier,
 )
@@ -28,6 +29,7 @@ from irb_watch.services.pipelines import PipelineService, safe_filename
 from tests.fakes import FakeAudit, FakeStore
 from tests.fakes_pipeline import FakePipelineSetupStore
 from tests.fakes_pipelines import FakePipelineFiles, FakePipelineStore
+from tests.fakes_projects import access_service
 from tests.test_admin_users_api import FakeVerifier
 
 # 2026-11-20 23:30 UTC is already 2026-11-21 in Seoul.
@@ -522,6 +524,9 @@ class NoDrafts:
     def list(self, user_id):
         return []
 
+    def for_steps(self, step_ids, draft_ids):
+        return []
+
 
 @pytest.fixture
 def api():
@@ -531,6 +536,8 @@ def api():
     app.dependency_overrides[get_pipeline_service] = lambda: service
     app.dependency_overrides[get_docgen_service] = NoDrafts
     app.dependency_overrides[get_draft_job_service] = NoDrafts
+    access = access_service(service._users, store)[0]
+    app.dependency_overrides[get_project_access_service] = lambda: access
     yield TestClient(app), store
     app.dependency_overrides.clear()
 

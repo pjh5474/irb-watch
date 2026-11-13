@@ -111,6 +111,26 @@ def move_user(
     return UserOut.from_profile(service.get_user(user_id), org)
 
 
+class OrganizationRoleIn(BaseModel):
+    role: Literal["owner", "admin", "member"]
+
+
+class OrganizationRoleOut(BaseModel):
+    user_id: str
+    org_role: str
+
+
+@router.put("/{user_id}/organization-role", response_model=OrganizationRoleOut)
+def set_organization_role(
+    user_id: str,
+    body: OrganizationRoleIn,
+    admin: AuthUser = Depends(require_admin),
+    orgs: OrganizationService = Depends(get_organization_service),
+) -> OrganizationRoleOut:
+    """Owner or admin of their organization: opens every pipeline project of it (phase B1)."""
+    return OrganizationRoleOut(user_id=user_id, org_role=orgs.set_organization_role(admin.id, user_id, body.role))
+
+
 @router.patch("/{user_id}/role", response_model=UserOut)
 def change_role(
     user_id: str,

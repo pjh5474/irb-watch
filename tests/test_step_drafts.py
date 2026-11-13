@@ -9,6 +9,7 @@ from irb_watch.api.deps import (
     get_docgen_service,
     get_draft_job_service,
     get_pipeline_service,
+    get_project_access_service,
     get_user_store,
     get_verifier,
 )
@@ -22,6 +23,7 @@ from tests.fakes_docgen import NOW, FakeDocgenStore, FakeWriter
 from tests.fakes_jobs import FakeJobStore, LaterRunner, finished_draft, inline_jobs
 from tests.fakes_pipeline import FakePipelineSetupStore
 from tests.fakes_pipelines import FakePipelineFiles, FakePipelineStore
+from tests.fakes_projects import access_service
 from tests.test_admin_users_api import FakeVerifier
 from tests.test_pipelines import docx_bytes
 
@@ -141,7 +143,8 @@ def test_a_step_draft_is_written_from_the_users_own_files_with_the_step_settings
     ]
     assert detail.versions[0].inputs["step_files"][0]["name"] == "Protocol"
     assert [d.id for d in env.docgen.step_drafts("u1", [env.second.id])] == [draft.id]
-    assert env.docgen.step_drafts("u2", [env.second.id]) == []
+    # Step drafts belong to the project (phase B1): the caller checks who may open the steps
+    # (a stranger gets 404 from the routes, tested in the API tests).
 
 
 def test_text_inside_an_own_file_cannot_end_its_block(env):
@@ -284,6 +287,8 @@ def api(env, jobs):
     app.dependency_overrides[get_pipeline_service] = lambda: env.pipelines
     app.dependency_overrides[get_docgen_service] = lambda: env.docgen
     app.dependency_overrides[get_draft_job_service] = lambda: jobs
+    access = access_service(env.users, env.pstore)[0]
+    app.dependency_overrides[get_project_access_service] = lambda: access
     return TestClient(app)
 
 
@@ -316,9 +321,8 @@ def test_api_flow(env):
         assert env.pipelines.pipeline_of_step("u1", 99999) is None
         broken = env.pstore.get_step
         env.pstore.get_step = lambda step_id: (_ for _ in ()).throw(RuntimeError("database down"))
-        try:  # only a link: a failed read leaves it out, the draft page still opens
-            reopened = client.get(f"/docgen/drafts/{draft['id']}", headers=U1)
-            assert reopened.status_code == 200 and reopened.json()["pipeline_id"] is None
+        try:  # only a link: a failed read leaves it out instead of raising
+            assert env.pipelines.pipeline_of_step("u1", env.first.id) is None
         finally:
             env.pstore.get_step = broken
 

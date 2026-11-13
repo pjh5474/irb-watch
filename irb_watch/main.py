@@ -29,6 +29,7 @@ from irb_watch.api import (
     files,
     health,
     pipelines,
+    projects,
     unsubscribe,
     work,
 )
@@ -131,4 +132,5 @@ app.include_router(documents.router)
 app.include_router(files.router)
 app.include_router(pipelines.router)
 app.include_router(work.router)
+app.include_router(projects.router)
 app.include_router(unsubscribe.router)

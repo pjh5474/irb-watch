@@ -76,6 +76,11 @@ class JobStore(Protocol):
         """The user's open jobs, and the others made since `since`; newest first."""
         ...
 
+    def for_targets(self, step_ids: list[int], draft_ids: list[str], since: datetime) -> list[Job]:
+        """Everyone's jobs on these pipeline steps or drafts: open ones, and the others made
+        since `since`; newest first."""
+        ...
+
     def update(self, job_id: str, values: dict) -> None:
         """Changes an OPEN job only: a job that already ended keeps its outcome."""
         ...
@@ -226,6 +231,18 @@ class DraftJobService:
         """Open jobs, and jobs that failed in the last 24 hours (so the reason can be read)."""
         since = self._clock() - timedelta(hours=SHOW_FAILED_HOURS)
         return [j for j in self._store.for_user(user_id, since) if j.open or j.status == "failed"]
+
+    # Quoted: inside this class `list` is the method above.
+    def for_steps(self, step_ids: "list[int]", draft_ids: "list[str]") -> "list[Job]":
+        """Everyone's open jobs on these steps and drafts, and those that failed in the last 24
+        hours (shared projects, phase B1: two members see each other's drafts being written).
+        The caller has checked that the user may open the steps."""
+        if not step_ids and not draft_ids:
+            return []
+        since = self._clock() - timedelta(hours=SHOW_FAILED_HOURS)
+        return [
+            j for j in self._store.for_targets(step_ids, draft_ids, since) if j.open or j.status == "failed"
+        ]
 
     # -- housekeeping --------------------------------------------------------------------------
 

@@ -51,6 +51,7 @@ class MemberOut(BaseModel):
     role: str
     created_at: str
     deleted_at: str | None
+    org_role: str = "member"  # owner | admin | member in this organization
 
     @classmethod
     def of(cls, m: Member) -> "MemberOut":

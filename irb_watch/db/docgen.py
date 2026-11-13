@@ -609,7 +609,7 @@ class SupabaseDocgenStore:
         )
         return [_draft(r) for r in rows]
 
-    def drafts_of_steps(self, user_id: str, step_ids: list[int]) -> list[Draft]:
+    def drafts_of_steps(self, step_ids: list[int]) -> list[Draft]:
         # The newest 200 (a known limit); the ids go in chunks so the request address stays short
         # when the work page asks for every step of the user's pipelines.
         ids = sorted(set(step_ids))
@@ -618,7 +618,6 @@ class SupabaseDocgenStore:
             rows += (
                 self._c.table("drafts")
                 .select("*")
-                .eq("user_id", user_id)
                 .in_("pipeline_step_id", ids[i : i + 200])
                 .order("created_at", desc=True)
                 .limit(200)

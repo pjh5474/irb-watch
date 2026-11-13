@@ -40,6 +40,14 @@ class FakeJobStore:
         ]
         return sorted(found, key=lambda j: j.created_at, reverse=True)
 
+    def for_targets(self, step_ids, draft_ids, since):
+        found = [
+            j for j in self.jobs.values()
+            if (j.pipeline_step_id in set(step_ids) or j.draft_id in set(draft_ids))
+            and (j.status in OPEN or j.created_at >= since.isoformat())
+        ]
+        return sorted(found, key=lambda j: j.created_at, reverse=True)
+
     def update(self, job_id, values):
         if self.fail_update:
             raise RuntimeError("database down")

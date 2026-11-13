@@ -572,7 +572,8 @@ paths change.
 | **PM** (one per project) | set by an organization admin or by the owner | read and edit everything in the project; not delete it |
 | Member (a CRA) | added by the owner or the PM, picked from **the owner's organization** | read and edit everything in the project; not members, not delete |
 | **Organization admin** | `organization_members.role` in (`owner`, `admin`) of the project's organization | read and edit every project of that organization; set the PM; hand a project over |
-| Anyone else, incl. platform admins outside the organization | - | nothing (404) |
+| **Platform admin** (support; changed 2026-11-13, O25) | `profiles.role = 'admin'` | read everything of every project, change nothing (403 with the reason); no extra audit |
+| Anyone else | - | nothing (404) |
 
 ```
 project_members
@@ -923,11 +924,11 @@ MFDS. Still open (numbers kept from revision 2 where the question is the same):
 | O16 | C | 서류 바인더 (paper copies), `IRB 사전 검토`, `참고자료`: tracked as `reference` slots, or left out? | `reference` slots, user-added |
 | O18 | A2 | `/work`: are the four lists of 7.1 the right ones, and does a PM or organization admin see the work of all their projects there? | **Decided 2026-11-13: the four lists; from B1 everything they may open, with a "mine only" filter. Submitted steps are never due or overdue** |
 | O20 | B2 | A shared IRB (`공용 IRB`): added to the catalog by the platform admin (as designed), or a fixed built-in row? | Admin adds it |
-| O21 | B1 | Who sets the PM: organization admins only, or the owner too? May the PM add members? | Both may set it; the PM may add members |
-| O22 | C | A shared draft that used a members-only board another member may not read: warn (as designed) or refuse to share that draft? | Warn |
-| O23 | B1 | A user moved to another organization: do their projects stay with the old organization (they lose access unless still a member there), or move with them? | Stay; an organization admin hands them over first |
-| O24 | B1 | Is a read-only role needed (sponsor contact, auditor)? The owner's answer named only admin, PM and CRA | No; the two access functions leave room |
-| O25 | B1 | May a platform admin open any organization's projects (support), audit-logged? The owner chose "organization admin, own organization only" | No |
+| O21 | B1 | Who sets the PM: organization admins only, or the owner too? May the PM add members? | **Decided 2026-11-13: owner or org admin sets it; the PM adds and removes members** |
+| O22 | B1 | A shared draft that used a members-only board another member may not read: warn (as designed) or refuse to share that draft? | **Decided 2026-11-13: warn** (brought into B1: step drafts are shared from B1) |
+| O23 | B1 | A user moved to another organization: do their projects stay with the old organization (they lose access unless still a member there), or move with them? | **Decided 2026-11-13: stay**; the move also resets the organization role to member |
+| O24 | B1 | Is a read-only role needed (sponsor contact, auditor)? The owner's answer named only admin, PM and CRA | Assumed no (to confirm); the level function leaves room |
+| O25 | B1 | May a platform admin open any organization's projects (support), audit-logged? The owner chose "organization admin, own organization only" | **Decided 2026-11-13: read-only, every project, no extra audit** |
 | O26 | B2 | The suggested fact names on the site page (PI 직위, 진료과, Sub-I, CRC, CRA, IRB 과제번호, 증례당 연구비): fixed in code or an admin-edited list? | Fixed in code |
 | O27 | A2 | Due-date reminder mail in a shared project: who gets it (owner, PM, every member)? | **Decided 2026-11-13: owner and PM** (the PM is added with B1) |
 | O28 | C | **The global document lists start empty** (no step type has a checklist today). Seed 초기 심의 and 변경 심의 from the real folders (신청서, 통지서, Protocol, CRF, ICF, 제품설명서, 변경대비표, ...), or does the admin type them? | Seed a short list the owner confirms first |

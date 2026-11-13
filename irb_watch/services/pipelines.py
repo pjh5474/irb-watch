@@ -37,11 +37,13 @@ from irb_watch.parsers.errors import ParseError
 from irb_watch.parsers.formats import extract_text
 from irb_watch.services.errors import (
     ConflictError,
+    ForbiddenError,
     NotFoundError,
     UpstreamError,
     ValidationError,
 )
 from irb_watch.services.pipeline_admin import PipelineSetupService, StepStatus, StepType
+from irb_watch.services.project_access import NEEDS, REFUSALS
 from irb_watch.services.users import UserStore, active_profile
 
 log = logging.getLogger(__name__)
@@ -167,6 +169,7 @@ class PipelineDetail:
     steps: list[StepView]
     statuses: list[StepStatus]
     step_types: list[StepType] = field(default_factory=list)
+    access: str = "owner"  # the user's level on the project (read = change nothing)
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,7 @@ class StepPage:
     previous_step_id: int | None
     next_step_id: int | None
     statuses: list[StepStatus]
+    access: str = "owner"
 
 
 @dataclass(frozen=True)
@@ -201,6 +205,15 @@ class WorkStep:
     decided_on: str | None
     required: int = 0
     required_missing: int = 0
+    project_owner_id: str | None = None
+
+
+class ProjectAccess(Protocol):
+    """services.project_access.ProjectAccessService."""
+
+    def level(self, user_id: str, project_id: int) -> str | None: ...
+    def workable_project_ids(self, user_id: str) -> list[int]: ...
+    def pms(self, project_ids: list[int]) -> dict[int, str]: ...
 
 
 class PipelineStore(Protocol):
@@ -208,10 +221,13 @@ class PipelineStore(Protocol):
     def project_owner(self, project_id: int) -> str | None: ...
     def project_hospital_ids(self, project_id: int) -> set[int]: ...
     def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]: ...
-    def project_names(self, project_ids: list[int]) -> dict[int, str]: ...
+    def projects_info(self, project_ids: list[int]) -> dict[int, tuple[str, str]]:
+        """project id -> (name, owner id)."""
+        ...
     # pipelines
     def pipelines_of_project(self, project_id: int) -> list[Pipeline]: ...
     def live_pipelines_of_user(self, user_id: str) -> list[Pipeline]: ...
+    def live_pipelines_of_projects(self, project_ids: list[int]) -> list[Pipeline]: ...
     def live_pipelines(self, pipeline_ids: list[int]) -> list[Pipeline]: ...
     def due_steps(self, until: str, skip_statuses: list[str]) -> list[Step]:
         """Live steps with a due date on or before `until` whose status is not in skip_statuses
@@ -340,6 +356,7 @@ class PipelineService:
         link_ttl_seconds: int = 60,
         timezone: str = "Asia/Seoul",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        access: ProjectAccess | None = None,
     ) -> None:
         self._users = users
         self._store = store
@@ -349,22 +366,38 @@ class PipelineService:
         self._ttl = link_ttl_seconds
         self._tz = ZoneInfo(timezone)
         self._clock = clock
+        self._access = access
 
-    # -- access -------------------------------------------------------------------------------
+    # -- access (phase B1: whoever may open the project; services/project_access.py) ----------
 
     def _user(self, user_id: str) -> bool:
         """The user's account is active; returns whether they are a platform admin."""
         return active_profile(self._users, user_id, "your account is not active").role == "admin"
 
-    def _own_project(self, user_id: str, project_id: int) -> None:
-        if self._store.project_owner(project_id) != user_id:
-            raise NotFoundError("project not found")
+    def level(self, user_id: str, project_id: int) -> str | None:
+        """The user's level on the project (owner, manage, pm, edit, read) or None. Without an
+        access service (older tests): the owner only."""
+        if self._access is not None:
+            return self._access.level(user_id, project_id)
+        return "owner" if self._store.project_owner(project_id) == user_id else None
 
-    def _pipeline(self, user_id: str, pipeline_id: int, *, live: bool = True) -> Pipeline:
+    def _check(self, user_id: str, project_id: int, need: str, missing: str) -> str:
+        level = self.level(user_id, project_id)
+        if level is None:
+            raise NotFoundError(missing)
+        if level not in NEEDS[need]:
+            raise ForbiddenError(REFUSALS[need])
+        return level
+
+    def _own_project(self, user_id: str, project_id: int, need: str = "edit") -> str:
+        return self._check(user_id, project_id, need, "project not found")
+
+    def _pipeline(self, user_id: str, pipeline_id: int, *, live: bool = True, need: str = "edit") -> Pipeline:
         self._user(user_id)
         pipeline = self._store.get_pipeline(pipeline_id)
-        if pipeline is None or pipeline.user_id != user_id:
+        if pipeline is None:
             raise NotFoundError("pipeline not found")
+        self._check(user_id, pipeline.project_id, need, "pipeline not found")
         if live and pipeline.deleted_at is not None:
             raise ConflictError("this pipeline is removed; restore it first")
         return pipeline
@@ -423,10 +456,10 @@ class PipelineService:
 
     def list_for_project(self, user_id: str, project_id: int, include_removed: bool = False) -> list[PipelineSummary]:
         self._user(user_id)
-        self._own_project(user_id, project_id)
+        self._own_project(user_id, project_id, "read")
+        # Every pipeline of the project, whoever started it (shared projects, phase B1).
         pipelines = [
-            p for p in self._store.pipelines_of_project(project_id)
-            if p.user_id == user_id and (include_removed or p.deleted_at is None)
+            p for p in self._store.pipelines_of_project(project_id) if include_removed or p.deleted_at is None
         ]
         return self._summaries(project_id, pipelines)
 
@@ -486,17 +519,18 @@ class PipelineService:
         return views
 
     def detail(self, user_id: str, pipeline_id: int) -> PipelineDetail:
-        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
         summary = self._summaries(pipeline.project_id, [pipeline])[0]
         views = self._views(self._ordered_steps(pipeline))
         return PipelineDetail(
-            summary, views, self._setup.statuses(include_archived=True), self._setup.step_types()
+            summary, views, self._setup.statuses(include_archived=True), self._setup.step_types(),
+            self.level(user_id, pipeline.project_id) or "read",
         )
 
     def step_page(self, user_id: str, pipeline_id: int, step_id: int) -> StepPage:
         """One step for its own page. A removed step or a step of a removed pipeline still
         opens (read-only in the page; files stay downloadable); a stranger gets not found."""
-        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
         steps = self._ordered_steps(pipeline)
         step = next((s for s in steps if s.id == step_id), None)
         if step is None:
@@ -513,6 +547,7 @@ class PipelineService:
             previous_id,
             next_id,
             self._setup.statuses(include_archived=True),
+            self.level(user_id, pipeline.project_id) or "read",
         )
 
     # -- work across projects (phase A2) ------------------------------------------------------
@@ -520,28 +555,34 @@ class PipelineService:
     def _work_steps(self, pipelines: list[Pipeline], steps: list[Step], views: dict[int, StepView]) -> list[WorkStep]:
         by_id = {p.id: p for p in pipelines}
         hospitals = self._store.hospital_names(sorted({p.hospital_id for p in pipelines}))
-        projects = self._store.project_names(sorted({p.project_id for p in pipelines}))
+        projects = self._store.projects_info(sorted({p.project_id for p in pipelines}))
         statuses = {s.key: s for s in self._setup.statuses(include_archived=True)}
         out = []
         for s in steps:
             p = by_id[s.pipeline_id]
             status = statuses.get(s.status_key)
             view = views.get(s.id)
+            name, owner = projects.get(p.project_id, (None, None))
             out.append(
                 WorkStep(
-                    p.id, p.project_id, projects.get(p.project_id), p.hospital_id, hospitals.get(p.hospital_id),
+                    p.id, p.project_id, name, p.hospital_id, hospitals.get(p.hospital_id),
                     s.id, s.name, s.status_key, status.label if status else s.status_key,
                     bool(status and status.closed), s.due_on, s.submitted_on, s.decided_on,
                     len(view.checklist) if view else 0, view.required_missing if view else 0,
+                    owner,
                 )
             )
         return out
 
     def work_steps(self, user_id: str) -> list[WorkStep]:
-        """Every live step of the user's live pipelines, over all projects (pipelines whose
-        hospital left the project too), with its checklist counts. For the work page."""
+        """Every live step of the live pipelines of every project the user may work on (owner,
+        organization admin, PM, member; phase B1), over all projects (pipelines whose hospital
+        left the project too), with its checklist counts. For the work page."""
         self._user(user_id)
-        pipelines = self._store.live_pipelines_of_user(user_id)
+        if self._access is not None:
+            pipelines = self._store.live_pipelines_of_projects(self._access.workable_project_ids(user_id))
+        else:
+            pipelines = self._store.live_pipelines_of_user(user_id)
         if not pipelines:
             return []
         steps = [s for s in self._store.steps([p.id for p in pipelines]) if s.deleted_at is None]
@@ -549,9 +590,9 @@ class PipelineService:
         return self._work_steps(pipelines, steps, views)
 
     def reminder_steps(self, until: str) -> dict[str, list[WorkStep]]:
-        """Live steps of live pipelines with a due date on or before `until`, per pipeline owner
-        (the reminders' only recipient until projects are shared). Documents are not read. Run
-        by the daily digest; the caller decides which steps are due for a reminder."""
+        """Live steps of live pipelines with a due date on or before `until`, per recipient: the
+        project's owner and its PM (owner, 2026-11-13, O27). Documents are not read. Run by the
+        daily digest; the caller decides which steps are due for a reminder."""
         # Finished and submitted steps never get a reminder: leave them out in the query, so the
         # daily read does not grow with the history.
         closed = [s.key for s in self._setup.statuses(include_archived=True) if s.closed]
@@ -561,10 +602,12 @@ class PipelineService:
         pipelines = self._store.live_pipelines(sorted({s.pipeline_id for s in steps}))
         live = {p.id for p in pipelines}
         steps = [s for s in steps if s.pipeline_id in live and s.deleted_at is None]
-        owner = {p.id: p.user_id for p in pipelines}
+        project_ids = sorted({p.project_id for p in pipelines})
+        pms = self._access.pms(project_ids) if self._access is not None else {}
         out: dict[str, list[WorkStep]] = {}
         for w in self._work_steps(pipelines, steps, {}):
-            out.setdefault(owner[w.pipeline_id], []).append(w)
+            for recipient in {w.project_owner_id, pms.get(w.project_id)} - {None}:
+                out.setdefault(recipient, []).append(w)  # type: ignore[arg-type]
         return out
 
     # -- AI drafts of a step (phase 3) ---------------------------------------------------------
@@ -678,20 +721,28 @@ class PipelineService:
             allow_board_documents=stype is None or stype.input_board_documents,
         )
 
-    def check_own_step(self, user_id: str, step_id: int) -> None:
-        """Raises "step not found" unless the step is in the active user's own pipeline
-        (before a job row names it)."""
-        owner_pipeline = self._own_pipeline_of_step(user_id, step_id)
+    def check_own_step(self, user_id: str, step_id: int, need: str = "edit") -> None:
+        """Raises "step not found" unless the user may open the step's project, and 403 when
+        their level is too low for `need` (before a job row names the step)."""
+        found = self.step_access(user_id, step_id)
         self._user(user_id)
-        if owner_pipeline is None:
+        if found is None:
             raise NotFoundError("step not found")
+        if found[1] not in NEEDS[need]:
+            raise ForbiddenError(REFUSALS[need])
 
-    def _own_pipeline_of_step(self, user_id: str, step_id: int) -> int | None:
-        """The one place that says whether a step (found by id alone) is in the user's own
-        pipeline: its pipeline id, or None."""
+    def step_exists(self, step_id: int) -> bool:
+        return self._store.get_step(step_id) is not None
+
+    def step_access(self, user_id: str, step_id: int) -> tuple[int, str] | None:
+        """The one place that says whether a step (found by id alone) may be opened: its
+        pipeline id and the user's level on the project, or None."""
         step = self._store.get_step(step_id)
         pipeline = self._store.get_pipeline(step.pipeline_id) if step is not None else None
-        return pipeline.id if pipeline is not None and pipeline.user_id == user_id else None
+        if pipeline is None:
+            return None
+        level = self.level(user_id, pipeline.project_id)
+        return (pipeline.id, level) if level is not None else None
 
     def draft_started(self, user_id: str, step_id: int, kind: str, job_id: str) -> None:
         """The page's history shows that an AI draft (or revision) was started in a step.
@@ -704,18 +755,19 @@ class PipelineService:
             log.warning("draft start could not be written to the pipeline history: %s", type(exc).__name__)
 
     def pipeline_of_step(self, user_id: str, step_id: int) -> int | None:
-        """The pipeline holding this step, when it is the user's own (removed ones too); None
-        otherwise. For the draft page's "Back to step" link only, so it never raises: a failed
-        read leaves the link out instead of failing the draft page."""
+        """The pipeline holding this step, when the user may open its project (removed ones too);
+        None otherwise. For the draft page's "Back to step" link only, so it never raises: a
+        failed read leaves the link out instead of failing the draft page."""
         try:
-            return self._own_pipeline_of_step(user_id, step_id)
+            found = self.step_access(user_id, step_id)
+            return found[0] if found else None
         except Exception as exc:  # noqa: BLE001
             log.warning("the pipeline of step %s could not be read: %s", step_id, type(exc).__name__)
             return None
 
     def step_ids(self, user_id: str, pipeline_id: int) -> list[int]:
-        """Every step of the user's pipeline (removed ones too), for listing its drafts."""
-        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        """Every step of the pipeline (removed ones too), for listing its drafts."""
+        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
         return [s.id for s in self._store.steps([pipeline.id])]
 
     def remove(self, user_id: str, pipeline_id: int) -> Pipeline:
@@ -929,7 +981,7 @@ class PipelineService:
         return restored
 
     def download_url(self, user_id: str, pipeline_id: int, step_id: int, document_id: int, version_no: int) -> str:
-        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
         step = self._step(pipeline, step_id, live=False)
         doc = self._document(step, document_id, live=False)
         version = next((v for v in doc.versions if v.version_no == version_no), None)
@@ -946,7 +998,7 @@ class PipelineService:
         return url
 
     def history(self, user_id: str, pipeline_id: int, limit: int = 200, step_id: int | None = None) -> list[Event]:
-        pipeline = self._pipeline(user_id, pipeline_id, live=False)
+        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
         if step_id is not None:
             self._step(pipeline, step_id, live=False)
         return self._store.events(pipeline.id, limit, step_id)

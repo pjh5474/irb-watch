@@ -106,13 +106,23 @@ class SupabasePipelineStore:
         )
         return {int(r["id"]): r["name"] for r in rows}
 
-    def project_names(self, project_ids: list[int]) -> dict[int, str]:
+    def projects_info(self, project_ids: list[int]) -> dict[int, tuple[str, str]]:
         """Read by the server for the work page and reminders (the browser reads projects under
-        RLS itself); the callers only ask for projects of the user's own pipelines."""
-        out: dict[int, str] = {}
+        RLS itself); the callers only ask for projects the user may open."""
+        out: dict[int, tuple[str, str]] = {}
         for chunk in _chunks(sorted(set(project_ids))):
-            rows = self._c.table("projects").select("id, name").in_("id", chunk).execute().data
-            out.update({int(r["id"]): r["name"] for r in rows})
+            rows = self._c.table("projects").select("id, name, user_id").in_("id", chunk).execute().data
+            out.update({int(r["id"]): (r["name"], str(r["user_id"])) for r in rows})
+        return out
+
+    def live_pipelines_of_projects(self, project_ids: list[int]) -> list[Pipeline]:
+        out: list[Pipeline] = []
+        for chunk in _chunks(sorted(set(project_ids))):
+            rows = (
+                self._c.table("pipelines").select("*").in_("project_id", chunk).is_("deleted_at", "null")
+                .execute().data
+            )
+            out += [_pipeline(r) for r in rows]
         return out
 
     # pipelines

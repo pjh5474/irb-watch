@@ -53,6 +53,11 @@ class Member:
     role: str  # the platform role (user | admin)
     created_at: str
     deleted_at: str | None
+    org_role: str = "member"  # owner | admin | member in this organization (phase B1: owner and
+    # admin open every pipeline project of the organization)
+
+
+ORG_ROLES = ("owner", "admin", "member")
 
 
 class NameTakenError(Exception):
@@ -69,7 +74,12 @@ class OrganizationStore(Protocol):
     def organization_of(self, user_ids: list[str]) -> dict[str, str]: ...
     def all_memberships(self) -> dict[str, str]: ...
     def user_exists(self, user_id: str) -> bool: ...
-    def set_user_organization(self, user_id: str, organization_id: str) -> None: ...
+    def set_user_organization(self, user_id: str, organization_id: str) -> None:
+        """A move makes the user a plain member there (the role never travels)."""
+        ...
+    def set_organization_role(self, user_id: str, organization_id: str, role: str) -> bool:
+        """False: the user is not in that organization."""
+        ...
     def usage(self, start: datetime, end: datetime, types: list[str]) -> list[s.UsageRow]: ...
     def accounts(self) -> list[UserInfo]: ...
 
@@ -223,6 +233,23 @@ class OrganizationService:
         )
         self._store.set_user_organization(user_id, organization_id)
         return target
+
+    def set_organization_role(self, actor_id: str, user_id: str, role: str) -> str:
+        """Platform admins set who is an organization's owner, admin or member. Owners and admins
+        open every pipeline project of their organization (phase B1). Audit-logged first."""
+        if role not in ORG_ROLES:
+            raise ValidationError(f"the organization role must be one of {', '.join(ORG_ROLES)}")
+        organization_id = self._store.organization_of([user_id]).get(user_id)
+        if organization_id is None:
+            raise NotFoundError("this user is in no organization")
+        self._audit.record_required(
+            "admin", "user.organization_role_changed", actor_id,
+            title=f"Organization role set to {role}",
+            payload={"user_id": user_id, "organization_id": organization_id, "role": role},
+        )
+        if not self._store.set_organization_role(user_id, organization_id, role):
+            raise NotFoundError("this user is in no organization")
+        return role
 
     def place_new_user(self, actor_id: str, user_id: str, organization_id: str) -> None:
         """After creating an account (it is in Default already): moves it if another

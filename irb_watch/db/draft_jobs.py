@@ -67,6 +67,24 @@ class SupabaseJobStore:
         jobs = [_job(r) for r in open_rows + other]
         return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 
+    def for_targets(self, step_ids: list[int], draft_ids: list[str], since: datetime) -> list[Job]:
+        """Everyone's jobs on these steps or drafts: open ones, and others since `since`."""
+        rows: list[dict] = []
+        for column, values in (("pipeline_step_id", sorted(set(step_ids))), ("draft_id", sorted(set(draft_ids)))):
+            for i in range(0, len(values), 200):
+                chunk = values[i : i + 200]
+                rows += (
+                    self._c.table("draft_jobs").select(_COLUMNS).in_(column, chunk)
+                    .in_("status", list(OPEN)).execute().data
+                )
+                rows += (
+                    self._c.table("draft_jobs").select(_COLUMNS).in_(column, chunk)
+                    .not_.in_("status", list(OPEN)).gte("created_at", since.isoformat())
+                    .order("created_at", desc=True).limit(200).execute().data
+                )
+        jobs = {r["id"]: _job(r) for r in rows}
+        return sorted(jobs.values(), key=lambda j: j.created_at, reverse=True)
+
     def update(self, job_id: str, values: dict) -> None:
         # Only an open job changes: a job already failed (for example at a restart) is never
         # turned into "done" by a worker that finishes late.

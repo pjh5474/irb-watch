@@ -278,10 +278,8 @@ class FakeDocgenStore:
     def list_drafts(self, user_id, limit):
         return [d for d in self.drafts.values() if d.user_id == user_id][:limit]
 
-    def drafts_of_steps(self, user_id, step_ids):
-        found = [
-            d for d in self.drafts.values() if d.user_id == user_id and d.pipeline_step_id in step_ids
-        ]
+    def drafts_of_steps(self, step_ids):
+        found = [d for d in self.drafts.values() if d.pipeline_step_id in step_ids]
         return sorted(found, key=lambda d: d.id, reverse=True)
 
     def list_versions(self, draft_id):

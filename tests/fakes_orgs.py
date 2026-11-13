@@ -24,6 +24,7 @@ class FakeOrgStore:
             }
         }
         self.membership: dict[str, str] = {}
+        self.org_roles: dict[str, str] = {}
         self.usage_rows: list[UsageRow] = []
         self.account_list: list[UserInfo] = []
         self.usage_calls: list[tuple] = []
@@ -108,6 +109,13 @@ class FakeOrgStore:
         if self.fail_move:
             raise RuntimeError("database down")
         self.membership[user_id] = organization_id
+        self.org_roles[user_id] = "member"  # the role never travels with a move
+
+    def set_organization_role(self, user_id, organization_id, role):
+        if self.membership.get(user_id) != organization_id:
+            return False
+        self.org_roles[user_id] = role
+        return True
 
     def usage(self, start, end, types):
         self.usage_calls.append((start, end, tuple(types)))

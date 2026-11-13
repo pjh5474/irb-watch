@@ -156,6 +156,22 @@ def test_move_user_audits_first_and_refuses_deleted_or_unknown():
         service.move_user("admin-1", "user-1", gone)
 
 
+def test_organization_roles_are_set_by_platform_admins_and_never_travel_with_a_move():
+    service, store, audit = make()
+    org = store.add_org("Acme")
+    service.move_user("admin-1", "user-1", org)
+    assert service.set_organization_role("admin-1", "user-1", "admin") == "admin"
+    assert store.org_roles["user-1"] == "admin"
+    assert audit.entries[-1]["event_type"] == "user.organization_role_changed"
+    with pytest.raises(ValidationError):
+        service.set_organization_role("admin-1", "user-1", "boss")
+    with pytest.raises(NotFoundError):
+        service.set_organization_role("admin-1", "nobody", "admin")
+    other = store.add_org("Other")
+    service.move_user("admin-1", "user-1", other)
+    assert store.org_roles["user-1"] == "member"  # an admin role would open the new org's projects
+
+
 def test_move_is_not_done_without_its_audit_entry():
     service, store, _ = make(fail_required=True)
     org = store.add_org("Acme")

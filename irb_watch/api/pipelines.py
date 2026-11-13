@@ -13,6 +13,7 @@ from irb_watch.api.deps import (
     get_docgen_service,
     get_draft_job_service,
     get_pipeline_service,
+    get_project_access_service,
 )
 from irb_watch.api.docgen import DraftOut, JobOut
 from irb_watch.auth.jwt import AuthUser
@@ -35,6 +36,7 @@ from irb_watch.services.pipelines import (
     StepDocument,
     StepView,
 )
+from irb_watch.services.project_access import ProjectAccessService
 
 router = APIRouter(tags=["pipelines"])
 
@@ -178,6 +180,7 @@ class DetailOut(BaseModel):
     steps: list[OverviewStepOut]
     statuses: list[StatusOut]
     step_types: list[StepTypeOut]
+    access: str  # owner | manage | pm | edit | read (read: change nothing)
 
     @classmethod
     def of(cls, d: PipelineDetail, drafts: Counter, open_jobs: Counter) -> "DetailOut":
@@ -186,12 +189,14 @@ class DetailOut(BaseModel):
             steps=[OverviewStepOut.of_view(v, drafts[v.step.id], open_jobs[v.step.id]) for v in d.steps],
             statuses=[StatusOut.of(s) for s in d.statuses],
             step_types=[StepTypeOut.of(t) for t in d.step_types],
+            access=d.access,
         )
 
 
 class StepPageOut(BaseModel):
     """The step page in one call: the step, its documents with every version, the checklist,
-    the user's drafts of the step and its open or recently failed draft jobs."""
+    the step's drafts (everyone's: they belong to the project) and its open or recently failed
+    draft jobs (everyone's)."""
 
     pipeline: PipelineOut
     step: StepOut
@@ -202,6 +207,8 @@ class StepPageOut(BaseModel):
     previous_step_id: int | None
     next_step_id: int | None
     statuses: list[StatusOut]
+    access: str
+    shared: bool  # the project has members: a draft made here is read by all of them
 
 
 class StartIn(BaseModel):
@@ -255,12 +262,15 @@ class EventOut(BaseModel):
     event_type: str
     payload: dict
     created_at: str
+    actor_name: str | None = None  # who did it, when it was someone else
 
     @classmethod
-    def of(cls, e: Event, user_id: str) -> "EventOut":
+    def of(cls, e: Event, user_id: str, names: dict[str, str] | None = None) -> "EventOut":
+        mine = e.actor_id == user_id
         return cls(
-            id=e.id, step_id=e.step_id, mine=e.actor_id == user_id, event_type=e.event_type,
+            id=e.id, step_id=e.step_id, mine=mine, event_type=e.event_type,
             payload=e.payload, created_at=e.created_at,
+            actor_name=None if mine or not e.actor_id else (names or {}).get(e.actor_id),
         )
 
 
@@ -307,9 +317,10 @@ def pipeline_detail(
     step_drafts = docgen.step_drafts(user.id, step_ids)
     drafts = Counter(d.pipeline_step_id for d in step_drafts)
     draft_steps = {d.id: d.pipeline_step_id for d in step_drafts}
-    mine = set(step_ids)
+    here = set(step_ids)
+    # Everyone's jobs: in a shared project a member sees that a colleague's draft is being written.
     open_jobs = Counter(
-        s for j in jobs.list(user.id) if j.open and (s := _job_step(j, draft_steps)) in mine
+        s for j in jobs.for_steps(step_ids, list(draft_steps)) if j.open and (s := _job_step(j, draft_steps)) in here
     )
     return DetailOut.of(detail, drafts, open_jobs)
 
@@ -339,9 +350,13 @@ def pipeline_history(
     step_id: int | None = None,
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
+    access: ProjectAccessService = Depends(get_project_access_service),
 ) -> list[EventOut]:
-    """Newest first; with step_id, only that step's events."""
-    return [EventOut.of(e, user.id) for e in service.history(user.id, pipeline_id, limit, step_id)]
+    """Newest first; with step_id, only that step's events. Each names who did it (project
+    members see each other's work, phase B1)."""
+    events = service.history(user.id, pipeline_id, limit, step_id)  # first: access check
+    names = access.names([e.actor_id for e in events if e.actor_id and e.actor_id != user.id])
+    return [EventOut.of(e, user.id, names) for e in events]
 
 
 # -- steps --------------------------------------------------------------------------------------
@@ -355,24 +370,29 @@ def step_page(
     service: Service = Depends(get_pipeline_service),
     docgen: DocgenService = Depends(get_docgen_service),
     jobs: DraftJobService = Depends(get_draft_job_service),
+    access: ProjectAccessService = Depends(get_project_access_service),
 ) -> StepPageOut:
     """One step for its own page. A removed step, or a step of a removed pipeline, still
     answers (the page shows it read-only); a stranger's or unknown id answers 404."""
-    page = service.step_page(user.id, pipeline_id, step_id)  # first: owner check
+    page = service.step_page(user.id, pipeline_id, step_id)  # first: access check
     v = page.view
     drafts = docgen.step_drafts(user.id, [step_id])
     draft_steps = {d.id: d.pipeline_step_id for d in drafts}
+    # Draft jobs of this step and revisions of its drafts, by anyone: open, or failed with a reason.
+    step_jobs = [j for j in jobs.for_steps([step_id], list(draft_steps)) if _job_step(j, draft_steps) == step_id]
+    names = access.names([d.user_id for d in drafts] + [j.user_id for j in step_jobs])
     return StepPageOut(
         pipeline=PipelineOut.of(page.summary),
         step=StepOut.of(v.step, v.step_type_name),
         documents=[DocumentOut.of(d) for d in v.documents],
         checklist=[ChecklistOut(name=c.name, uploaded=c.uploaded) for c in v.checklist],
-        drafts=[DraftOut.of(d) for d in drafts],
-        # Draft jobs of this step and revisions of its drafts: open, or failed with a reason.
-        jobs=[JobOut.of(j) for j in jobs.list(user.id) if _job_step(j, draft_steps) == step_id],
+        drafts=[DraftOut.of(d, user.id, names) for d in drafts],
+        jobs=[JobOut.of(j, user.id, names) for j in step_jobs],
         previous_step_id=page.previous_step_id,
         next_step_id=page.next_step_id,
         statuses=[StatusOut.of(s) for s in page.statuses],
+        access=page.access,
+        shared=access.shared(page.summary.pipeline.project_id),
     )
 
 

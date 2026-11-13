@@ -91,7 +91,7 @@ class SupabaseOrganizationStore:
     def members(self, organization_id: str) -> list[Member]:
         rows = (
             self._c.table("organization_members")
-            .select("user_id, profiles(email, display_name, role, created_at, deleted_at)")
+            .select("user_id, role, profiles(email, display_name, role, created_at, deleted_at)")
             .eq("organization_id", organization_id)
             .execute()
             .data
@@ -107,6 +107,7 @@ class SupabaseOrganizationStore:
                     role=p.get("role") or "user",
                     created_at=p.get("created_at") or "",
                     deleted_at=p.get("deleted_at"),
+                    org_role=r.get("role") or "member",
                 )
             )
         result.sort(key=lambda m: (m.deleted_at is not None, (m.email or "~").lower()))
@@ -135,11 +136,20 @@ class SupabaseOrganizationStore:
             raise
         return bool(rows)
 
+    def set_organization_role(self, user_id: str, organization_id: str, role: str) -> bool:
+        rows = (
+            self._c.table("organization_members").update({"role": role}).eq("user_id", user_id)
+            .eq("organization_id", organization_id).execute().data
+        )
+        return bool(rows)
+
     def set_user_organization(self, user_id: str, organization_id: str) -> None:
-        # One row per user (unique user_id): update it, or add it if the user has none.
+        # One row per user (unique user_id): update it, or add it if the user has none. A move
+        # starts as a plain member there: an organization role opens that organization's
+        # projects (phase B1), so it never travels with the user.
         rows = (
             self._c.table("organization_members")
-            .update({"organization_id": organization_id})
+            .update({"organization_id": organization_id, "role": "member"})
             .eq("user_id", user_id)
             .execute()
             .data
