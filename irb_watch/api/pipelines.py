@@ -54,6 +54,9 @@ class PipelineOut(BaseModel):
     created_at: str
     updated_at: str
     deleted_at: str | None
+    site_id: int | None = None  # phase B2a: the site (hospital + PI) of this pipeline
+    pi_name: str = ""
+    site_no: str = ""
 
     @classmethod
     def of(cls, s: PipelineSummary) -> "PipelineOut":
@@ -62,6 +65,7 @@ class PipelineOut(BaseModel):
             id=p.id, project_id=p.project_id, hospital_id=p.hospital_id, hospital_name=s.hospital_name,
             in_project=s.in_project, steps=s.steps, closed_steps=s.closed_steps,
             created_at=p.created_at, updated_at=p.updated_at, deleted_at=p.deleted_at,
+            site_id=p.site_id, pi_name=s.site.pi_name if s.site else "", site_no=s.site.site_no if s.site else "",
         )
 
 
@@ -212,7 +216,11 @@ class StepPageOut(BaseModel):
 
 
 class StartIn(BaseModel):
-    hospital_id: int
+    """site_id: start that site's pipeline. hospital_id alone: the hospital's unnamed site (made
+    when the hospital has no site yet; refused when it has named PIs)."""
+
+    hospital_id: int | None = None
+    site_id: int | None = None
 
 
 class NewStepIn(BaseModel):
@@ -301,7 +309,7 @@ def start_pipeline(
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
 ) -> PipelineRef:
-    return PipelineRef.of(service.start(user.id, project_id, body.hospital_id))
+    return PipelineRef.of(service.start(user.id, project_id, body.hospital_id, body.site_id))
 
 
 @router.get("/pipelines/{pipeline_id}", response_model=DetailOut)
@@ -450,6 +458,7 @@ class DraftInputsOut(BaseModel):
     guide_ids: list[int]
     form_template_id: int | None
     has_instructions: bool
+    site_details: list[str] = []  # names of the site details that go to the AI (D18)
 
 
 @router.get("/pipelines/{pipeline_id}/steps/{step_id}/draft-inputs", response_model=DraftInputsOut)
@@ -468,6 +477,7 @@ def draft_inputs(
         files=[DraftFileOut(**vars(f)) for f in d.files],
         allow_board_documents=d.allow_board_documents, guide_ids=list(d.guide_ids),
         form_template_id=d.form_template_id, has_instructions=d.has_instructions,
+        site_details=list(d.site_details),
     )
 
 

@@ -33,7 +33,7 @@ def _pipeline(r: dict) -> Pipeline:
     return Pipeline(
         id=int(r["id"]), user_id=str(r["user_id"]), project_id=int(r["project_id"]),
         hospital_id=int(r["hospital_id"]), created_at=r["created_at"], updated_at=r["updated_at"],
-        deleted_at=r.get("deleted_at"),
+        deleted_at=r.get("deleted_at"), site_id=int(r["site_id"]) if r.get("site_id") is not None else None,
     )
 
 
@@ -164,12 +164,16 @@ class SupabasePipelineStore:
         rows = self._c.table("pipelines").select("*").eq("id", pipeline_id).limit(1).execute().data
         return _pipeline(rows[0]) if rows else None
 
-    def create_pipeline(self, user_id: str, project_id: int, hospital_id: int, steps: list[dict]) -> Pipeline:
+    def create_pipeline(
+        self, user_id: str, project_id: int, hospital_id: int, steps: list[dict], site_id: int | None = None
+    ) -> Pipeline:
         org = (
             self._c.table("organization_members").select("organization_id").eq("user_id", user_id)
             .limit(1).execute().data
         )
-        values = {"user_id": user_id, "project_id": project_id, "hospital_id": hospital_id}
+        values: dict = {"user_id": user_id, "project_id": project_id, "hospital_id": hospital_id}
+        if site_id is not None:
+            values["site_id"] = site_id  # without one, the database uses the unnamed site
         if org:
             values["organization_id"] = org[0]["organization_id"]
         try:

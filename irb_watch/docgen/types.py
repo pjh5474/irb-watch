@@ -130,6 +130,26 @@ class StepContext:
     guide_ids: tuple[int, ...] = ()  # the step type's default guides
     form_template_id: int | None = None  # the step type's default form
     allow_board_documents: bool = True
+    # The site's details (phase B2a, D18: always sent with a pipeline draft). Typed by users:
+    # data, never instructions.
+    site_no: str = ""
+    pi_name: str = ""
+    site_facts: tuple[tuple[str, str], ...] = ()  # (name, current value)
+
+    @property
+    def has_site(self) -> bool:
+        return bool(self.site_no.strip() or self.pi_name.strip() or self.site_facts)
+
+    @property
+    def site_detail_names(self) -> list[str]:
+        """The same names the draft dialog listed."""
+        return site_detail_names(self.site_no, self.pi_name, [name for name, _ in self.site_facts])
+
+
+def site_detail_names(site_no: str, pi_name: str, fact_names: list[str]) -> list[str]:
+    """The names of what a draft sends about its site (D18), in one order for the dialog and
+    the audit entry."""
+    return [n for n, v in (("site number", site_no), ("PI", pi_name)) if v.strip()] + list(fact_names)
 
 
 class StepReader(Protocol):

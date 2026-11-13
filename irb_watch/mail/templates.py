@@ -133,6 +133,7 @@ class DigestReminder:
     due_on: str
     days_left: int  # negative = overdue
     url: str
+    site: str = ""  # "01 · PI 김○○": tells two PIs of one hospital apart
 
 
 def _when(days_left: int, *, korean: bool) -> str:
@@ -147,7 +148,7 @@ def _reminder_block(reminders: list[DigestReminder], *, korean: bool) -> tuple[l
     head = f"IRB 단계 마감 알림: {len(reminders)}건" if korean else f"IRB step reminders: {len(reminders)}"
     text_lines, rows = [head], []
     for r in reminders:
-        where = " · ".join(x for x in (one_line(r.project, 100), one_line(r.hospital, 80)) if x)
+        where = " · ".join(x for x in (one_line(r.project, 100), one_line(r.hospital, 80), one_line(r.site, 130)) if x)
         step = one_line(r.step, 100) or "-"
         when = f"{one_line(r.due_on, 10)} ({_when(r.days_left, korean=korean)})"
         text_lines.append(f"- {step} [{where}] {when} {r.url}")

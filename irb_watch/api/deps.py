@@ -47,6 +47,7 @@ from irb_watch.db.pipeline_admin import SupabasePipelineSetupStore
 from irb_watch.db.pipelines import SupabasePipelineFiles, SupabasePipelineStore
 from irb_watch.db.project_access import SupabaseProjectAccessStore
 from irb_watch.db.reviews import SupabaseReviewStore
+from irb_watch.db.sites import SupabaseSiteStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
@@ -74,6 +75,7 @@ from irb_watch.services.project_access import ProjectAccessService
 from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
+from irb_watch.services.sites import SiteService
 from irb_watch.services.source_login import cookies_for_source, login_site
 from irb_watch.services.sources import RBAY_ADAPTER, Source, SourceService
 from irb_watch.services.summaries import SummaryService
@@ -145,6 +147,16 @@ def get_pipeline_service() -> PipelineService:
         link_ttl_seconds=settings.download_link_ttl_seconds,
         timezone=settings.scan_timezone,
         access=get_project_access_service(),
+        sites=SupabaseSiteStore(client),
+    )
+
+
+def get_site_service() -> SiteService:
+    """Sites per PI and their dated details (phase B2a)."""
+    client = get_supabase_client()
+    return SiteService(
+        SupabaseUserStore(client), SupabaseSiteStore(client), get_pipeline_service(),
+        timezone=get_settings().scan_timezone,
     )
 
 

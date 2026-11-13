@@ -30,6 +30,7 @@ from irb_watch.api import (
     health,
     pipelines,
     projects,
+    sites,
     unsubscribe,
     work,
 )
@@ -58,13 +59,17 @@ async def lifespan(_: FastAPI):
         agent_service = deps.get_agent_service()
         docgen_service = deps.get_docgen_service()
         pipeline_service = deps.get_pipeline_service()
+        site_service = deps.get_site_service()
         job_service = deps.get_draft_job_service()
 
         def purge_old() -> None:
-            # All run every time; each one logs and swallows its own failure.
+            # All run every time; each one logs and swallows its own failure. Sites after
+            # pipelines: a removed site goes only once no pipeline row points at it.
             agent_service.purge_old()
             docgen_service.purge_old()
             pipeline_service.purge_old()
+            site_service.purge_old()
+            site_service.apply_due_pi()  # scheduled PI changes whose day has come
             job_service.purge_old()
 
         scheduler = ScanScheduler(
@@ -133,4 +138,5 @@ app.include_router(files.router)
 app.include_router(pipelines.router)
 app.include_router(work.router)
 app.include_router(projects.router)
+app.include_router(sites.router)
 app.include_router(unsubscribe.router)

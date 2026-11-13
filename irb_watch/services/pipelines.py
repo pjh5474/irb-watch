@@ -32,7 +32,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from irb_watch.docgen.types import StepContext, StepFile, StepFileRef
+from irb_watch.docgen.types import StepContext, StepFile, StepFileRef, site_detail_names
 from irb_watch.parsers.errors import ParseError
 from irb_watch.parsers.formats import extract_text
 from irb_watch.services.errors import (
@@ -44,6 +44,7 @@ from irb_watch.services.errors import (
 )
 from irb_watch.services.pipeline_admin import PipelineSetupService, StepStatus, StepType
 from irb_watch.services.project_access import NEEDS, REFUSALS
+from irb_watch.services.sites import Site, SiteStore, current_facts
 from irb_watch.services.users import UserStore, active_profile
 
 log = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class Pipeline:
     created_at: str
     updated_at: str
     deleted_at: str | None = None
+    site_id: int | None = None  # the site (hospital + PI) it is the IRB lifecycle of (phase B2a)
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,7 @@ class PipelineSummary:
     in_project: bool
     steps: int
     closed_steps: int
+    site: Site | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +209,7 @@ class WorkStep:
     required: int = 0
     required_missing: int = 0
     project_owner_id: str | None = None
+    site_label: str = ""  # "01 · PI 김○○" (phase B2a; empty for an unnamed site)
 
 
 class ProjectAccess(Protocol):
@@ -234,7 +238,9 @@ class PipelineStore(Protocol):
         (any pipeline, removed ones too; the caller keeps those of live pipelines)."""
         ...
     def get_pipeline(self, pipeline_id: int) -> Pipeline | None: ...
-    def create_pipeline(self, user_id: str, project_id: int, hospital_id: int, steps: list[dict]) -> Pipeline: ...
+    def create_pipeline(
+        self, user_id: str, project_id: int, hospital_id: int, steps: list[dict], site_id: int | None = None
+    ) -> Pipeline: ...
     def set_pipeline_deleted(self, pipeline_id: int, deleted_at: str | None) -> Pipeline: ...
     def touch_pipeline(self, pipeline_id: int) -> None: ...
     # steps
@@ -296,6 +302,7 @@ class DraftInputs:
     guide_ids: tuple[int, ...]  # the step type's default guides
     form_template_id: int | None  # the step type's default form
     has_instructions: bool  # the step type has added AI instructions
+    site_details: tuple[str, ...] = ()  # names of the site details a draft sends (D18; never values)
 
 
 class PipelineFiles(Protocol):
@@ -357,7 +364,9 @@ class PipelineService:
         timezone: str = "Asia/Seoul",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         access: ProjectAccess | None = None,
+        sites: SiteStore | None = None,
     ) -> None:
+        self._sites = sites
         self._users = users
         self._store = store
         self._setup = setup
@@ -443,13 +452,15 @@ class PipelineService:
         names = self._store.hospital_names([p.hospital_id for p in pipelines])
         closed = {s.key for s in self._setup.statuses(include_archived=True) if s.closed}
         steps = [s for s in self._store.steps([p.id for p in pipelines]) if s.deleted_at is None]
+        site_ids = sorted({p.site_id for p in pipelines if p.site_id is not None})
+        sites = {s.id: s for s in self._sites.sites(site_ids)} if self._sites is not None and site_ids else {}
         out = []
         for p in pipelines:
             own = [s for s in steps if s.pipeline_id == p.id]
             out.append(
                 PipelineSummary(
                     p, names.get(p.hospital_id), p.hospital_id in in_project, len(own),
-                    sum(1 for s in own if s.status_key in closed),
+                    sum(1 for s in own if s.status_key in closed), sites.get(p.site_id) if p.site_id else None,
                 )
             )
         return out
@@ -463,16 +474,50 @@ class PipelineService:
         ]
         return self._summaries(project_id, pipelines)
 
-    def start(self, user_id: str, project_id: int, hospital_id: int) -> Pipeline:
+    def _site_for_start(self, user_id: str, project_id: int, hospital_id: int | None, site_id: int | None) -> tuple[int, int | None]:
+        """(hospital, site) for a new pipeline (phase B2a). With a site: that site. With a
+        hospital alone: its unnamed site, made when the hospital has no site yet; a hospital
+        with named PIs starts per site only (owner, 2026-11-13)."""
+        if self._sites is None:  # before sites (older tests): the database picks the site
+            if hospital_id is None:
+                raise ValidationError("choose a hospital or a site")
+            return hospital_id, None
+        if site_id is not None:
+            site = self._sites.get_site(site_id)
+            if site is None or site.project_id != project_id:
+                raise NotFoundError("site not found")
+            if site.deleted_at is not None:
+                raise ConflictError("this site is removed; restore it first")
+            return site.hospital_id, site.id
+        if hospital_id is None:
+            raise ValidationError("choose a hospital or a site")
+        if hospital_id not in self._store.project_hospital_ids(project_id):
+            raise ValidationError("this hospital is not in the project; add it first")
+        live = [s for s in self._sites.sites_of_project(project_id) if s.hospital_id == hospital_id and s.deleted_at is None]
+        if any(s.pi_name.strip() for s in live):
+            raise ConflictError("this hospital has PIs; start the pipeline of a PI's site")
+        unnamed = next((s for s in live if not s.pi_name.strip()), None)
+        if unnamed is not None:
+            return hospital_id, unnamed.id
+        try:
+            site = self._sites.create_site(project_id, hospital_id, user_id, "", "", "")
+        except LookupError as exc:
+            raise ConflictError("a site was just added for this hospital; reload the page") from exc
+        return hospital_id, site.id
+
+    def start(self, user_id: str, project_id: int, hospital_id: int | None = None, site_id: int | None = None) -> Pipeline:
+        """A pipeline for a site (phase B2a): one live pipeline per site. A hospital alone
+        starts its unnamed site's pipeline."""
         self._user(user_id)
         self._own_project(user_id, project_id)
+        hospital_id, site_id = self._site_for_start(user_id, project_id, hospital_id, site_id)
         if hospital_id not in self._store.project_hospital_ids(project_id):
             raise ValidationError("this hospital is not in the project; add it first")
         if any(
-            p.hospital_id == hospital_id and p.deleted_at is None
+            p.deleted_at is None and (p.site_id == site_id if site_id is not None else p.hospital_id == hospital_id)
             for p in self._store.pipelines_of_project(project_id)
         ):
-            raise ConflictError("this hospital already has a pipeline in the project")
+            raise ConflictError("this site already has a pipeline")
         order = self._setup.template_for(hospital_id)
         live = {t.id: t for t in self._setup.step_types()}
         status = self._first_open_status()
@@ -481,13 +526,13 @@ class PipelineService:
             for i, tid in enumerate((t for t in order.step_type_ids if t in live), start=1)
         ]
         try:
-            pipeline = self._store.create_pipeline(user_id, project_id, hospital_id, steps)
+            pipeline = self._store.create_pipeline(user_id, project_id, hospital_id, steps, site_id)
         except NameTakenError as exc:
-            raise ConflictError("this hospital already has a pipeline in the project") from exc
+            raise ConflictError("this site already has a pipeline") from exc
         self._event(
             pipeline.id, None, user_id, "pipeline.started",
             {
-                "hospital_id": hospital_id, "steps": [s["name"] for s in steps],
+                "hospital_id": hospital_id, "site_id": site_id, "steps": [s["name"] for s in steps],
                 "from": "hospital" if order.hospital_id else "global",
             },
         )
@@ -557,6 +602,8 @@ class PipelineService:
         hospitals = self._store.hospital_names(sorted({p.hospital_id for p in pipelines}))
         projects = self._store.projects_info(sorted({p.project_id for p in pipelines}))
         statuses = {s.key: s for s in self._setup.statuses(include_archived=True)}
+        site_ids = sorted({p.site_id for p in pipelines if p.site_id is not None})
+        labels = {s.id: s.label for s in self._sites.sites(site_ids)} if self._sites is not None and site_ids else {}
         out = []
         for s in steps:
             p = by_id[s.pipeline_id]
@@ -569,7 +616,7 @@ class PipelineService:
                     s.id, s.name, s.status_key, status.label if status else s.status_key,
                     bool(status and status.closed), s.due_on, s.submitted_on, s.decided_on,
                     len(view.checklist) if view else 0, view.required_missing if view else 0,
-                    owner,
+                    owner, labels.get(p.site_id, "") if p.site_id is not None else "",
                 )
             )
         return out
@@ -656,12 +703,15 @@ class PipelineService:
                     newest.filename, newest.has_text, newest.text_note, ticked=tick,
                 )
             )
+        site_no, pi_name, facts = self._site_details(pipeline)
+        sent = site_detail_names(site_no, pi_name, sorted(facts))
         return DraftInputs(
             step.id, step.name, pipeline.hospital_id, files,
             allow_board_documents=stype is None or stype.input_board_documents,
             guide_ids=tuple(stype.guide_ids) if stype else (),
             form_template_id=stype.form_template_id if stype else None,
             has_instructions=bool(stype and stype.instructions.strip()),
+            site_details=tuple(sent),
         )
 
     def context(self, user_id: str, step_id: int, files: list[tuple[int, int | None]]) -> StepContext:
@@ -710,6 +760,7 @@ class PipelineService:
                     text,
                 )
             )
+        site_no, pi_name, facts = self._site_details(pipeline)
         return StepContext(
             step_id=step.id,
             step_name=step.name,
@@ -719,7 +770,19 @@ class PipelineService:
             guide_ids=tuple(stype.guide_ids) if stype else (),
             form_template_id=stype.form_template_id if stype else None,
             allow_board_documents=stype is None or stype.input_board_documents,
+            site_no=site_no,
+            pi_name=pi_name,
+            site_facts=tuple(sorted(facts.items())),
         )
+
+    def _site_details(self, pipeline: Pipeline) -> tuple[str, str, dict[str, str]]:
+        """The site's number, PI and current details (D18: always sent with a pipeline draft)."""
+        if self._sites is None or pipeline.site_id is None:
+            return "", "", {}
+        site = self._sites.get_site(pipeline.site_id)
+        if site is None:
+            return "", "", {}
+        return site.site_no, site.pi_name, current_facts(self._sites.facts([site.id]), self.today())
 
     def check_own_step(self, user_id: str, step_id: int, need: str = "edit") -> None:
         """Raises "step not found" unless the user may open the step's project, and 403 when
@@ -780,14 +843,35 @@ class PipelineService:
         pipeline = self._pipeline(user_id, pipeline_id, live=False)
         if pipeline.deleted_at is None:
             raise ConflictError("this pipeline is not removed")
+        if self._sites is not None and pipeline.site_id is not None:
+            site = self._sites.get_site(pipeline.site_id)
+            if site is not None and site.deleted_at is not None:
+                raise ConflictError("this pipeline's site is removed; restore the site first")
         try:
             restored = self._store.set_pipeline_deleted(pipeline_id, None)
         except NameTakenError as exc:
-            raise ConflictError(
-                "this hospital has a newer pipeline in the project; remove that one first"
-            ) from exc
+            raise ConflictError("this site has a newer pipeline; remove that one first") from exc
         self._event(pipeline_id, None, user_id, "pipeline.restored", {})
         return restored
+
+    # -- for the sites service (services/sites.py ProjectRules) -------------------------------
+
+    def project_hospitals(self, project_id: int) -> set[int]:
+        return self._store.project_hospital_ids(project_id)
+
+    def live_pipeline_of_site(self, site_id: int) -> int | None:
+        site = self._sites.get_site(site_id) if self._sites is not None else None
+        if site is None:
+            return None
+        return next(
+            (p.id for p in self._store.pipelines_of_project(site.project_id) if p.site_id == site_id and p.deleted_at is None),
+            None,
+        )
+
+    def step_site(self, step_id: int) -> int | None:
+        step = self._store.get_step(step_id)
+        pipeline = self._store.get_pipeline(step.pipeline_id) if step is not None else None
+        return pipeline.site_id if pipeline is not None else None
 
     # -- steps --------------------------------------------------------------------------------
 

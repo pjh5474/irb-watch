@@ -77,14 +77,16 @@ class FakePipelineStore:
     def get_pipeline(self, pipeline_id):
         return self.pipes.get(pipeline_id)
 
-    def create_pipeline(self, user_id, project_id, hospital_id, steps):
+    def create_pipeline(self, user_id, project_id, hospital_id, steps, site_id=None):
+        # The live unique index: per site (phase B2a), per project and hospital without sites.
         if any(
-            p.project_id == project_id and p.hospital_id == hospital_id and p.deleted_at is None
+            p.deleted_at is None
+            and (p.site_id == site_id if site_id is not None else (p.project_id, p.hospital_id) == (project_id, hospital_id))
             for p in self.pipes.values()
         ):
             raise NameTakenError
         pid = next(self._ids)
-        self.pipes[pid] = Pipeline(pid, user_id, project_id, hospital_id, _now(), _now())
+        self.pipes[pid] = Pipeline(pid, user_id, project_id, hospital_id, _now(), _now(), site_id=site_id)
         for s in steps:
             self.add_step(pid, s)
         return self.pipes[pid]
@@ -92,7 +94,8 @@ class FakePipelineStore:
     def set_pipeline_deleted(self, pipeline_id, deleted_at):
         p = self.pipes[pipeline_id]
         if deleted_at is None and any(
-            o.id != p.id and o.project_id == p.project_id and o.hospital_id == p.hospital_id and o.deleted_at is None
+            o.id != p.id and o.deleted_at is None
+            and (o.site_id == p.site_id if p.site_id is not None else (o.project_id, o.hospital_id) == (p.project_id, p.hospital_id))
             for o in self.pipes.values()
         ):
             raise NameTakenError

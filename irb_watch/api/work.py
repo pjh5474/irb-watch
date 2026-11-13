@@ -37,11 +37,13 @@ class WorkStepOut(BaseModel):
     required: int
     required_missing: int
     mine: bool  # in a project the user owns (the "mine only" filter)
+    site_label: str = ""  # "01 · PI 김○○"; empty for an unnamed site
 
     @classmethod
     def of(cls, s: WorkStep, today, user_id: str) -> "WorkStepOut":
         return cls(
             mine=s.project_owner_id == user_id,
+            site_label=s.site_label,
             pipeline_id=s.pipeline_id, project_id=s.project_id, project_name=s.project_name,
             hospital_id=s.hospital_id, hospital_name=s.hospital_name, step_id=s.step_id,
             step_name=s.step_name, status_key=s.status_key, status_label=s.status_label,

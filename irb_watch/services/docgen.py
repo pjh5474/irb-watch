@@ -65,6 +65,7 @@ from irb_watch.services.errors import (
     ValidationError,
 )
 from irb_watch.services.project_access import NEEDS, REFUSALS
+from irb_watch.services.sites import audit_site_details
 from irb_watch.services.users import AuditSink, UserStore, active_profile
 
 log = logging.getLogger(__name__)
@@ -280,6 +281,9 @@ def _payload(
     if step is not None:
         out["pipeline_step_id"] = step.step_id
         out["step_files"] = [{**f.ref.to_json(), "filename": f.filename} for f in step.files]
+        # D18: which site details went to the AI service: how many, and the suggested names
+        # only. The audit log is append-only, and a typed name may hold a person's name.
+        out["site_details"] = audit_site_details(step.site_detail_names)
     return out
 
 

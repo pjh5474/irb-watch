@@ -203,6 +203,7 @@ class DigestService:
                 t.DigestReminder(
                     w.project_name or "", w.hospital_name or "", w.step_name, w.due_on or "", left,
                     f"{self._app_url}/ko/pipelines/{w.pipeline_id}/steps/{w.step_id}",
+                    w.site_label,  # the PI is named in the mail (owner, 2026-11-13)
                 )
                 for w, left in reminders_for(due_steps, now.astimezone(self._tz).date())
             ]
