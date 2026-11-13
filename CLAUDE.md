@@ -19,6 +19,7 @@ Read first: `docs/plan.md` (state and next steps), `docs/decisions.md` (every de
   - keep hospital specifics in adapters, guides and templates, not the core;
   - name SaaS-relevant choices in the questions asked before planning.
   **Organizations only group users and give per-organization statistics; they never grant access.** A private (login or manual) source is opened to individual users by the platform admin (`source_members`); an organization that wants a login site asks the admin, who registers it with that organization's hospital login.
+  **Decided 2026-11-13, not built** (`docs/pipeline-design.md`, 4.8): from the pipeline redesign's phase B1, an organization's admin opens every pipeline project of that organization, and each project has one PM. That is the one exception to the rule above; private board documents stay per person.
   Not yet multi-tenant: organizations exist only as columns (migration `organizations`, see decisions.md "Organizations (SaaS step 1)"; one Default organization, nothing filters by it, defaults fill it), the scheduler and long work run inside the API process, uploads are base64 in JSON, "global" means the whole server.
 - Commit messages end with the co-author line the harness provides. Stage with `git add -A`, then check that no `.env*` file except `.env.example` is staged and scan the diff for key-like strings before committing.
 
@@ -95,6 +96,7 @@ Also built:
 - **Manual sources (2026-11-11):** adapter `manual` for hospitals with no e-IRB site; admins upload documents and new versions by hand; saved through the scan path (`commit_scan`, cards, AI summaries); never scanned. Code: `services/manual.py`, `api/admin_manual.py`. Migration `manual_sources` applied 2026-11-11. See decisions.md "Manual sources".
 
 Next candidates:
+- IRB pipeline redesign (`docs/pipeline-design.md`, design only, 2026-11-13): phase A (one step per page, no migration) first; ask the phase's open choices (section 10) before building
 - search over stored document text
 - check Jev's accuracy against about 20 hand-labelled real revisions
 - verify RLS and the endpoints with a real user's login token (needs the project's publishable key)
