@@ -20,7 +20,8 @@ class SupabaseDigestStore(SupabaseAlertStore):
         prefs = {
             r["user_id"]: r
             for r in self._c.table("notification_prefs")
-            .select("user_id, digest_enabled, last_digest_at")
+            # step_reminders_enabled: migration 20261113024818_step_reminders (apply before deploy)
+            .select("user_id, digest_enabled, last_digest_at, step_reminders_enabled")
             .execute()
             .data
         }
@@ -31,6 +32,7 @@ class SupabaseDigestStore(SupabaseAlertStore):
                 role=p["role"],
                 enabled=prefs.get(p["id"], {}).get("digest_enabled", True),  # no row = on
                 last_digest_at=prefs.get(p["id"], {}).get("last_digest_at"),
+                reminders_enabled=prefs.get(p["id"], {}).get("step_reminders_enabled", True),
             )
             for p in profiles
             if p.get("email")
@@ -74,4 +76,9 @@ class SupabaseDigestStore(SupabaseAlertStore):
     def set_digest_enabled(self, user_id: str, enabled: bool, at: str) -> None:
         self._c.table("notification_prefs").upsert(
             {"user_id": user_id, "digest_enabled": enabled, "updated_at": at}, on_conflict="user_id"
+        ).execute()
+
+    def set_reminders_enabled(self, user_id: str, enabled: bool, at: str) -> None:
+        self._c.table("notification_prefs").upsert(
+            {"user_id": user_id, "step_reminders_enabled": enabled, "updated_at": at}, on_conflict="user_id"
         ).execute()

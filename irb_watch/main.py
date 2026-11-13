@@ -30,6 +30,7 @@ from irb_watch.api import (
     health,
     pipelines,
     unsubscribe,
+    work,
 )
 from irb_watch.config import get_settings
 from irb_watch.services.errors import ServiceError
@@ -129,4 +130,5 @@ app.include_router(admin_ai.router)
 app.include_router(documents.router)
 app.include_router(files.router)
 app.include_router(pipelines.router)
+app.include_router(work.router)
 app.include_router(unsubscribe.router)

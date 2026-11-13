@@ -53,6 +53,14 @@ class Job:
         return self.status in OPEN
 
 
+def job_step(job: Job, draft_steps: dict[str, int | None]) -> int | None:
+    """The pipeline step a job works for: a draft job names it; a revision job names its draft,
+    which belongs to a step when it was made in one (draft_steps: draft id -> its step)."""
+    if job.pipeline_step_id is not None:
+        return job.pipeline_step_id
+    return draft_steps.get(job.draft_id) if job.draft_id else None
+
+
 class JobTakenError(Exception):
     """Raised by the store when the step or draft already has an open job (unique index)."""
 

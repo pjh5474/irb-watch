@@ -17,7 +17,8 @@ from irb_watch.api.deps import (
 from irb_watch.api.docgen import DraftOut, JobOut
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.services.docgen import DocgenService
-from irb_watch.services.draft_jobs import DraftJobService, Job
+from irb_watch.services.draft_jobs import DraftJobService
+from irb_watch.services.draft_jobs import job_step as _job_step
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.pipeline_admin import StepStatus, StepType
 from irb_watch.services.pipelines import (
@@ -311,14 +312,6 @@ def pipeline_detail(
         s for j in jobs.list(user.id) if j.open and (s := _job_step(j, draft_steps)) in mine
     )
     return DetailOut.of(detail, drafts, open_jobs)
-
-
-def _job_step(job: Job, draft_steps: dict[str, int | None]) -> int | None:
-    """The step a job works for: a draft job names it; a revision job names its draft, which
-    belongs to a step when it was made in one."""
-    if job.pipeline_step_id is not None:
-        return job.pipeline_step_id
-    return draft_steps.get(job.draft_id) if job.draft_id else None
 
 
 @router.delete("/pipelines/{pipeline_id}", response_model=PipelineRef)

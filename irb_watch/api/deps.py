@@ -337,6 +337,7 @@ def get_alert_service() -> AlertService:
             api_domain=settings.api_domain,
             unsubscribe_key=settings.unsubscribe_key.strip(),
             timezone=settings.scan_timezone,
+            reminders=get_pipeline_service(),  # IRB step reminders (phase A2)
         )
     return AlertService(
         SupabaseAlertStore(client),

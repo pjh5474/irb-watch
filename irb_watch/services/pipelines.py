@@ -181,13 +181,42 @@ class StepPage:
     statuses: list[StepStatus]
 
 
+@dataclass(frozen=True)
+class WorkStep:
+    """One live step of a live pipeline, with what the work page and the reminders show
+    (phase A2). required / required_missing are 0 where documents were not read (reminders)."""
+
+    pipeline_id: int
+    project_id: int
+    project_name: str | None  # None: the project row is gone (should not happen)
+    hospital_id: int
+    hospital_name: str | None
+    step_id: int
+    step_name: str
+    status_key: str
+    status_label: str
+    closed: bool
+    due_on: str | None
+    submitted_on: str | None
+    decided_on: str | None
+    required: int = 0
+    required_missing: int = 0
+
+
 class PipelineStore(Protocol):
     # projects and hospitals
     def project_owner(self, project_id: int) -> str | None: ...
     def project_hospital_ids(self, project_id: int) -> set[int]: ...
     def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]: ...
+    def project_names(self, project_ids: list[int]) -> dict[int, str]: ...
     # pipelines
     def pipelines_of_project(self, project_id: int) -> list[Pipeline]: ...
+    def live_pipelines_of_user(self, user_id: str) -> list[Pipeline]: ...
+    def live_pipelines(self, pipeline_ids: list[int]) -> list[Pipeline]: ...
+    def due_steps(self, until: str, skip_statuses: list[str]) -> list[Step]:
+        """Live steps with a due date on or before `until` whose status is not in skip_statuses
+        (any pipeline, removed ones too; the caller keeps those of live pipelines)."""
+        ...
     def get_pipeline(self, pipeline_id: int) -> Pipeline | None: ...
     def create_pipeline(self, user_id: str, project_id: int, hospital_id: int, steps: list[dict]) -> Pipeline: ...
     def set_pipeline_deleted(self, pipeline_id: int, deleted_at: str | None) -> Pipeline: ...
@@ -352,7 +381,11 @@ class PipelineService:
         return self._clock().isoformat()
 
     def _today(self) -> str:
-        return self._clock().astimezone(self._tz).date().isoformat()
+        return self.today().isoformat()
+
+    def today(self) -> date:
+        """Today in the configured time zone (the one step dates are filled in)."""
+        return self._clock().astimezone(self._tz).date()
 
     def _event(self, pipeline_id: int, step_id: int | None, actor: str, kind: str, payload: dict) -> None:
         self._store.add_event(pipeline_id, step_id, actor, kind, payload)
@@ -432,11 +465,13 @@ class PipelineService:
         return sorted(self._store.steps([pipeline.id]), key=lambda s: (s.deleted_at is not None, s.position, s.id))
 
     def _views(self, steps: list[Step]) -> list[StepView]:
-        docs = self._store.documents([s.id for s in steps])
+        by_step: dict[int, list[StepDocument]] = {}
+        for d in self._store.documents([s.id for s in steps]):  # grouped once, not per step
+            by_step.setdefault(d.step_id, []).append(d)
         all_types = {t.id: t for t in self._setup.step_types(include_archived=True)}
         views = []
         for step in steps:
-            own = [d for d in docs if d.step_id == step.id]
+            own = by_step.get(step.id, [])
             live_names = {d.name.lower() for d in own if d.deleted_at is None and d.versions}
             stype = all_types.get(step.step_type_id) if step.step_type_id else None
             required = list(stype.required_documents) if stype else []
@@ -479,6 +514,58 @@ class PipelineService:
             next_id,
             self._setup.statuses(include_archived=True),
         )
+
+    # -- work across projects (phase A2) ------------------------------------------------------
+
+    def _work_steps(self, pipelines: list[Pipeline], steps: list[Step], views: dict[int, StepView]) -> list[WorkStep]:
+        by_id = {p.id: p for p in pipelines}
+        hospitals = self._store.hospital_names(sorted({p.hospital_id for p in pipelines}))
+        projects = self._store.project_names(sorted({p.project_id for p in pipelines}))
+        statuses = {s.key: s for s in self._setup.statuses(include_archived=True)}
+        out = []
+        for s in steps:
+            p = by_id[s.pipeline_id]
+            status = statuses.get(s.status_key)
+            view = views.get(s.id)
+            out.append(
+                WorkStep(
+                    p.id, p.project_id, projects.get(p.project_id), p.hospital_id, hospitals.get(p.hospital_id),
+                    s.id, s.name, s.status_key, status.label if status else s.status_key,
+                    bool(status and status.closed), s.due_on, s.submitted_on, s.decided_on,
+                    len(view.checklist) if view else 0, view.required_missing if view else 0,
+                )
+            )
+        return out
+
+    def work_steps(self, user_id: str) -> list[WorkStep]:
+        """Every live step of the user's live pipelines, over all projects (pipelines whose
+        hospital left the project too), with its checklist counts. For the work page."""
+        self._user(user_id)
+        pipelines = self._store.live_pipelines_of_user(user_id)
+        if not pipelines:
+            return []
+        steps = [s for s in self._store.steps([p.id for p in pipelines]) if s.deleted_at is None]
+        views = {v.step.id: v for v in self._views(steps)}
+        return self._work_steps(pipelines, steps, views)
+
+    def reminder_steps(self, until: str) -> dict[str, list[WorkStep]]:
+        """Live steps of live pipelines with a due date on or before `until`, per pipeline owner
+        (the reminders' only recipient until projects are shared). Documents are not read. Run
+        by the daily digest; the caller decides which steps are due for a reminder."""
+        # Finished and submitted steps never get a reminder: leave them out in the query, so the
+        # daily read does not grow with the history.
+        closed = [s.key for s in self._setup.statuses(include_archived=True) if s.closed]
+        steps = self._store.due_steps(until, sorted({*closed, SUBMITTED}))
+        if not steps:
+            return {}
+        pipelines = self._store.live_pipelines(sorted({s.pipeline_id for s in steps}))
+        live = {p.id for p in pipelines}
+        steps = [s for s in steps if s.pipeline_id in live and s.deleted_at is None]
+        owner = {p.id: p.user_id for p in pipelines}
+        out: dict[str, list[WorkStep]] = {}
+        for w in self._work_steps(pipelines, steps, {}):
+            out.setdefault(owner[w.pipeline_id], []).append(w)
+        return out
 
     # -- AI drafts of a step (phase 3) ---------------------------------------------------------
     # The draft itself is the docs generator's (services/docgen.py); this side says which of the

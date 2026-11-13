@@ -52,7 +52,9 @@ class Env:
 
 def test_a_user_gets_the_new_and_updated_documents_of_public_sources_with_links():
     env = Env([user()], [card(1, 4, "new", title="Consent form"), card(2, 5, "updated", title="SOP 3")])
-    assert env.run() == {"users": 1, "sent": 1, "failed": 0, "quiet": 0}
+    assert env.run() == {
+        "users": 1, "sent": 1, "failed": 0, "quiet": 0, "reminders": 0, "news_users": 1, "reminder_users": 1,
+    }
     [mail] = env.mailer.sent
     assert mail.to == ("u@example.com",)
     assert "Consent form" in mail.text and "SOP 3" in mail.text

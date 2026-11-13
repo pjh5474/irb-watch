@@ -610,19 +610,23 @@ class SupabaseDocgenStore:
         return [_draft(r) for r in rows]
 
     def drafts_of_steps(self, user_id: str, step_ids: list[int]) -> list[Draft]:
-        if not step_ids:
-            return []
-        rows = (
-            self._c.table("drafts")
-            .select("*")
-            .eq("user_id", user_id)
-            .in_("pipeline_step_id", step_ids)
-            .order("created_at", desc=True)
-            .limit(200)
-            .execute()
-            .data
-        )
-        return [_draft(r) for r in rows]
+        # The newest 200 (a known limit); the ids go in chunks so the request address stays short
+        # when the work page asks for every step of the user's pipelines.
+        ids = sorted(set(step_ids))
+        rows: list[dict] = []
+        for i in range(0, len(ids), 200):
+            rows += (
+                self._c.table("drafts")
+                .select("*")
+                .eq("user_id", user_id)
+                .in_("pipeline_step_id", ids[i : i + 200])
+                .order("created_at", desc=True)
+                .limit(200)
+                .execute()
+                .data
+            )
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        return [_draft(r) for r in rows[:200]]
 
     def list_versions(self, draft_id: str) -> list[DraftVersion]:
         rows = (

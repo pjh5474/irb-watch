@@ -25,12 +25,31 @@ def env(monkeypatch):
     app.dependency_overrides.clear()
 
 
-def test_post_with_a_valid_token_switches_that_users_digest_off(env):
+def test_post_with_a_valid_token_and_no_choice_switches_both_parts_off(env):
     client, store, audit = env
     res = client.post(f"/unsubscribe?token={make_token(USER, KEY)}")
-    assert res.status_code == 200 and res.json() == {"status": "unsubscribed"}
-    assert store.enabled == {USER: False}
-    assert audit.entries[-1]["event_type"] == "digest.unsubscribed" and audit.entries[-1]["actor_id"] == USER
+    assert res.status_code == 200 and res.json() == {"status": "unsubscribed", "stopped": ["news", "reminders"]}
+    assert store.enabled == {USER: False} and store.reminders_enabled == {USER: False}
+    assert [e["event_type"] for e in audit.entries] == ["digest.unsubscribed", "reminders.unsubscribed"]
+    assert {e["actor_id"] for e in audit.entries} == {USER}
+
+
+@pytest.mark.parametrize(
+    ("stop", "news", "reminders"),
+    [(["news"], {USER: False}, {}), (["reminders"], {}, {USER: False})],
+)
+def test_the_page_can_switch_off_one_part_only(env, stop, news, reminders):
+    client, store, audit = env
+    res = client.post("/unsubscribe", params={"token": make_token(USER, KEY), "stop": stop})
+    assert res.status_code == 200 and res.json()["stopped"] == stop
+    assert store.enabled == news and store.reminders_enabled == reminders
+    assert len(audit.entries) == 1
+
+
+def test_an_unknown_part_is_refused(env):
+    client, store, _ = env
+    res = client.post("/unsubscribe", params={"token": make_token(USER, KEY), "stop": "everything"})
+    assert res.status_code == 422 and store.enabled == {} and store.reminders_enabled == {}
 
 
 def test_the_one_click_post_mail_apps_send_works_with_its_form_body(env):
@@ -40,7 +59,8 @@ def test_the_one_click_post_mail_apps_send_works_with_its_form_body(env):
         content="List-Unsubscribe=One-Click",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    assert res.status_code == 200 and store.enabled == {USER: False}
+    # One-click must always stop the mail: both parts.
+    assert res.status_code == 200 and store.enabled == {USER: False} and store.reminders_enabled == {USER: False}
 
 
 def test_get_changes_nothing_so_a_link_scanner_cannot_unsubscribe_anyone(env):

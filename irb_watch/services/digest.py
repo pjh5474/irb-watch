@@ -1,9 +1,14 @@
 """The daily digest: one mail per user listing the new and updated documents of the sources the
-user can read.
+user can read, and (phase A2) reminders of the user's IRB steps whose reminder day is today
+(services/pipeline_work.py). News and reminders have their own switches; a mail goes out when
+either has something.
 
   * Runs after the SCHEDULED scan run (see services/alerts.py). Plain server code, no AI.
-  * Who: every active user with an email address whose digest is not switched off (the default
-    is on). Admins are users too and read every source.
+  * Who: every active user with an email address who has the news or the reminders switched on
+    (both default on). Admins are users too and read every source. The finish entry counts
+    `news_users` and `reminder_users` (switched on) besides `users` (either), and `reminders`
+    (lines sent).
+  * The window below is for the news only; reminders look at today alone.
   * What a user may see follows the database rule private.can_read_source: public sources, plus
     the members-only sources an admin assigned (admins: everything). A members-only source
     (a study) appears as a COUNT only: its name and titles never go into an email.
@@ -24,6 +29,8 @@ from zoneinfo import ZoneInfo
 from irb_watch.mail import templates as t
 from irb_watch.mail.client import Mailer, MailError
 from irb_watch.mail.unsubscribe import make_token
+from irb_watch.services.pipeline_work import DUE_WINDOW_DAYS, reminders_for
+from irb_watch.services.pipelines import WorkStep
 from irb_watch.services.users import AuditSink
 
 log = logging.getLogger(__name__)
@@ -41,8 +48,9 @@ class DigestUser:
     id: str
     email: str
     role: str
-    enabled: bool
+    enabled: bool  # the document news (digest_enabled)
     last_digest_at: str | None
+    reminders_enabled: bool = True  # IRB step reminders (phase A2); its own switch
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,12 @@ class DigestStore(Protocol):
     def release(self, key: str) -> None: ...
 
 
+class ReminderSource(Protocol):
+    """services.pipelines.PipelineService: due steps of live pipelines, per owner."""
+
+    def reminder_steps(self, until: str) -> dict[str, list[WorkStep]]: ...
+
+
 def _dt(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
@@ -88,7 +102,9 @@ class DigestService:
         unsubscribe_key: str,
         timezone: str = "Asia/Seoul",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        reminders: ReminderSource | None = None,
     ) -> None:
+        self._reminders = reminders
         self._store = store
         self._mailer = mailer
         self._audit = audit
@@ -101,21 +117,29 @@ class DigestService:
     def send_all(self) -> dict[str, int]:
         now = self._clock()
         day = now.astimezone(self._tz).date().isoformat()
-        users = [u for u in self._store.users() if u.enabled and u.email]
-        counts = {"users": len(users), "sent": 0, "failed": 0, "quiet": 0}
+        users = [u for u in self._store.users() if (u.enabled or u.reminders_enabled) and u.email]
+        counts = {
+            "users": len(users), "sent": 0, "failed": 0, "quiet": 0, "reminders": 0,
+            "news_users": sum(1 for u in users if u.enabled),
+            "reminder_users": sum(1 for u in users if u.reminders_enabled),
+        }
         if not users:
             return counts
 
         since = {u.id: self._since(u, now) for u in users}
-        cards = self._store.cards_since(min(since.values()).isoformat(), MAX_CARDS)
+        news_since = [since[u.id] for u in users if u.enabled]
+        cards = self._store.cards_since(min(news_since).isoformat(), MAX_CARDS) if news_since else []
         if len(cards) >= MAX_CARDS:
             log.warning("the digest read %d cards (the limit); older ones may be missing", MAX_CARDS)
         sources = {s.id: s for s in self._store.sources()}
         memberships = self._store.memberships()
+        due = self._due_steps(now) if any(u.reminders_enabled for u in users) else {}
 
         for user in users:
             try:
-                outcome = self._digest_one(user, since[user.id], now, day, cards, sources, memberships)
+                outcome = self._digest_one(
+                    user, since[user.id], now, day, cards, sources, memberships, due.get(user.id, []), counts
+                )
             except Exception:  # one user must never stop the others
                 log.exception("the digest crashed for one user")
                 outcome = "failed"
@@ -125,6 +149,25 @@ class DigestService:
             payload={"day": day, **counts},
         )
         return counts
+
+    def _due_steps(self, now: datetime) -> dict[str, list[WorkStep]]:
+        """Steps due within the window (and overdue), per owner. A failure leaves reminders out
+        of today's mails (logged) instead of stopping the document news."""
+        if self._reminders is None:
+            return {}
+        until = (now.astimezone(self._tz).date() + timedelta(days=DUE_WINDOW_DAYS)).isoformat()
+        try:
+            return self._reminders.reminder_steps(until)
+        except Exception:
+            log.exception("the IRB step reminders could not be read; today's mails go without them")
+            try:  # best effort: a failing audit write must not stop the document news either
+                self._audit.record(
+                    "admin", "mail.reminders_failed", None, title="IRB step reminders could not be read",
+                    payload={"until": until},
+                )
+            except Exception:
+                log.exception("the reminder failure could not be written to the audit log")
+            return {}
 
     # -- one user ---------------------------------------------------------------------------------
 
@@ -144,15 +187,28 @@ class DigestService:
         cards: list[Card],
         sources: dict[int, SourceInfo],
         memberships: dict[str, set[int]],
+        due_steps: list[WorkStep],
+        counts: dict[str, int],
     ) -> str:
         readable = (
             set(sources)
             if user.role == "admin"
             else {s.id for s in sources.values() if not s.requires_login} | memberships.get(user.id, set())
         )
+        # IRB step reminders: the user's steps whose reminder day is today (phase A2; a day
+        # without a mail is not caught up later).
+        reminders = []
+        if user.reminders_enabled:
+            reminders = [
+                t.DigestReminder(
+                    w.project_name or "", w.hospital_name or "", w.step_name, w.due_on or "", left,
+                    f"{self._app_url}/ko/pipelines/{w.pipeline_id}/steps/{w.step_id}",
+                )
+                for w, left in reminders_for(due_steps, now.astimezone(self._tz).date())
+            ]
         # One entry per document: the newest title, and the most telling kind of its events.
         docs: dict[int, tuple[int, str, str, int, datetime]] = {}  # id -> (order, kind, title, source, newest)
-        for card in cards:
+        for card in cards if user.enabled else ():
             kind = KINDS.get(card.event_type)
             if kind is None or card.document_id is None or card.source_id not in readable:
                 continue
@@ -169,7 +225,7 @@ class DigestService:
                 best_kind = previous[1] if previous[0] <= order else kind
                 newest_title = title if created > previous[4] else previous[2]
                 docs[card.document_id] = (best, best_kind, newest_title, previous[3], max(created, previous[4]))
-        if not docs:
+        if not docs and not reminders:
             return "quiet"
 
         # List the newest documents of public sources, up to the cap; count the rest.
@@ -205,6 +261,7 @@ class DigestService:
             self._app_url,
             f"{self._app_url}/ko/unsubscribe?token={token}",
             f"https://{self._api_domain}/unsubscribe?token={token}",
+            reminders=reminders,
         )
         try:
             self._mailer.send(mail)
@@ -216,6 +273,7 @@ class DigestService:
                 payload={"kind": "digest", "error": str(exc)},
             )
             return "failed"
+        counts["reminders"] += len(reminders)
         try:
             self._store.set_cursor(user.id, now.isoformat())
         except Exception:

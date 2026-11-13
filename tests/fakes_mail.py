@@ -25,6 +25,7 @@ class FakeDigestStore:
         self.cards = []
         self.cursors: dict[str, str] = {}
         self.enabled: dict[str, bool] = {}
+        self.reminders_enabled: dict[str, bool] = {}
         self.claims: set[str] = set()
         self.fail_cursor = False
 
@@ -50,6 +51,9 @@ class FakeDigestStore:
 
     def set_digest_enabled(self, user_id, enabled, at):
         self.enabled[user_id] = enabled
+
+    def set_reminders_enabled(self, user_id, enabled, at):
+        self.reminders_enabled[user_id] = enabled
 
     def claim(self, key):
         if key in self.claims:

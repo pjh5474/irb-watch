@@ -1,7 +1,8 @@
 """Supabase-backed store and file bucket for services.pipelines."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from postgrest.exceptions import APIError
 from supabase import Client
@@ -58,6 +59,27 @@ def _unique(exc: APIError) -> bool:
     return exc.code == UNIQUE_VIOLATION
 
 
+_PAGE = 1000
+_IN_CHUNK = 200  # ids per `in` filter, so the request address stays short
+
+
+def _chunks(ids: list[int]) -> list[list[int]]:
+    return [ids[i : i + _IN_CHUNK] for i in range(0, len(ids), _IN_CHUNK)]
+
+
+def _paged(make_query: Callable[[], Any]) -> list[dict]:
+    """Every row of an ordered query: the API answers at most 1,000 rows per request, and a cut
+    answer would look like real data."""
+    out: list[dict] = []
+    start = 0
+    while True:
+        rows = make_query().range(start, start + _PAGE - 1).execute().data
+        out += rows
+        if len(rows) < _PAGE:
+            return out
+        start += _PAGE
+
+
 class SupabasePipelineStore:
     def __init__(self, client: Client) -> None:
         self._c = client
@@ -84,10 +106,49 @@ class SupabasePipelineStore:
         )
         return {int(r["id"]): r["name"] for r in rows}
 
+    def project_names(self, project_ids: list[int]) -> dict[int, str]:
+        """Read by the server for the work page and reminders (the browser reads projects under
+        RLS itself); the callers only ask for projects of the user's own pipelines."""
+        out: dict[int, str] = {}
+        for chunk in _chunks(sorted(set(project_ids))):
+            rows = self._c.table("projects").select("id, name").in_("id", chunk).execute().data
+            out.update({int(r["id"]): r["name"] for r in rows})
+        return out
+
     # pipelines
     def pipelines_of_project(self, project_id: int) -> list[Pipeline]:
         rows = self._c.table("pipelines").select("*").eq("project_id", project_id).order("id").execute().data
         return [_pipeline(r) for r in rows]
+
+    def live_pipelines_of_user(self, user_id: str) -> list[Pipeline]:
+        rows = (
+            self._c.table("pipelines").select("*").eq("user_id", user_id).is_("deleted_at", "null")
+            .order("id").execute().data
+        )
+        return [_pipeline(r) for r in rows]
+
+    def live_pipelines(self, pipeline_ids: list[int]) -> list[Pipeline]:
+        out: list[Pipeline] = []
+        for chunk in _chunks(sorted(set(pipeline_ids))):
+            rows = (
+                self._c.table("pipelines").select("*").in_("id", chunk).is_("deleted_at", "null")
+                .execute().data
+            )
+            out += [_pipeline(r) for r in rows]
+        return out
+
+    def due_steps(self, until: str, skip_statuses: list[str]) -> list[Step]:
+        def query():
+            q = (
+                self._c.table("pipeline_steps").select(_STEP_COLUMNS).lte("due_on", until)
+                .is_("deleted_at", "null")
+            )
+            if skip_statuses:
+                q = q.not_.in_("status_key", skip_statuses)
+            return q.order("id")
+
+        rows = _paged(query)
+        return [_step(r) for r in rows]
 
     def get_pipeline(self, pipeline_id: int) -> Pipeline | None:
         rows = self._c.table("pipelines").select("*").eq("id", pipeline_id).limit(1).execute().data
@@ -134,9 +195,12 @@ class SupabasePipelineStore:
 
     # steps
     def steps(self, pipeline_ids: list[int]) -> list[Step]:
-        if not pipeline_ids:
-            return []
-        rows = self._c.table("pipeline_steps").select(_STEP_COLUMNS).in_("pipeline_id", pipeline_ids).execute().data
+        rows: list[dict] = []
+        for chunk in _chunks(sorted(set(pipeline_ids))):
+            rows += _paged(
+                lambda chunk=chunk: self._c.table("pipeline_steps").select(_STEP_COLUMNS)
+                .in_("pipeline_id", chunk).order("id")
+            )
         return [_step(r) for r in rows]
 
     def get_step(self, step_id: int) -> Step | None:
@@ -170,20 +234,24 @@ class SupabasePipelineStore:
 
     # documents
     def documents(self, step_ids: list[int]) -> list[StepDocument]:
-        if not step_ids:
-            return []
-        docs = (
-            self._c.table("step_documents").select("id, step_id, name, created_at, deleted_at")
-            .in_("step_id", step_ids).execute().data
-        )
+        # Chunked and paged: the work page reads every step of all the user's pipelines, and a
+        # silently cut answer would show files as missing.
+        docs: list[dict] = []
+        for chunk in _chunks(sorted(set(step_ids))):
+            docs += _paged(
+                lambda chunk=chunk: self._c.table("step_documents")
+                .select("id, step_id, name, created_at, deleted_at").in_("step_id", chunk).order("id")
+            )
         if not docs:
             return []
-        versions = (
-            self._c.table("step_document_versions").select(_VERSION_COLUMNS)
-            .in_("document_id", [d["id"] for d in docs]).order("version_no", desc=True).execute().data
-        )
+        versions: list[dict] = []
+        for chunk in _chunks([int(d["id"]) for d in docs]):
+            versions += _paged(
+                lambda chunk=chunk: self._c.table("step_document_versions").select(_VERSION_COLUMNS)
+                .in_("document_id", chunk).order("id")
+            )
         by_doc: dict[int, list[DocVersion]] = {}
-        for v in versions:
+        for v in sorted(versions, key=lambda v: int(v["version_no"]), reverse=True):  # newest first
             by_doc.setdefault(int(v["document_id"]), []).append(_version(v))
         return [
             StepDocument(

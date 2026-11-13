@@ -122,6 +122,42 @@ class DigestSource:
     items: tuple[DigestItem, ...] = ()  # listed items; always empty for a members-only source
 
 
+@dataclass(frozen=True)
+class DigestReminder:
+    """One of the user's own IRB steps on a reminder day (phase A2). Names are typed by users:
+    escaped and cut like every other value."""
+
+    project: str
+    hospital: str
+    step: str
+    due_on: str
+    days_left: int  # negative = overdue
+    url: str
+
+
+def _when(days_left: int, *, korean: bool) -> str:
+    if days_left < 0:
+        return f"{-days_left}일 지남" if korean else f"{-days_left} day(s) overdue"
+    if days_left == 0:
+        return "오늘 마감" if korean else "due today"
+    return f"{days_left}일 남음" if korean else f"due in {days_left} day(s)"
+
+
+def _reminder_block(reminders: list[DigestReminder], *, korean: bool) -> tuple[list[str], list[str]]:
+    head = f"IRB 단계 마감 알림: {len(reminders)}건" if korean else f"IRB step reminders: {len(reminders)}"
+    text_lines, rows = [head], []
+    for r in reminders:
+        where = " · ".join(x for x in (one_line(r.project, 100), one_line(r.hospital, 80)) if x)
+        step = one_line(r.step, 100) or "-"
+        when = f"{one_line(r.due_on, 10)} ({_when(r.days_left, korean=korean)})"
+        text_lines.append(f"- {step} [{where}] {when} {r.url}")
+        rows.append(
+            f'<li><a href="{html.escape(r.url, quote=True)}">{html.escape(step)}</a> '
+            f"[{html.escape(where)}] {html.escape(when)}</li>"
+        )
+    return text_lines, [f"<h2 style=\"font-size:16px\">{html.escape(head)}</h2><ul>{''.join(rows)}</ul>"]
+
+
 def digest_mail(
     to: tuple[str, ...],
     day: str,
@@ -129,15 +165,29 @@ def digest_mail(
     app_url: str,
     unsubscribe_page: str,
     unsubscribe_post: str,
+    reminders: list[DigestReminder] | tuple[DigestReminder, ...] = (),
 ) -> Mail:
-    """The daily digest of one user. Members-only sources (studies) are shown as a count only:
-    their titles and names never go into a mail. One recipient per mail."""
+    """The daily mail of one user: IRB step reminders first (when any), then the new and updated
+    documents (when any). Members-only sources (studies) are shown as a count only: their titles
+    and names never go into a mail. One recipient per mail."""
+    reminders = list(reminders)
     total = sum(s.count for s in sources)
     listed = sum(len(s.items) for s in sources)
     more = total - listed - sum(s.count for s in sources if s.members_only)
     settings_url = f"{app_url}/ko/settings"
 
     def block(korean: bool) -> tuple[list[str], list[str]]:
+        text_lines, html_parts = [], []
+        if reminders:
+            r_text, r_html = _reminder_block(reminders, korean=korean)
+            text_lines += [*r_text, ""]
+            html_parts += r_html
+        if not sources:
+            return text_lines, html_parts
+        n_text, n_html = _news_block(korean)
+        return text_lines + n_text, html_parts + n_html
+
+    def _news_block(korean: bool) -> tuple[list[str], list[str]]:
         kinds = KIND_KO if korean else KIND_EN
         head = (
             f"새 문서와 수정된 문서 ({day}): 모두 {total}건"
@@ -197,7 +247,18 @@ def digest_mail(
         + foot_html
         + "</div>"
     )
-    subject = one_line(f"[IRB Watch] 새 문서·수정 {total}건 / {total} new or updated documents")
+    if reminders and total:
+        subject = one_line(
+            f"[IRB Watch] IRB 단계 알림 {len(reminders)}건 · 새 문서·수정 {total}건"
+            f" / {len(reminders)} IRB step reminder(s), {total} new or updated documents",
+            200,
+        )
+    elif reminders:
+        subject = one_line(
+            f"[IRB Watch] IRB 단계 마감 알림 {len(reminders)}건 / {len(reminders)} IRB step reminder(s)"
+        )
+    else:
+        subject = one_line(f"[IRB Watch] 새 문서·수정 {total}건 / {total} new or updated documents")
     headers = (
         ("List-Unsubscribe", f"<{unsubscribe_post}>"),
         ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
