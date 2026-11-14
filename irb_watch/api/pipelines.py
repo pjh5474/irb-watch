@@ -21,11 +21,12 @@ from irb_watch.services.docgen import DocgenService
 from irb_watch.services.draft_jobs import DraftJobService
 from irb_watch.services.draft_jobs import job_step as _job_step
 from irb_watch.services.errors import ValidationError
-from irb_watch.services.pipeline_admin import StepStatus, StepType
+from irb_watch.services.pipeline_admin import StepResult, StepStatus, StepType
 from irb_watch.services.pipelines import (
     MAX_DOC_NAME,
     MAX_NOTE,
     MAX_STEP_NAME,
+    MAX_SUBJECT,
     DocVersion,
     Event,
     Pipeline,
@@ -123,6 +124,12 @@ class StepOut(BaseModel):
     decided_on: str | None
     note: str
     deleted_at: str | None
+    # phase B2b
+    parent_step_id: int | None = None
+    sequence_no: int | None = None
+    label: str = ""  # "2차 변경심의"
+    subject: str = ""
+    result_key: str | None = None
 
     @classmethod
     def of(cls, s: Step, type_name: str | None = None) -> "StepOut":
@@ -130,6 +137,23 @@ class StepOut(BaseModel):
             id=s.id, step_type_id=s.step_type_id, step_type_name=type_name, name=s.name,
             position=s.position, status_key=s.status_key, due_on=s.due_on, submitted_on=s.submitted_on,
             decided_on=s.decided_on, note=s.note, deleted_at=s.deleted_at,
+            parent_step_id=s.parent_step_id, sequence_no=s.sequence_no, label=s.label,
+            subject=s.subject, result_key=s.result_key,
+        )
+
+
+class ResultOut(BaseModel):
+    key: str
+    label: str
+    approved: bool
+    needs_answer: bool
+    archived: bool
+
+    @classmethod
+    def of(cls, r: StepResult) -> "ResultOut":
+        return cls(
+            key=r.key, label=r.label, approved=r.approved, needs_answer=r.needs_answer,
+            archived=r.archived_at is not None,
         )
 
 
@@ -171,10 +195,12 @@ class StepTypeOut(BaseModel):
     id: int
     name: str
     description: str
+    category: str = "other"
+    numbered: bool = False
 
     @classmethod
     def of(cls, t: StepType) -> "StepTypeOut":
-        return cls(id=t.id, name=t.name, description=t.description)
+        return cls(id=t.id, name=t.name, description=t.description, category=t.category, numbered=t.numbered)
 
 
 class DetailOut(BaseModel):
@@ -185,6 +211,7 @@ class DetailOut(BaseModel):
     statuses: list[StatusOut]
     step_types: list[StepTypeOut]
     access: str  # owner | manage | pm | edit | read (read: change nothing)
+    results: list[ResultOut] = []  # phase B2b; archived ones too, for labels
 
     @classmethod
     def of(cls, d: PipelineDetail, drafts: Counter, open_jobs: Counter) -> "DetailOut":
@@ -194,6 +221,7 @@ class DetailOut(BaseModel):
             statuses=[StatusOut.of(s) for s in d.statuses],
             step_types=[StepTypeOut.of(t) for t in d.step_types],
             access=d.access,
+            results=[ResultOut.of(r) for r in d.results],
         )
 
 
@@ -213,6 +241,47 @@ class StepPageOut(BaseModel):
     statuses: list[StatusOut]
     access: str
     shared: bool  # the project has members: a draft made here is read by all of them
+    # phase B2b
+    results: list[ResultOut] = []
+    parent: StepOut | None = None  # the main step a follow-up answers
+    follow_ups: list[StepOut] = []
+    follow_up_types: list[StepTypeOut] = []  # live follow-up types, for "Add follow-up step"
+    suggested_status: str | None = None  # offered after a result; the user confirms
+    needs_answer: bool = False  # highlight "Add follow-up step"
+
+
+class HospitalStepOut(BaseModel):
+    id: int
+    step_type_id: int | None
+    name: str
+    label: str
+    sequence_no: int | None
+    subject: str
+    status_key: str
+    result_key: str | None
+    due_on: str | None
+    submitted_on: str | None
+    decided_on: str | None
+    follow_ups: int
+
+
+class HospitalSiteOut(BaseModel):
+    site_id: int
+    site_no: str
+    pi_name: str
+    pipeline_id: int | None
+    steps: list[HospitalStepOut]
+
+
+class HospitalPageOut(BaseModel):
+    project_id: int
+    hospital_id: int
+    hospital_name: str | None
+    sites: list[HospitalSiteOut]
+    statuses: list[StatusOut]
+    results: list[ResultOut]
+    step_types: list[StepTypeOut]
+    access: str
 
 
 class StartIn(BaseModel):
@@ -226,11 +295,16 @@ class StartIn(BaseModel):
 class NewStepIn(BaseModel):
     name: str | None = Field(None, max_length=MAX_STEP_NAME + 50)
     step_type_id: int | None = None
+    parent_step_id: int | None = None  # a follow-up of that step (phase B2b)
+    subject: str = Field("", max_length=MAX_SUBJECT + 50)
 
 
 class StepPatch(BaseModel):
     name: str | None = Field(None, max_length=MAX_STEP_NAME + 50)
     status_key: str | None = Field(None, max_length=40)
+    subject: str | None = Field(None, max_length=MAX_SUBJECT + 50)
+    sequence_no: int | None = None  # null clears the number
+    result_key: str | None = Field(None, max_length=40)  # null clears the result
     due_on: str | None = Field(None, max_length=10)
     submitted_on: str | None = Field(None, max_length=10)
     decided_on: str | None = Field(None, max_length=10)
@@ -401,6 +475,48 @@ def step_page(
         statuses=[StatusOut.of(s) for s in page.statuses],
         access=page.access,
         shared=access.shared(page.summary.pipeline.project_id),
+        results=[ResultOut.of(r) for r in page.results],
+        parent=StepOut.of(page.parent) if page.parent else None,
+        follow_ups=[StepOut.of(s) for s in page.follow_ups],
+        follow_up_types=[StepTypeOut.of(t) for t in page.step_types],
+        suggested_status=page.suggested_status,
+        needs_answer=page.needs_answer,
+    )
+
+
+@router.get("/projects/{project_id}/hospitals/{hospital_id}", response_model=HospitalPageOut)
+def hospital_page(
+    project_id: int,
+    hospital_id: int,
+    user: AuthUser = Depends(current_user),
+    service: Service = Depends(get_pipeline_service),
+) -> HospitalPageOut:
+    """The hospital (IRB) page: the hospital's live sites side by side, each with its live main
+    steps (follow-ups counted). A stranger's or unknown project answers 404."""
+    page = service.hospital_page(user.id, project_id, hospital_id)
+    return HospitalPageOut(
+        project_id=page.project_id,
+        hospital_id=page.hospital_id,
+        hospital_name=page.hospital_name,
+        sites=[
+            HospitalSiteOut(
+                site_id=h.site.id, site_no=h.site.site_no, pi_name=h.site.pi_name, pipeline_id=h.pipeline_id,
+                steps=[
+                    HospitalStepOut(
+                        id=s.id, step_type_id=s.step_type_id, name=s.name, label=s.label,
+                        sequence_no=s.sequence_no, subject=s.subject, status_key=s.status_key,
+                        result_key=s.result_key, due_on=s.due_on, submitted_on=s.submitted_on,
+                        decided_on=s.decided_on, follow_ups=h.follow_ups.get(s.id, 0),
+                    )
+                    for s in h.steps
+                ],
+            )
+            for h in page.sites
+        ],
+        statuses=[StatusOut.of(s) for s in page.statuses],
+        results=[ResultOut.of(r) for r in page.results],
+        step_types=[StepTypeOut.of(t) for t in page.step_types],
+        access=page.access,
     )
 
 
@@ -411,7 +527,9 @@ def add_step(
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
 ) -> StepOut:
-    return StepOut.of(service.add_step(user.id, pipeline_id, body.name, body.step_type_id))
+    return StepOut.of(
+        service.add_step(user.id, pipeline_id, body.name, body.step_type_id, body.parent_step_id, body.subject)
+    )
 
 
 @router.put("/pipelines/{pipeline_id}/steps/order", response_model=list[StepOut])

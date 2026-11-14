@@ -1,5 +1,9 @@
 """IRB pipeline, phase 1: the admin's setup (statuses, step types, default step order).
 
+Phase B2b (owner, 2026-11-14): IRB results (a list like the statuses: label, approved,
+needs_answer; extend, rename, reorder, archive), step type category and numbering; follow-up
+types are never in a default step order.
+
 Rules (owner, 2026-11-11; see docs/decisions.md "IRB pipeline: admin setup"):
   * Server-wide settings, edited by platform admins only.
   * Statuses: a seeded list the admin may extend, rename, reorder, mark closed (finished) or
@@ -34,6 +38,10 @@ MAX_REQUIRED_DOC_CHARS = 200
 MAX_GUIDES = 20
 MAX_TEMPLATE_STEPS = 30
 _KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# Step type categories (phase B2b); follow_up types answer another step and are never in a
+# default step order.
+CATEGORIES = ("initial", "amendment", "continuing", "deviation", "safety", "report", "closing", "follow_up", "other")
+FOLLOW_UP = "follow_up"
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,21 @@ class StepType:
     required_documents: tuple[str, ...] = ()
     archived_at: str | None = None
     updated_at: str = ""
+    category: str = "other"
+    numbered: bool = False
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """The IRB's answer to a step (phase B2b). approved: counts as approved; needs_answer: the
+    step page highlights "Add follow-up step"."""
+
+    key: str
+    label: str
+    approved: bool
+    needs_answer: bool
+    position: int
+    archived_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +95,8 @@ class StepTypeEdit:
     input_earlier_steps: bool = True
     input_board_documents: bool = False
     required_documents: list[str] = field(default_factory=list)
+    category: str = "other"
+    numbered: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,10 +114,16 @@ class PipelineSetupStore(Protocol):
     def statuses(self) -> list[StepStatus]: ...
     def add_status(self, status: StepStatus) -> StepStatus: ...
     def update_status(self, key: str, values: dict) -> StepStatus: ...
+    def results(self) -> list[StepResult]: ...
+    def add_result(self, result: StepResult) -> StepResult: ...
+    def update_result(self, key: str, values: dict) -> StepResult: ...
     def step_types(self) -> list[StepType]: ...
     def get_step_type(self, type_id: int) -> StepType | None: ...
     def create_step_type(self, edit: StepTypeEdit, actor_id: str) -> StepType: ...
     def update_step_type(self, type_id: int, values: dict, actor_id: str) -> StepType: ...
+    def live_steps_of_type(self, type_id: int) -> int:
+        """How many live steps (of any pipeline) have this type."""
+        ...
     def templates(self) -> list[PipelineTemplate]: ...
     def save_template(self, hospital_id: int | None, step_type_ids: list[int], actor_id: str) -> PipelineTemplate: ...
     def delete_template(self, hospital_id: int) -> bool: ...
@@ -217,6 +248,88 @@ class PipelineSetupService:
         self._record(actor_id, "pipeline.status_restored", f"Status {current.label} restored", {"key": key})
         return updated
 
+    # -- IRB results (phase B2b) --------------------------------------------------------------
+
+    def results(self, include_archived: bool = False) -> list[StepResult]:
+        rows = sorted(self._store.results(), key=lambda r: (r.position, r.key))
+        return rows if include_archived else [r for r in rows if r.archived_at is None]
+
+    def _result(self, key: str) -> StepResult:
+        found = next((r for r in self._store.results() if r.key == key), None)
+        if found is None:
+            raise NotFoundError("result not found")
+        return found
+
+    def _result_label_free(self, label: str, except_key: str | None = None) -> None:
+        if any(
+            r.archived_at is None and r.key != except_key and r.label.lower() == label.lower()
+            for r in self._store.results()
+        ):
+            raise ConflictError("a result with this name already exists")
+
+    def add_result(self, actor_id: str, label: str, approved: bool, needs_answer: bool) -> StepResult:
+        label = _name(label, MAX_LABEL_CHARS, "result name")
+        self._result_label_free(label)
+        key = self._new_key()
+        if not _KEY.match(key):
+            raise ValueError(f"bad result key {key!r}")
+        last = max((r.position for r in self._store.results()), default=0)
+        result = self._store.add_result(StepResult(key, label, approved, needs_answer, last + 1))
+        self._record(
+            actor_id, "pipeline.result_added", f"Result {label} added",
+            {"key": key, "approved": approved, "needs_answer": needs_answer},
+        )
+        return result
+
+    def update_result(
+        self, actor_id: str, key: str, label: str | None = None,
+        approved: bool | None = None, needs_answer: bool | None = None,
+    ) -> StepResult:
+        current = self._result(key)
+        if current.archived_at is not None:
+            raise ConflictError("this result is archived; restore it first")
+        values: dict = {}
+        if label is not None:
+            label = _name(label, MAX_LABEL_CHARS, "result name")
+            if label != current.label:
+                self._result_label_free(label, key)
+                values["label"] = label
+        if approved is not None and approved != current.approved:
+            values["approved"] = approved
+        if needs_answer is not None and needs_answer != current.needs_answer:
+            values["needs_answer"] = needs_answer
+        if not values:
+            return current
+        updated = self._store.update_result(key, values)
+        self._record(actor_id, "pipeline.result_updated", f"Result {updated.label} changed", {"key": key, **values})
+        return updated
+
+    def reorder_results(self, actor_id: str, keys: list[str]) -> list[StepResult]:
+        live = self.results()
+        if sorted(keys) != sorted(r.key for r in live) or len(set(keys)) != len(keys):
+            raise ValidationError("send every live result key exactly once")
+        for position, key in enumerate(keys, start=1):
+            self._store.update_result(key, {"position": position})
+        self._record(actor_id, "pipeline.results_reordered", "Result order changed", {"keys": keys})
+        return self.results()
+
+    def archive_result(self, actor_id: str, key: str) -> StepResult:
+        current = self._result(key)
+        if current.archived_at is not None:
+            raise ConflictError("this result is already archived")
+        updated = self._store.update_result(key, {"archived_at": self._clock().isoformat()})
+        self._record(actor_id, "pipeline.result_archived", f"Result {current.label} archived", {"key": key})
+        return updated
+
+    def restore_result(self, actor_id: str, key: str) -> StepResult:
+        current = self._result(key)
+        if current.archived_at is None:
+            raise ConflictError("this result is not archived")
+        self._result_label_free(current.label, key)
+        updated = self._store.update_result(key, {"archived_at": None})
+        self._record(actor_id, "pipeline.result_restored", f"Result {current.label} restored", {"key": key})
+        return updated
+
     # -- step types ---------------------------------------------------------------------------
 
     def step_types(self, include_archived: bool = False) -> list[StepType]:
@@ -245,6 +358,8 @@ class PipelineSetupService:
                 docs.append(doc)
         if len(docs) > MAX_REQUIRED_DOCS:
             raise ValidationError(f"at most {MAX_REQUIRED_DOCS} required documents")
+        if edit.category not in CATEGORIES:
+            raise ValidationError(f"the category must be one of {', '.join(CATEGORIES)}")
         return StepTypeEdit(
             name=_name(edit.name, MAX_NAME_CHARS, "step type name"),
             description=_text(edit.description, MAX_DESCRIPTION_CHARS, "description"),
@@ -254,6 +369,8 @@ class PipelineSetupService:
             input_earlier_steps=edit.input_earlier_steps,
             input_board_documents=edit.input_board_documents,
             required_documents=docs,
+            category=edit.category,
+            numbered=edit.numbered,
         )
 
     def create_step_type(self, actor_id: str, edit: StepTypeEdit) -> StepType:
@@ -273,6 +390,16 @@ class PipelineSetupService:
         if current.archived_at is not None:
             raise ConflictError("this step type is archived; restore it first")
         edit = self._clean(edit)
+        if (edit.category == FOLLOW_UP) != (current.category == FOLLOW_UP):
+            if edit.category == FOLLOW_UP and any(type_id in t.step_type_ids for t in self._store.templates()):
+                raise ConflictError("a follow-up type cannot be in a default step order; remove it from the order first")
+            # Main steps of a follow-up type, or follow-ups of a main type, would break the
+            # follow-up rules: refused while live steps use the type.
+            used_by = self._store.live_steps_of_type(type_id)
+            if used_by:
+                raise ConflictError(
+                    f"{used_by} live step(s) use this type; a type cannot switch to or from follow-up while it is in use"
+                )
         values = {
             "name": edit.name,
             "description": edit.description,
@@ -282,6 +409,8 @@ class PipelineSetupService:
             "input_earlier_steps": edit.input_earlier_steps,
             "input_board_documents": edit.input_board_documents,
             "required_documents": edit.required_documents,
+            "category": edit.category,
+            "numbered": edit.numbered,
             "updated_at": self._clock().isoformat(),
         }
         try:
@@ -355,10 +484,13 @@ class PipelineSetupService:
             raise ValidationError(f"the step order needs 1 to {MAX_TEMPLATE_STEPS} steps")
         if len(set(step_type_ids)) != len(step_type_ids):
             raise ValidationError("a step type appears twice")
-        live = {t.id for t in self.step_types()}
+        live = {t.id: t for t in self.step_types()}
         unknown = [i for i in step_type_ids if i not in live]
         if unknown:
             raise ValidationError(f"step types not found or archived: {unknown}")
+        follow_ups = [live[i].name for i in step_type_ids if live[i].category == FOLLOW_UP]
+        if follow_ups:
+            raise ValidationError(f"follow-up types answer another step and cannot be in the order: {', '.join(follow_ups)}")
         if hospital_id is not None and not self._store.hospital_exists(hospital_id):
             raise NotFoundError("hospital not found")
         saved = self._store.save_template(hospital_id, step_type_ids, actor_id)

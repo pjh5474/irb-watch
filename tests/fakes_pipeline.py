@@ -5,6 +5,7 @@ from dataclasses import replace
 from irb_watch.services.pipeline_admin import (
     NameTakenError,
     PipelineTemplate,
+    StepResult,
     StepStatus,
     StepType,
     StepTypeEdit,
@@ -20,6 +21,21 @@ SEED_STATUSES = [
     ("not_needed", "해당 없음", True),
 ]
 SEED_TYPES = ["초기 심의", "변경 심의", "지속 심의", "중대한 이상사례 보고", "위반/이탈 보고", "종료 보고"]
+# Categories and numbering as the step_structure migration sets them (phase B2b), plus one
+# follow-up type (id 7).
+SEED_KINDS = {
+    1: ("initial", False), 2: ("amendment", True), 3: ("continuing", True),
+    4: ("safety", True), 5: ("deviation", True), 6: ("closing", False),
+}
+FOLLOW_UP_TYPE = 7
+SEED_RESULTS = [
+    ("approved", "승인", True, False),
+    ("approved_after_revision", "수정 후 승인", True, False),
+    ("corrective_approval", "시정승인", True, True),
+    ("administrative_revision", "행정수정 요청", False, True),
+    ("revise_and_resubmit", "보완 후 재심의", False, True),
+    ("rejected", "반려", False, False),
+]
 
 
 class FakePipelineSetupStore:
@@ -27,7 +43,16 @@ class FakePipelineSetupStore:
         self.status_rows = {
             key: StepStatus(key, label, closed, i) for i, (key, label, closed) in enumerate(SEED_STATUSES, 1)
         }
-        self.types = {i: StepType(i, name) for i, name in enumerate(SEED_TYPES, 1)}
+        self.types = {
+            i: StepType(i, name, category=SEED_KINDS[i][0], numbered=SEED_KINDS[i][1])
+            for i, name in enumerate(SEED_TYPES, 1)
+        }
+        self.types[FOLLOW_UP_TYPE] = StepType(FOLLOW_UP_TYPE, "보완/시정 답변", category="follow_up", numbered=True)
+        self.steps_of_type: dict[int, int] = {}  # type id -> live steps using it
+        self.result_rows = {
+            key: StepResult(key, label, approved, needs, i)
+            for i, (key, label, approved, needs) in enumerate(SEED_RESULTS, 1)
+        }
         self.template_rows: dict[int | None, PipelineTemplate] = {None: PipelineTemplate(None, (1, 2, 3, 6))}
         self.guides = {10, 11}  # live guide ids
         self.ready_forms = {20}
@@ -44,6 +69,17 @@ class FakePipelineSetupStore:
     def update_status(self, key, values):
         self.status_rows[key] = replace(self.status_rows[key], **values)
         return self.status_rows[key]
+
+    def results(self):
+        return list(self.result_rows.values())
+
+    def add_result(self, result):
+        self.result_rows[result.key] = result
+        return result
+
+    def update_result(self, key, values):
+        self.result_rows[key] = replace(self.result_rows[key], **values)
+        return self.result_rows[key]
 
     def step_types(self):
         return list(self.types.values())
@@ -64,7 +100,7 @@ class FakePipelineSetupStore:
         self.types[new_id] = StepType(
             new_id, edit.name, edit.description, edit.instructions, tuple(edit.guide_ids),
             edit.form_template_id, edit.input_earlier_steps, edit.input_board_documents,
-            tuple(edit.required_documents),
+            tuple(edit.required_documents), category=edit.category, numbered=edit.numbered,
         )
         self.updated_by[new_id] = actor_id
         return self.types[new_id]
@@ -82,6 +118,9 @@ class FakePipelineSetupStore:
         self.types[type_id] = replace(current, **values)
         self.updated_by[type_id] = actor_id
         return self.types[type_id]
+
+    def live_steps_of_type(self, type_id):
+        return self.steps_of_type.get(type_id, 0)
 
     def templates(self):
         return list(self.template_rows.values())

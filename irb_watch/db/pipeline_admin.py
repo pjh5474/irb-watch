@@ -8,6 +8,7 @@ from supabase import Client
 from irb_watch.services.pipeline_admin import (
     NameTakenError,
     PipelineTemplate,
+    StepResult,
     StepStatus,
     StepType,
     StepTypeEdit,
@@ -16,8 +17,19 @@ from irb_watch.services.pipeline_admin import (
 UNIQUE_VIOLATION = "23505"
 _TYPE_COLUMNS = (
     "id, name, description, instructions, guide_ids, form_template_id, input_earlier_steps, "
-    "input_board_documents, required_documents, archived_at, updated_at"
+    "input_board_documents, required_documents, archived_at, updated_at, category, numbered"
 )
+
+
+def _result(row: dict) -> StepResult:
+    return StepResult(
+        key=row["key"],
+        label=row["label"],
+        approved=bool(row["approved"]),
+        needs_answer=bool(row["needs_answer"]),
+        position=int(row["position"]),
+        archived_at=row.get("archived_at"),
+    )
 
 
 def _status(row: dict) -> StepStatus:
@@ -43,6 +55,8 @@ def _type(row: dict) -> StepType:
         required_documents=tuple(row.get("required_documents") or []),
         archived_at=row.get("archived_at"),
         updated_at=row.get("updated_at") or "",
+        category=row.get("category") or "other",
+        numbered=bool(row.get("numbered")),
     )
 
 
@@ -85,6 +99,24 @@ class SupabasePipelineSetupStore:
     def update_status(self, key: str, values: dict) -> StepStatus:
         return _status(_one(self._c.table("step_statuses").update(values).eq("key", key)))
 
+    # IRB results
+    def results(self) -> list[StepResult]:
+        return [_result(r) for r in self._c.table("step_results").select("*").execute().data]
+
+    def add_result(self, result: StepResult) -> StepResult:
+        row = _one(
+            self._c.table("step_results").insert(
+                {
+                    "key": result.key, "label": result.label, "approved": result.approved,
+                    "needs_answer": result.needs_answer, "position": result.position,
+                }
+            )
+        )
+        return _result(row)
+
+    def update_result(self, key: str, values: dict) -> StepResult:
+        return _result(_one(self._c.table("step_results").update(values).eq("key", key)))
+
     # step types
     def step_types(self) -> list[StepType]:
         return [_type(r) for r in self._c.table("step_types").select(_TYPE_COLUMNS).execute().data]
@@ -105,6 +137,8 @@ class SupabasePipelineSetupStore:
                     "input_earlier_steps": edit.input_earlier_steps,
                     "input_board_documents": edit.input_board_documents,
                     "required_documents": edit.required_documents,
+                    "category": edit.category,
+                    "numbered": edit.numbered,
                     "updated_by": actor_id,
                 }
             )
@@ -115,6 +149,13 @@ class SupabasePipelineSetupStore:
         return _type(
             _one(self._c.table("step_types").update({**values, "updated_by": actor_id}).eq("id", type_id))
         )
+
+    def live_steps_of_type(self, type_id: int) -> int:
+        result = (
+            self._c.table("pipeline_steps").select("id", count="exact")
+            .eq("step_type_id", type_id).is_("deleted_at", "null").limit(1).execute()
+        )
+        return result.count or 0
 
     # default step order
     def templates(self) -> list[PipelineTemplate]:

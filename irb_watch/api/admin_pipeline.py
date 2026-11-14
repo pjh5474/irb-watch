@@ -1,5 +1,7 @@
 """Admin routes for the IRB pipeline setup: statuses, step types, default step order."""
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 
@@ -12,6 +14,7 @@ from irb_watch.services.pipeline_admin import (
     MAX_NAME_CHARS,
     PipelineSetupService,
     PipelineTemplate,
+    StepResult,
     StepStatus,
     StepType,
     StepTypeEdit,
@@ -46,6 +49,31 @@ class StatusOrderIn(BaseModel):
     keys: list[str] = Field(max_length=100)
 
 
+class ResultOut(BaseModel):
+    key: str
+    label: str
+    approved: bool
+    needs_answer: bool
+    position: int
+    archived_at: str | None
+
+    @classmethod
+    def of(cls, r: StepResult) -> "ResultOut":
+        return cls(**r.__dict__)
+
+
+class ResultIn(BaseModel):
+    label: str = Field(min_length=1, max_length=MAX_LABEL_CHARS)
+    approved: bool = False
+    needs_answer: bool = False
+
+
+class ResultPatch(BaseModel):
+    label: str | None = Field(None, min_length=1, max_length=MAX_LABEL_CHARS)
+    approved: bool | None = None
+    needs_answer: bool | None = None
+
+
 class StepTypeOut(BaseModel):
     id: int
     name: str
@@ -58,6 +86,8 @@ class StepTypeOut(BaseModel):
     required_documents: list[str]
     archived_at: str | None
     updated_at: str
+    category: str
+    numbered: bool
 
     @classmethod
     def of(cls, t: StepType) -> "StepTypeOut":
@@ -75,6 +105,9 @@ class StepTypeIn(BaseModel):
     input_earlier_steps: bool = True
     input_board_documents: bool = False
     required_documents: list[str] = Field(default_factory=list, max_length=100)
+    # One list of categories: the service checks it (services.pipeline_admin.CATEGORIES, 422).
+    category: str = Field("other", max_length=40)
+    numbered: bool = False
 
     def edit(self) -> StepTypeEdit:
         return StepTypeEdit(**self.model_dump())
@@ -153,6 +186,58 @@ def restore_status(
     service: Service = Depends(get_pipeline_setup_service),
 ) -> StatusOut:
     return StatusOut.of(service.restore_status(admin.id, key))
+
+
+# -- IRB results (phase B2b) --------------------------------------------------------------------
+
+
+@router.get("/results", response_model=list[ResultOut])
+def list_results(
+    include_archived: bool = False,
+    _: AuthUser = Depends(require_admin),
+    service: Service = Depends(get_pipeline_setup_service),
+) -> list[ResultOut]:
+    return [ResultOut.of(r) for r in service.results(include_archived)]
+
+
+@router.post("/results", status_code=201, response_model=ResultOut)
+def add_result(
+    body: ResultIn,
+    admin: AuthUser = Depends(require_admin),
+    service: Service = Depends(get_pipeline_setup_service),
+) -> ResultOut:
+    return ResultOut.of(service.add_result(admin.id, body.label, body.approved, body.needs_answer))
+
+
+@router.put("/results/order", response_model=list[ResultOut])
+def reorder_results(
+    body: StatusOrderIn,
+    admin: AuthUser = Depends(require_admin),
+    service: Service = Depends(get_pipeline_setup_service),
+) -> list[ResultOut]:
+    return [ResultOut.of(r) for r in service.reorder_results(admin.id, body.keys)]
+
+
+@router.patch("/results/{key}", response_model=ResultOut)
+def update_result(
+    key: str,
+    body: ResultPatch,
+    admin: AuthUser = Depends(require_admin),
+    service: Service = Depends(get_pipeline_setup_service),
+) -> ResultOut:
+    return ResultOut.of(service.update_result(admin.id, key, body.label, body.approved, body.needs_answer))
+
+
+@router.post("/results/{key}/{action}", response_model=ResultOut)
+def result_archived(
+    key: str,
+    action: Literal["archive", "restore"],
+    admin: AuthUser = Depends(require_admin),
+    service: Service = Depends(get_pipeline_setup_service),
+) -> ResultOut:
+    if action == "archive":
+        return ResultOut.of(service.archive_result(admin.id, key))
+    return ResultOut.of(service.restore_result(admin.id, key))
 
 
 # -- step types ---------------------------------------------------------------------------------

@@ -16,13 +16,15 @@ from irb_watch.services.pipelines import (
     Step,
     StepDocument,
     StepListError,
+    StepParentError,
 )
 
 UNIQUE_VIOLATION = "23505"
+FOREIGN_KEY_VIOLATION = "23503"
 BUCKET = "pipeline-files"
 _STEP_COLUMNS = (
     "id, pipeline_id, step_type_id, name, position, status_key, due_on, submitted_on, decided_on, "
-    "note, deleted_at, updated_at"
+    "note, deleted_at, updated_at, parent_step_id, sequence_no, subject, result_key"
 )
 _VERSION_COLUMNS = (
     "id, document_id, version_no, filename, storage_path, sha256, size_bytes, has_text, text_note, created_at"
@@ -43,6 +45,9 @@ def _step(r: dict) -> Step:
         name=r["name"], position=int(r["position"]), status_key=r["status_key"],
         due_on=r.get("due_on"), submitted_on=r.get("submitted_on"), decided_on=r.get("decided_on"),
         note=r.get("note") or "", deleted_at=r.get("deleted_at"), updated_at=r.get("updated_at") or "",
+        parent_step_id=int(r["parent_step_id"]) if r.get("parent_step_id") is not None else None,
+        sequence_no=int(r["sequence_no"]) if r.get("sequence_no") is not None else None,
+        subject=r.get("subject") or "", result_key=r.get("result_key"),
     )
 
 
@@ -229,11 +234,23 @@ class SupabasePipelineStore:
         return rows[0].get("body_text") if rows else None
 
     def add_step(self, pipeline_id: int, values: dict) -> Step:
-        rows = self._c.table("pipeline_steps").insert({**values, "pipeline_id": pipeline_id}).execute().data
+        try:
+            rows = self._c.table("pipeline_steps").insert({**values, "pipeline_id": pipeline_id}).execute().data
+        except APIError as exc:
+            if exc.code == "P0001":  # check_step_parent: one level
+                raise StepParentError(exc.message or "the step to answer cannot take a follow-up") from exc
+            if exc.code == FOREIGN_KEY_VIOLATION and values.get("parent_step_id") is not None:
+                raise StepParentError("the step to answer is gone or in another pipeline") from exc
+            raise
         return _step(rows[0])
 
     def update_step(self, step_id: int, values: dict) -> Step:
-        rows = self._c.table("pipeline_steps").update(values).eq("id", step_id).execute().data
+        try:
+            rows = self._c.table("pipeline_steps").update(values).eq("id", step_id).execute().data
+        except APIError as exc:
+            if exc.code == "P0001":  # check_step_removal: a follow-up was added at the same moment
+                raise StepParentError(exc.message or "this step has follow-up steps; remove them first") from exc
+            raise
         if not rows:
             raise LookupError("step not found")
         return _step(rows[0])

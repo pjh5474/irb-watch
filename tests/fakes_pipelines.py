@@ -13,6 +13,7 @@ from irb_watch.services.pipelines import (
     Step,
     StepDocument,
     StepListError,
+    StepParentError,
 )
 
 
@@ -116,15 +117,29 @@ class FakePipelineStore:
         return self.texts.get(version_id)
 
     def add_step(self, pipeline_id, values):
+        parent = values.get("parent_step_id")
+        if parent is not None:  # the composite key and the one-level trigger
+            row = self.step_rows.get(parent)
+            if row is None or row.pipeline_id != pipeline_id:
+                raise StepParentError("the step to answer is gone or in another pipeline")
+            if row.parent_step_id is not None:
+                raise StepParentError("a follow-up step answers a main step, not another follow-up")
+            if row.deleted_at is not None:
+                raise StepParentError("the step to answer was just removed")
         sid = next(self._ids)
         self.step_rows[sid] = Step(
-            sid, pipeline_id, values.get("step_type_id"), values["name"], values["position"], values["status_key"]
+            sid, pipeline_id, values.get("step_type_id"), values["name"], values["position"], values["status_key"],
+            parent_step_id=parent, sequence_no=values.get("sequence_no"), subject=values.get("subject", ""),
         )
         return self.step_rows[sid]
 
     def update_step(self, step_id, values):
         if step_id not in self.step_rows:
             raise LookupError("step not found")
+        if values.get("deleted_at") and any(  # trigger check_step_removal
+            s.parent_step_id == step_id and s.deleted_at is None for s in self.step_rows.values()
+        ):
+            raise StepParentError("this step has follow-up steps; remove them first")
         values = {k: v for k, v in values.items() if k != "updated_at"}
         self.step_rows[step_id] = replace(self.step_rows[step_id], **values)
         return self.step_rows[step_id]
@@ -220,6 +235,9 @@ class FakePipelineStore:
             self.versions.pop(d, None)
         for s in steps + (ids if kind == "steps" else []):
             self.step_rows.pop(s, None)
+        for sid, row in list(self.step_rows.items()):  # on delete set null (parent_step_id)
+            if row.parent_step_id is not None and row.parent_step_id not in self.step_rows:
+                self.step_rows[sid] = replace(row, parent_step_id=None)
         for i in ids:
             self._rows(kind).pop(i, None)
 

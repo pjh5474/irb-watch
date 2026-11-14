@@ -20,6 +20,16 @@ Rules (owner, 2026-11-11; see docs/decisions.md "IRB pipeline: user pipelines"):
     is removed softly.
   * Removed pipelines, steps and documents are purged with their files after 30 days.
   * Every change is written to pipeline_events (the page's history).
+
+Phase B2b (owner, 2026-11-14; decisions.md "IRB pipeline redesign, phase B2b: steps"):
+  * Follow-up steps answer a main step of the same pipeline, one level; they may be added at any
+    time. A step with live follow-ups cannot be removed; a follow-up whose main step is removed
+    cannot be restored. The overview shows each main step followed by its follow-ups.
+  * Numbered step types get the next number when added (editable); `subject` says what the step
+    is about. A new pipeline never starts with a follow-up type.
+  * The IRB result is a field of its own. Setting it fills the decision date when empty; the
+    status is only offered (completed for a final answer, 보완요청 for one that needs an answer).
+  * The hospital page lines up a hospital's sites (PIs) with their main steps.
 """
 
 import hashlib
@@ -42,7 +52,13 @@ from irb_watch.services.errors import (
     UpstreamError,
     ValidationError,
 )
-from irb_watch.services.pipeline_admin import PipelineSetupService, StepStatus, StepType
+from irb_watch.services.pipeline_admin import (
+    FOLLOW_UP,
+    PipelineSetupService,
+    StepResult,
+    StepStatus,
+    StepType,
+)
 from irb_watch.services.project_access import NEEDS, REFUSALS
 from irb_watch.services.sites import Site, SiteStore, current_facts
 from irb_watch.services.users import UserStore, active_profile
@@ -56,7 +72,11 @@ MAX_NOTE = 4000
 MAX_STEPS = 60
 MAX_DRAFT_FILES = 15  # the user's own files in one AI draft
 MAX_TEXT_CHARS = 2_000_000
+MAX_SUBJECT = 200
+MAX_SEQUENCE = 999
 SUBMITTED = "submitted"
+DONE = "done"  # the closed status offered after an approved result (migration step_structure)
+ANSWERING = "revisions_requested"  # the work state offered after a result that needs an answer
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -86,6 +106,16 @@ class Step:
     note: str = ""
     deleted_at: str | None = None
     updated_at: str = ""
+    # phase B2b
+    parent_step_id: int | None = None  # set on a follow-up: the main step it answers
+    sequence_no: int | None = None  # "2" in 2차 변경심의 (numbered step types)
+    subject: str = ""  # what the step is about: "PT 2.0, CRF 1.1"
+    result_key: str | None = None  # the IRB's answer (step_results); None: none yet
+
+    @property
+    def label(self) -> str:
+        """The name as the pages show it: "2차 변경심의" for a numbered step."""
+        return f"{self.sequence_no}차 {self.name}" if self.sequence_no else self.name
 
 
 @dataclass(frozen=True)
@@ -173,6 +203,7 @@ class PipelineDetail:
     statuses: list[StepStatus]
     step_types: list[StepType] = field(default_factory=list)
     access: str = "owner"  # the user's level on the project (read = change nothing)
+    results: list[StepResult] = field(default_factory=list)  # phase B2b, archived ones too (labels)
 
 
 @dataclass(frozen=True)
@@ -186,6 +217,37 @@ class StepPage:
     next_step_id: int | None
     statuses: list[StepStatus]
     access: str = "owner"
+    # phase B2b
+    results: list[StepResult] = field(default_factory=list)
+    parent: Step | None = None  # the main step a follow-up answers
+    follow_ups: list[Step] = field(default_factory=list)  # live follow-ups of this step
+    step_types: list[StepType] = field(default_factory=list)  # live follow-up types, to add one
+    suggested_status: str | None = None  # offered after a result (owner: the user confirms)
+    needs_answer: bool = False  # the result asks for an answer: "Add follow-up" is highlighted
+
+
+@dataclass(frozen=True)
+class HospitalSite:
+    """One site of the hospital page: its pipeline's live main steps (follow-ups are counted)."""
+
+    site: Site
+    pipeline_id: int | None  # None: no live pipeline started yet
+    steps: list[Step]
+    follow_ups: dict[int, int]  # main step id -> live follow-ups
+
+
+@dataclass(frozen=True)
+class HospitalPage:
+    """A hospital (IRB) of a project with its sites side by side (phase B2b)."""
+
+    project_id: int
+    hospital_id: int
+    hospital_name: str | None
+    sites: list[HospitalSite]
+    statuses: list[StepStatus]
+    results: list[StepResult]
+    step_types: list[StepType]  # every type (archived too), to name and order the rows
+    access: str = "read"
 
 
 @dataclass(frozen=True)
@@ -319,6 +381,12 @@ class StepListError(Exception):
     """Raised by the store when a new step order is not exactly the pipeline's live steps."""
 
 
+class StepParentError(Exception):
+    """Raised by the store when the database refuses a follow-up's parent (one live level, same
+    pipeline: trigger check_step_parent and the composite key), or the removal of a step that
+    has live follow-ups (trigger check_step_removal). The message says why."""
+
+
 PURGE_KINDS = ("pipelines", "steps", "documents")
 
 
@@ -328,6 +396,14 @@ def _clean(value: str, limit: int, what: str) -> str:
         raise ValidationError(f"the {what} is empty")
     if len(value) > limit:
         raise ValidationError(f"the {what} may have at most {limit} characters")
+    return value
+
+
+def _subject(value: str) -> str:
+    """What a step is about ("PT 2.0, CRF 1.1"): one line, may be empty."""
+    value = " ".join(value.split())
+    if len(value) > MAX_SUBJECT:
+        raise ValidationError(f"the subject may have at most {MAX_SUBJECT} characters")
     return value
 
 
@@ -349,6 +425,44 @@ def safe_filename(filename: str) -> str:
     stem = _UNSAFE.sub("_", stem).strip("._") or "file"
     ext = _UNSAFE.sub("", ext)[:10]
     return f"{stem[:80]}.{ext}" if ext else stem[:80]
+
+
+def is_main(step: Step, live_ids: set[int]) -> bool:
+    """A main step, or a live follow-up whose main step is not live (it was purged, or removed
+    in a race the triggers did not see): then it is shown as a main step everywhere."""
+    return step.parent_step_id is None or step.parent_step_id not in live_ids
+
+
+def _groups(live: list[Step]) -> list[list[Step]]:
+    """Live steps in the given order, grouped as [main, its follow-ups...]."""
+    ids = {s.id for s in live}
+    return [[m, *(s for s in live if not is_main(s, ids) and s.parent_step_id == m.id)] for m in live if is_main(m, ids)]
+
+
+def display_order(steps: list[Step]) -> list[Step]:
+    """Live main steps by position, each followed by its live follow-ups (by position); then
+    removed steps."""
+
+    def key(s: Step) -> tuple[int, int]:
+        return (s.position, s.id)
+
+    live = sorted((s for s in steps if s.deleted_at is None), key=key)
+    return [s for group in _groups(live) for s in group] + sorted((s for s in steps if s.deleted_at is not None), key=key)
+
+
+def suggested_status(step: Step, result: StepResult | None, statuses: list[StepStatus]) -> str | None:
+    """The status the step page offers after the IRB result is set (owner, 2026-11-14: offered,
+    never set by itself). A result that needs an answer offers 보완요청 (the work goes on); a
+    final answer (approved, or rejected) offers 완료, or the first live closed status when 완료
+    is gone. None when nothing fits or the step already has it."""
+    if step.deleted_at is not None or result is None:
+        return None
+    live = [s for s in statuses if s.archived_at is None]
+    if result.needs_answer:
+        target = next((s.key for s in live if s.key == ANSWERING), None)
+    else:
+        target = next((s.key for s in live if s.key == DONE), None) or next((s.key for s in live if s.closed), None)
+    return target if target and target != step.status_key else None
 
 
 class PipelineService:
@@ -438,6 +552,8 @@ class PipelineService:
             return self._store.update_step(step_id, values)
         except LookupError as exc:
             raise NotFoundError("this step no longer exists; reload the page") from exc
+        except StepParentError as exc:  # a follow-up was added at the same moment (trigger)
+            raise ConflictError(f"{exc}; reload the page") from exc
 
     def _first_open_status(self) -> str:
         status = next((s for s in self._setup.statuses() if not s.closed), None)
@@ -519,12 +635,17 @@ class PipelineService:
         ):
             raise ConflictError("this site already has a pipeline")
         order = self._setup.template_for(hospital_id)
-        live = {t.id: t for t in self._setup.step_types()}
+        # Follow-up types answer another step: never started on their own (phase B2b).
+        live = {t.id: t for t in self._setup.step_types() if t.category != FOLLOW_UP}
         status = self._first_open_status()
-        steps = [
-            {"step_type_id": tid, "name": live[tid].name, "position": i, "status_key": status}
-            for i, tid in enumerate((t for t in order.step_type_ids if t in live), start=1)
-        ]
+        steps = []
+        seen: dict[int, int] = {}  # numbered types: 1차, 2차, ... in the order's sequence
+        for i, tid in enumerate((t for t in order.step_type_ids if t in live), start=1):
+            seen[tid] = seen.get(tid, 0) + 1
+            row = {"step_type_id": tid, "name": live[tid].name, "position": i, "status_key": status}
+            if live[tid].numbered:
+                row["sequence_no"] = seen[tid]
+            steps.append(row)
         try:
             pipeline = self._store.create_pipeline(user_id, project_id, hospital_id, steps, site_id)
         except NameTakenError as exc:
@@ -539,8 +660,9 @@ class PipelineService:
         return pipeline
 
     def _ordered_steps(self, pipeline: Pipeline) -> list[Step]:
-        """The overview's order: live steps by position, then removed ones."""
-        return sorted(self._store.steps([pipeline.id]), key=lambda s: (s.deleted_at is not None, s.position, s.id))
+        """The overview's order (phase B2b): each live main step by position, followed by its
+        live follow-ups (by position); then removed steps."""
+        return display_order(self._store.steps([pipeline.id]))
 
     def _views(self, steps: list[Step]) -> list[StepView]:
         by_step: dict[int, list[StepDocument]] = {}
@@ -570,6 +692,7 @@ class PipelineService:
         return PipelineDetail(
             summary, views, self._setup.statuses(include_archived=True), self._setup.step_types(),
             self.level(user_id, pipeline.project_id) or "read",
+            self._setup.results(include_archived=True),
         )
 
     def step_page(self, user_id: str, pipeline_id: int, step_id: int) -> StepPage:
@@ -586,13 +709,63 @@ class PipelineService:
             at = live.index(step.id)
             previous_id = live[at - 1] if at > 0 else None
             next_id = live[at + 1] if at + 1 < len(live) else None
+        statuses = self._setup.statuses(include_archived=True)
+        results = self._setup.results(include_archived=True)
+        result = next((r for r in results if r.key == step.result_key), None)
+        parent = next((s for s in steps if s.id == step.parent_step_id), None) if step.parent_step_id else None
+        follow_ups = [s for s in steps if s.parent_step_id == step.id and s.deleted_at is None]
         return StepPage(
             self._summaries(pipeline.project_id, [pipeline])[0],
             self._views([step])[0],
             previous_id,
             next_id,
-            self._setup.statuses(include_archived=True),
+            statuses,
             self.level(user_id, pipeline.project_id) or "read",
+            results=results,
+            parent=parent,
+            follow_ups=follow_ups,
+            step_types=[t for t in self._setup.step_types() if t.category == FOLLOW_UP],
+            suggested_status=suggested_status(step, result, statuses),
+            # The step's own result counts even when the admin archived it since (as in
+            # suggested_status): archiving stops new use, it does not change past answers.
+            needs_answer=bool(result and result.needs_answer),
+        )
+
+    # -- the hospital page (phase B2b) -------------------------------------------------------
+
+    def hospital_page(self, user_id: str, project_id: int, hospital_id: int) -> HospitalPage:
+        """A hospital of the project with its live sites side by side: each site's live main
+        steps (type, number, status, result, dates). Also for a hospital that left the project
+        while it still has sites. The page is linked only for a hospital with 2 or more sites
+        (owner); any hospital of the project answers."""
+        self._user(user_id)
+        level = self._own_project(user_id, project_id, "read")
+        sites = (
+            [s for s in self._sites.sites_of_project(project_id) if s.hospital_id == hospital_id and s.deleted_at is None]
+            if self._sites is not None else []
+        )
+        if not sites and hospital_id not in self._store.project_hospital_ids(project_id):
+            raise NotFoundError("hospital not found in this project")
+        pipelines = {
+            p.site_id: p for p in self._store.pipelines_of_project(project_id)
+            if p.deleted_at is None and p.hospital_id == hospital_id and p.site_id is not None
+        }
+        steps = [s for s in self._store.steps([p.id for p in pipelines.values()]) if s.deleted_at is None]
+        out = []
+        for site in sorted(sites, key=lambda s: (s.site_no or "~", s.pi_name.lower(), s.id)):
+            p = pipelines.get(site.id)
+            own = [s for s in steps if p is not None and s.pipeline_id == p.id]
+            ids = {s.id for s in own}  # live steps; the same rule as the overview (is_main)
+            mains = sorted((s for s in own if is_main(s, ids)), key=lambda s: (s.position, s.id))
+            counts: dict[int, int] = {}
+            for s in own:
+                if not is_main(s, ids):
+                    counts[s.parent_step_id] = counts.get(s.parent_step_id, 0) + 1  # type: ignore[index]
+            out.append(HospitalSite(site, p.id if p else None, mains, counts))
+        return HospitalPage(
+            project_id, hospital_id, self._store.hospital_names([hospital_id]).get(hospital_id), out,
+            self._setup.statuses(include_archived=True), self._setup.results(include_archived=True),
+            self._setup.step_types(include_archived=True), level,
         )
 
     # -- work across projects (phase A2) ------------------------------------------------------
@@ -613,7 +786,7 @@ class PipelineService:
             out.append(
                 WorkStep(
                     p.id, p.project_id, name, p.hospital_id, hospitals.get(p.hospital_id),
-                    s.id, s.name, s.status_key, status.label if status else s.status_key,
+                    s.id, s.label, s.status_key, status.label if status else s.status_key,
                     bool(status and status.closed), s.due_on, s.submitted_on, s.decided_on,
                     len(view.checklist) if view else 0, view.required_missing if view else 0,
                     owner, labels.get(p.site_id, "") if p.site_id is not None else "",
@@ -875,34 +1048,93 @@ class PipelineService:
 
     # -- steps --------------------------------------------------------------------------------
 
-    def add_step(self, user_id: str, pipeline_id: int, name: str | None, step_type_id: int | None) -> Step:
+    def add_step(
+        self, user_id: str, pipeline_id: int, name: str | None, step_type_id: int | None,
+        parent_step_id: int | None = None, subject: str = "",
+    ) -> Step:
+        """A main step, or a follow-up of `parent_step_id` (phase B2b). A follow-up of a
+        follow-up answers the same main step (one level). Follow-up types need a parent, and a
+        parent takes a follow-up type or a free name. Numbered types get the next number: live
+        main steps of the type in the pipeline, or live follow-ups of the type under the parent."""
         pipeline = self._pipeline(user_id, pipeline_id)
         steps = self._store.steps([pipeline.id])
-        if sum(1 for s in steps if s.deleted_at is None) >= MAX_STEPS:
+        live = [s for s in steps if s.deleted_at is None]
+        if len(live) >= MAX_STEPS:
             raise ConflictError(f"a pipeline may have at most {MAX_STEPS} steps")
+        parent = None
+        if parent_step_id is not None:
+            parent = next((s for s in live if s.id == parent_step_id), None)
+            if parent is None:
+                raise NotFoundError("the step to answer is not a live step of this pipeline")
+            if parent.parent_step_id is not None:  # answer to a follow-up: the same main step
+                parent = next((s for s in live if s.id == parent.parent_step_id), None)
+                if parent is None:
+                    raise ConflictError("the main step of that follow-up is removed; restore it first")
+        stype = None
         if step_type_id is not None:
             stype = next((t for t in self._setup.step_types() if t.id == step_type_id), None)
             if stype is None:
                 raise ValidationError("step type not found or archived")
+            if stype.category == FOLLOW_UP and parent is None:
+                raise ValidationError("a follow-up step needs the step it answers")
+            if parent is not None and stype.category != FOLLOW_UP:
+                raise ValidationError("a follow-up step takes a follow-up type or a free name")
             name = _clean(name or stype.name, MAX_STEP_NAME, "step name")
         else:
             name = _clean(name or "", MAX_STEP_NAME, "step name")
-        position = max((s.position for s in steps), default=0) + 1
-        step = self._store.add_step(
-            pipeline.id,
-            {"step_type_id": step_type_id, "name": name, "position": position, "status_key": self._first_open_status()},
+        values: dict = {
+            "step_type_id": step_type_id, "name": name,
+            "position": max((s.position for s in steps), default=0) + 1,
+            "status_key": self._first_open_status(),
+            "subject": _subject(subject),
+        }
+        if parent is not None:
+            values["parent_step_id"] = parent.id
+        if stype is not None and stype.numbered:
+            # The next number after the highest live one (not a count: a removed 1차 or a hand-set
+            # 3차 must not give a second 2차).
+            siblings = [s for s in live if s.step_type_id == stype.id and s.parent_step_id == (parent.id if parent else None)]
+            values["sequence_no"] = min(max((s.sequence_no or 0 for s in siblings), default=0) + 1, MAX_SEQUENCE)
+        try:
+            step = self._store.add_step(pipeline.id, values)
+        except StepParentError as exc:
+            raise ConflictError(f"{exc}; reload the page") from exc
+        self._event(
+            pipeline.id, step.id, user_id, "step.added",
+            {
+                "name": name, "step_type_id": step_type_id, "parent_step_id": values.get("parent_step_id"),
+                "sequence_no": values.get("sequence_no"),
+            },
         )
-        self._event(pipeline.id, step.id, user_id, "step.added", {"name": name, "step_type_id": step_type_id})
         return step
 
     def update_step(self, user_id: str, pipeline_id: int, step_id: int, changes: dict) -> Step:
         """`changes` holds only the fields sent: name, status_key, due_on, submitted_on,
-        decided_on, note (a date of None or "" clears it)."""
+        decided_on, note (a date of None or "" clears it), and from phase B2b subject,
+        sequence_no (None clears it) and result_key (None clears it). Setting a result fills
+        the decision date when it is empty and not sent; the status is never changed by it
+        (the page offers one, owner 2026-11-14)."""
         pipeline = self._pipeline(user_id, pipeline_id)
         step = self._step(pipeline, step_id)
         values: dict = {}
         if "name" in changes:
             values["name"] = _clean(changes["name"] or "", MAX_STEP_NAME, "step name")
+        if "subject" in changes:
+            values["subject"] = _subject(changes["subject"] or "")
+        if "sequence_no" in changes:
+            number = changes["sequence_no"]
+            if number is not None and not (isinstance(number, int) and 1 <= number <= MAX_SEQUENCE):
+                raise ValidationError(f"the number must be 1 to {MAX_SEQUENCE}, or empty")
+            values["sequence_no"] = number
+        if "result_key" in changes and changes["result_key"] != step.result_key:
+            key = changes["result_key"] or None
+            if key is not None:
+                result = next((r for r in self._setup.results() if r.key == key), None)
+                if result is None:
+                    raise ValidationError("unknown or archived result")
+                if "decided_on" not in changes and not step.decided_on:
+                    values["decided_on"] = self._today()
+            values["result_key"] = key
         if "note" in changes:
             note = (changes["note"] or "").strip()
             if len(note) > MAX_NOTE:
@@ -919,7 +1151,7 @@ class PipelineService:
             if status.key == SUBMITTED and "submitted_on" not in changes and not step.submitted_on:
                 values["submitted_on"] = self._today()
             if status.closed and "decided_on" not in changes and not step.decided_on:
-                values["decided_on"] = self._today()
+                values.setdefault("decided_on", self._today())
         values = {k: v for k, v in values.items() if getattr(step, k) != v}
         if not values:
             return step
@@ -931,23 +1163,33 @@ class PipelineService:
         return updated
 
     def reorder_steps(self, user_id: str, pipeline_id: int, step_ids: list[int]) -> list[Step]:
+        """Every live step once. Main steps take the order sent; each keeps its follow-ups right
+        after it, in their sent order (a follow-up never moves away from its main step)."""
         pipeline = self._pipeline(user_id, pipeline_id)
         live = [s for s in self._store.steps([pipeline.id]) if s.deleted_at is None]
         if sorted(step_ids) != sorted(s.id for s in live) or len(set(step_ids)) != len(step_ids):
             raise ValidationError("send every step of the pipeline exactly once")
+        by_id = {s.id: s for s in live}
+        order = [s.id for group in _groups([by_id[sid] for sid in step_ids]) for s in group]
         try:
             # One database call: the whole order is saved or nothing is.
-            self._store.reorder_steps(pipeline.id, step_ids)
+            self._store.reorder_steps(pipeline.id, order)
         except StepListError as exc:
             raise ConflictError("the steps changed meanwhile; reload the page and try again") from exc
-        self._event(pipeline.id, None, user_id, "step.reordered", {"step_ids": step_ids})
-        return sorted(
-            (s for s in self._store.steps([pipeline.id]) if s.deleted_at is None), key=lambda s: s.position
-        )
+        self._event(pipeline.id, None, user_id, "step.reordered", {"step_ids": order})
+        return [s for s in display_order(self._store.steps([pipeline.id])) if s.deleted_at is None]
 
     def remove_step(self, user_id: str, pipeline_id: int, step_id: int) -> Step:
         pipeline = self._pipeline(user_id, pipeline_id)
         step = self._step(pipeline, step_id)
+        answers = [
+            s for s in self._store.steps([pipeline.id]) if s.parent_step_id == step.id and s.deleted_at is None
+        ]
+        if answers:
+            raise ConflictError(
+                f"this step has {len(answers)} follow-up step(s); remove them first: "
+                + ", ".join(s.label for s in answers)
+            )
         removed = self._update_step(step.id, {"deleted_at": self._now()})
         self._event(pipeline.id, step.id, user_id, "step.removed", {"name": step.name})
         return removed
@@ -957,7 +1199,12 @@ class PipelineService:
         step = self._step(pipeline, step_id, live=False)
         if step.deleted_at is None:
             raise ConflictError("this step is not removed")
-        live = [s for s in self._store.steps([pipeline.id]) if s.deleted_at is None]
+        all_steps = self._store.steps([pipeline.id])
+        if step.parent_step_id is not None:
+            parent = next((s for s in all_steps if s.id == step.parent_step_id), None)
+            if parent is not None and parent.deleted_at is not None:
+                raise ConflictError(f"the step it answers ({parent.label}) is removed; restore that one first")
+        live = [s for s in all_steps if s.deleted_at is None]
         if len(live) >= MAX_STEPS:
             raise ConflictError(f"a pipeline may have at most {MAX_STEPS} steps; remove one first")
         position = max((s.position for s in live), default=0) + 1

@@ -873,7 +873,7 @@ migration dry-run, the owner's "go" before applying, then both repos deployed to
 | **A2. My IRB work + reminders** | `GET /work`, page `/work`; the old phase 4 (digest lines for steps due within 14 days) reads the same list. **Built 2026-11-13** (decisions.md "IRB pipeline redesign, phase A2") | `step_reminders` (one column: the reminders' own switch) | A |
 | **B1. Sharing** | `project_members`, PM, organization admins, hand-over, the two access functions, new RLS policies on `projects` and `project_hospitals`, server access helper for today's pipelines, steps, files, step drafts and their jobs, Members tab, organization projects page. **A2 follow-up:** `/work` (`PipelineService.work_steps`) and the reminder recipients (`reminder_steps`) key on `pipelines.user_id` today; switch both to project access (`/work`: every project the user may open, with "mine only"; reminders: owner and PM), or after a hand-over the old creator keeps the reminders and the new owner's `/work` is empty | `project_sharing` (**changes RLS on live tables: test with a rolled-back RLS test and a real second user before applying**) | A |
 | **B2a. Sites per PI** (split 2026-11-13, owner) | `project_sites` (PI optional), `site_facts` with history and corrections, `pipelines.site_id`, sites grouped by hospital on the project page, site details, site details in drafts (D18). **Built 2026-11-13** | `project_sites` (a trigger gives the previous server's pipeline inserts the unnamed site) | A, B1 |
-| **B2b. Steps** | follow-up steps, numbering, subject, step type category and seeds, `step_results`, global order = 초기 심의; service split; **the hospital page** (moved from B2a) | `step_structure` | B2a |
+| **B2b. Steps** | follow-up steps, numbering, subject, step type category and seeds, `step_results`, global order = 초기 심의; **the hospital page** (moved from B2a). **Built 2026-11-14** (decisions.md "IRB pipeline redesign, phase B2b: steps"); the service split moved to C | `step_structure` (applied 2026-11-14) | B2a |
 | **C. Document slots** | `step_type_documents` (global + per hospital), slot columns, per-slot drafts and job limit, shared pipeline drafts, "use as final" and upload-from-draft, copy step to sibling sites, sibling file as draft input, admin kinds editor | `step_document_slots` | A, B2 |
 | **D. Study library** | library tables at three levels, attach by reference, status table with flags, change log, `study_events` + "start amendment", library versions in drafts, from/to comparison | `study_library` | B2, C |
 | **E. Batch drafts** | **Moved to the Clinical Document Agent (2026-11-14; section 14).** Was: "draft for all" on a study event, new job limits, worker outside the API process | (none here) | D |
@@ -926,7 +926,7 @@ MFDS. Still open (numbers kept from revision 2 where the question is the same):
 
 | # | Phase | Question | Proposal |
 |---|---|---|---|
-| O7 | B2 | The seeded statuses 승인 / 반려 / 보완 요청 overlap the new result list. Does the migration rename them (one closed status 완료, 보완 요청 kept as a work state), or leave them for the admin to tidy? | Leave them; the admin tidies |
+| O7 | B2 | The seeded statuses 승인 / 반려 / 보완 요청 overlap the new result list. Does the migration rename them (one closed status 완료, 보완 요청 kept as a work state), or leave them for the admin to tidy? | **Decided 2026-11-14: tidy: add 완료, archive 승인 and 반려, keep 보완요청** |
 | O15 | E | Batch limits, and moving the worker out of the API process | Decide when E starts |
 | O16 | C | 서류 바인더 (paper copies), `IRB 사전 검토`, `참고자료`: tracked as `reference` slots, or left out? | `reference` slots, user-added |
 | O18 | A2 | `/work`: are the four lists of 7.1 the right ones, and does a PM or organization admin see the work of all their projects there? | **Decided 2026-11-13: the four lists; from B1 everything they may open, with a "mine only" filter. Submitted steps are never due or overdue** |
@@ -1041,7 +1041,7 @@ replaces them and the owner approves (handoff 3.1, A8).
 | CAL-O2 | Who may enter or confirm sessions (platform admin only, organization admins, users proposing) | Open |
 | CAL-O3 | Reminders for sessions and tasks: reuse A2's fixed days and owner + PM recipients, or new settings | Open; proposal: reuse A2 |
 | CAL-O4 | Google Calendar, one-way (handoff 6.5, CAL later): what goes into event titles | Open; proposal: no study or PI names by default |
-| CAL-O5 | Seed result 행정수정 요청 in B2b's `step_results` (handoff 7.3 keeps administrative revision apart) | Ask with B2b |
+| CAL-O5 | Seed result 행정수정 요청 in B2b's `step_results` (handoff 7.3 keeps administrative revision apart) | **Decided 2026-11-14: seeded (needs an answer)** |
 
 ### 14.4 Facts checked against the handoff (2026-11-14)
 
