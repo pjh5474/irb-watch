@@ -42,6 +42,10 @@ Decided in the third question round (2026-11-13):
 
 What is still open is in section 10.
 
+**Changed 2026-11-14 (owner, decisions.md "Product direction"):** AI document writing moves
+over time to a separate Clinical Document Agent. Phases C and D are built **without new AI
+drafting features**; phase E moves to the Agent; an IRB calendar follows B2b. See section 14.
+
 ## 1. What the real project folders show
 
 Source: `Z:\MIRACULUS\1. Project`, every `01. MFDS & IRB` folder (38 found), read on
@@ -872,9 +876,11 @@ migration dry-run, the owner's "go" before applying, then both repos deployed to
 | **B2b. Steps** | follow-up steps, numbering, subject, step type category and seeds, `step_results`, global order = 초기 심의; service split; **the hospital page** (moved from B2a) | `step_structure` | B2a |
 | **C. Document slots** | `step_type_documents` (global + per hospital), slot columns, per-slot drafts and job limit, shared pipeline drafts, "use as final" and upload-from-draft, copy step to sibling sites, sibling file as draft input, admin kinds editor | `step_document_slots` | A, B2 |
 | **D. Study library** | library tables at three levels, attach by reference, status table with flags, change log, `study_events` + "start amendment", library versions in drafts, from/to comparison | `study_library` | B2, C |
-| **E. Batch drafts** | "draft for all" on a study event, new job limits, worker outside the API process | `draft_batches` | D |
+| **E. Batch drafts** | **Moved to the Clinical Document Agent (2026-11-14; section 14).** Was: "draft for all" on a study event, new job limits, worker outside the API process | (none here) | D |
+| **CAL. IRB calendar** (2026-11-14) | Read view over step dates, hospital review sessions, project tasks; section 14 | `calendar` (name open) | B2b |
 
-Order: A, A2, B1, B2, C, D, E. Sharing first inside B because every later table is read
+**2026-11-14:** in C and D build only the data parts (section 14.1). Order now: A, A2, B1,
+B2a (apply), B2b, CAL, then C and D. Earlier order: A, A2, B1, B2, C, D, E. Sharing first inside B because every later table is read
 through the same access rule; B2 before C because sibling reuse and per-hospital lists
 need sites. Phase B is now the largest phase: B1 and B2 are separate migrations and can be
 deployed separately.
@@ -984,3 +990,67 @@ MFDS. Still open (numbers kept from revision 2 where the question is the same):
 | Library | Audit entries only | Own change log; older-version flags; "start amendment" (D19) |
 | Study events | All in phase E | Table and "apply to sites" in phase D; only batch drafts in E |
 | Phases | A, A2, B, C, D, E | A, A2, B1 (sharing), B2 (sites), C, D, E |
+
+## 14. The 2026-11-14 direction: calendar here, writing in a separate Agent
+
+Source: `docs/IRB_Watch_Clinical_Document_Agent_Claude_Handoff_2026-11-14.md` and
+decisions.md "Product direction". The handoff's Track A is called **CAL-n** here and its
+Track B (the owner's Cloudflare Think Agent) **AG-n**, so neither mixes with phases A to E.
+**Claude Code does not build AG-n.**
+
+### 14.1 Effect on phases C, D and E
+
+| Part | Before | Now |
+|---|---|---|
+| Document slots, kinds, status, versions, checklist (4.3, 4.4) | C | C, unchanged |
+| "Use as final file" and upload-from-draft (D16) | C | C: kept, for drafts the existing generator makes; later the Agent saves into a slot the same way |
+| Per-slot draft dialog, kind instructions/guides/form for drafts, one job per slot (4.4, 6.1, 6.2) | C | **Not built.** Today's step drafts keep working as they are |
+| Sibling file as a draft input (4.5) | C | **Not built** (Agent). Copy step to sibling sites stays in C |
+| Model profiles per job (6.4, O29) | C | Summaries and chat only; record model and tokens per call stays useful |
+| Study library, status table, change log, study events, "start amendment" without drafts (4.6, 4.7) | D | D, unchanged |
+| Library versions and from/to comparisons as draft inputs (4.6) | D | **Not built** (Agent) |
+| Batch drafts, new job limits, worker outside the API (4.7, O15) | E | **Moved to the Agent** |
+
+The existing docs generator, draft jobs, guides and forms are **not removed** until the Agent
+replaces them and the owner approves (handoff 3.1, A8).
+
+### 14.2 Calendar data (decided 2026-11-14)
+
+- **Step dates stay where they are:** `pipeline_steps.due_on`, `submitted_on`, `decided_on`
+  (date only). The calendar reads them; it never copies them. `/work` and the reminders
+  (phase A2) are unchanged and read the same columns.
+- **Hospital review sessions (new, platform-wide):** one row per IRB meeting of a hospital:
+  meeting date, submission cutoff, optional time (`time unknown` kept as such, never a made-up
+  17:00), timezone (default `Asia/Seoul`), review kind, confirmed / tentative / cancelled,
+  evidence (a stored document version or a link), who confirmed it and when. Every project
+  of every organization working with that hospital reads the same rows: **a shared setting
+  on purpose**, like `hospitals`. A step may point at the session it aims for (column on
+  `pipeline_steps`, proposal) so the calendar can show "cutoff for this step".
+- **Project tasks (new, per project):** dated items that are not steps (internal review day,
+  sponsor meeting), optionally tied to a site or a step. Read and edited under the project
+  access rule (4.8); `organization_id` follows the project.
+- Calendar page: month, week and list views over every project the user may open, filters by
+  project, site, hospital, kind; each item links to its step page or task. Failures show a
+  reason, never "no events".
+
+### 14.3 Open choices for CAL (ask before building)
+
+| # | Question | State |
+|---|---|---|
+| CAL-O1 | Where hospital sessions come from | **Open (owner 2026-11-14).** Candidates: set up automatically from stored board documents; the assistant (side panel) finding them in stored documents on request (read-only, fits today's tools); a dedicated AI tool later. Note the handoff's rule (section 11): a date read from a notice must not become a confirmed event without a person |
+| CAL-O2 | Who may enter or confirm sessions (platform admin only, organization admins, users proposing) | Open |
+| CAL-O3 | Reminders for sessions and tasks: reuse A2's fixed days and owner + PM recipients, or new settings | Open; proposal: reuse A2 |
+| CAL-O4 | Google Calendar, one-way (handoff 6.5, CAL later): what goes into event titles | Open; proposal: no study or PI names by default |
+| CAL-O5 | Seed result 행정수정 요청 in B2b's `step_results` (handoff 7.3 keeps administrative revision apart) | Ask with B2b |
+
+### 14.4 Facts checked against the handoff (2026-11-14)
+
+- B1 (sharing) is applied and committed; not yet seen with a second user in a browser.
+- B2a (`project_sites`) is committed (`78f9656`); migration applied 2026-11-14, not deployed.
+- `step_reminders` is a column (`notification_prefs.step_reminders_enabled`), not a table.
+- Study = `projects`, Study-Site = `project_sites`; no rename planned (handoff 13.1 still open).
+- Visits (SIV/MV/COV) are not in IRB Watch's plan; Agent or a later workspace.
+- Reusable for the Agent's tool API (handoff A5, not designed): `agent/tools.py` read tools,
+  `private.project_access_level` / `services/project_access.py`, `PipelineService.context`,
+  `docgen/form_fields.py` and `form_fill.py`, draft versions with the 409 stale-save rule,
+  `draft_jobs`. How the Agent signs in to the API (handoff 13.12) is open.
