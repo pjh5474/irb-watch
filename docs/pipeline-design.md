@@ -1037,9 +1037,9 @@ replaces them and the owner approves (handoff 3.1, A8).
 
 | # | Question | State |
 |---|---|---|
-| CAL-O1 | Where hospital sessions come from | **Open (owner 2026-11-14).** Candidates: set up automatically from stored board documents; the assistant (side panel) finding them in stored documents on request (read-only, fits today's tools); a dedicated AI tool later. Note the handoff's rule (section 11): a date read from a notice must not become a confirmed event without a person |
-| CAL-O2 | Who may enter or confirm sessions (platform admin only, organization admins, users proposing) | Open |
-| CAL-O3 | Reminders for sessions and tasks: reuse A2's fixed days and owner + PM recipients, or new settings | Open; proposal: reuse A2 |
+| CAL-O1 | Where hospital sessions come from | **Decided 2026-11-15: manual entry plus AI proposals now** (an admin-started job per hospital writes proposals only; 14.5) |
+| CAL-O2 | Who may enter or confirm sessions (platform admin only, organization admins, users proposing) | **Decided 2026-11-15: platform admins enter and confirm; users of that hospital propose; everyone sees proposals, marked** |
+| CAL-O3 | Reminders for sessions and tasks: reuse A2's fixed days and owner + PM recipients, or new settings | **Decided 2026-11-15: reuse A2; proposals remind too, marked "not confirmed"** |
 | CAL-O4 | Google Calendar, one-way (handoff 6.5, CAL later): what goes into event titles | Open; proposal: no study or PI names by default |
 | CAL-O5 | Seed result 행정수정 요청 in B2b's `step_results` (handoff 7.3 keeps administrative revision apart) | **Decided 2026-11-14: seeded (needs an answer)** |
 
@@ -1054,3 +1054,74 @@ replaces them and the owner approves (handoff 3.1, A8).
   `private.project_access_level` / `services/project_access.py`, `PipelineService.context`,
   `docgen/form_fields.py` and `form_fill.py`, draft versions with the 409 stale-save rule,
   `draft_jobs`. How the Agent signs in to the API (handoff 13.12) is open.
+
+### 14.5 CAL-1: the build (owner's answers, 2026-11-15)
+
+One migration, `irb_calendar`. Every table is server-only (RLS on, no browser grants), like
+the pipeline tables.
+
+**`session_kinds`** (admin list, platform-wide): `key`, `label`, `position`, `archived_at`.
+Seeds: `regular` 정기심의, `expedited` 신속심의, `other` 기타.
+
+**`irb_sessions`** (platform-wide, like `hospitals`; no `organization_id` on purpose):
+- `hospital_id`, `kind_key`, `meets_on` (date), `meets_at` (time, null = time unknown),
+  `cutoff_on` / `cutoff_at` (the submission cutoff, optional), `timezone` (default
+  `Asia/Seoul`), `note`.
+- `state`: `proposed` (not reviewed) → `tentative` | `confirmed` | `rejected`; `tentative` ↔
+  `confirmed`; an approved session → `cancelled` (undo: back to `tentative`).
+- `origin`: `admin` | `user` | `ai`. Evidence: `evidence_version_id` (a stored
+  document version), `evidence_url`, `evidence_quote` (the AI's supporting snippet, at most
+  300 characters, untrusted text shown as plain text).
+- `proposed_by` / `proposed_at`, `reviewed_by` / `reviewed_at`, `job_id`, `deleted_at`
+  (an admin removes a session; it is kept for the links).
+- One live, non-rejected session per hospital, kind and meeting date (partial unique index).
+  An AI proposal is also skipped when a rejected one with the same hospital, kind and date
+  exists: an admin has already said no.
+
+**`session_jobs`** (the AI "Find sessions" job): `hospital_id`, `user_id`, `status`
+(queued, running, done, failed + reason), `runner` (APP_ENV, as `draft_jobs`), counts
+(`documents_read`, `proposed`, `skipped`). One open job per hospital (unique index), at most 2
+open per admin. It runs in the existing 2-thread job pool. Open jobs are marked failed at the
+next start. Purged after 30 days. Usage is recorded as `session.find_started` / `_finished`.
+
+The job reads that hospital's sources with `ai_enabled` only. It takes the newest 60 live posts,
+puts titles with schedule words (일정, 심의, 회의, 개최, 마감, 접수, schedule, meeting) first, and
+sends at most 15 posts: each post's current version is capped at 8,000 characters, 60,000 in
+total, wrapped as untrusted data with `store=False`. It makes one model call with a typed
+answer and keeps at most 40 sessions. The answer is checked: dates must be real, from 30 days
+ago to 400 days ahead; a cutoff may not fall after its meeting; the kind must be a live key,
+otherwise `other`; the evidence must be one of the posts sent. Without an OpenAI key or model,
+the job answers 503.
+
+**`pipeline_steps.target_session_id`** (on delete set null). The step page lists that
+hospital's upcoming sessions (not rejected, removed or cancelled; proposals marked) and the
+hint: the next approved session whose cutoff (else its meeting day) is today or later, else the
+next proposal. A target that is later cancelled or rejected keeps the link and shows a warning.
+
+**`project_tasks`**: `project_id`, `organization_id` (follows the project, trigger), `title`
+(1 to 200), `due_on`, `due_at` (optional), `note` (≤ 4,000), `site_id` (a site of the
+project), `step_id` (a step of the project), `assignee_id` (someone who may work on the
+project), `done_at` / `done_by`, `created_by`, `deleted_at`. At most 500 live tasks per
+project. Purged 30 days after removal. Changes are logged in `audit_logs` (category `user`, ids
+and changed field names only: typed titles never go into the append-only log).
+
+**API**
+- `GET /calendar?start=&end=` (at most 62 days): items of three types over the projects the
+  user may work on (`workable_project_ids`, as `/work`). Step items are the due, submitted and
+  decided dates of live steps of live pipelines. Session items are the meeting and the cutoff, for
+  sessions of those projects' hospitals plus any `hospital_id=` asked for. Task items are the
+  tasks themselves. Also returns the project, site, hospital and kind lists for the filters.
+- `GET /session-kinds`; `GET /hospitals/{id}/sessions?start=&end=`; `POST /hospitals/{id}/sessions`
+  (a proposal; users of that hospital); `POST /sessions/{id}/withdraw` (own proposal).
+- Admin: `GET /admin/sessions/proposals`; `POST /admin/hospitals/{id}/sessions` (direct,
+  tentative or confirmed); `PATCH /admin/sessions/{id}` (fields and state);
+  `POST /admin/sessions/{id}/remove`; `POST /admin/hospitals/{id}/sessions/find` (202, a job);
+  `GET /admin/session-jobs?hospital_id=`; session kinds `GET/POST/PATCH /admin/session-kinds`.
+- Tasks: `GET/POST /projects/{id}/tasks`, `PATCH /tasks/{id}`, `POST /tasks/{id}/remove` and
+  `/restore`.
+- Step: `target_session_id` on `PATCH .../steps/{id}`; the step page adds `target_session`,
+  `sessions` and `suggested_session_id`.
+
+**Reminders** extend A2's mail. Each line has a kind: `step` (due date, as today), `cutoff` (a
+step's target session; "not confirmed" for a proposal) and `task`. The same switch applies
+(`step_reminders_enabled`).

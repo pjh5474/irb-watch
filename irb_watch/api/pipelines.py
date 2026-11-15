@@ -16,6 +16,7 @@ from irb_watch.api.deps import (
     get_project_access_service,
 )
 from irb_watch.api.docgen import DraftOut, JobOut
+from irb_watch.api.sessions import KindOut, SessionOut
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.services.docgen import DocgenService
 from irb_watch.services.draft_jobs import DraftJobService
@@ -130,6 +131,7 @@ class StepOut(BaseModel):
     label: str = ""  # "2차 변경심의"
     subject: str = ""
     result_key: str | None = None
+    target_session_id: int | None = None  # CAL-1: the IRB meeting it aims for
 
     @classmethod
     def of(cls, s: Step, type_name: str | None = None) -> "StepOut":
@@ -138,7 +140,7 @@ class StepOut(BaseModel):
             position=s.position, status_key=s.status_key, due_on=s.due_on, submitted_on=s.submitted_on,
             decided_on=s.decided_on, note=s.note, deleted_at=s.deleted_at,
             parent_step_id=s.parent_step_id, sequence_no=s.sequence_no, label=s.label,
-            subject=s.subject, result_key=s.result_key,
+            subject=s.subject, result_key=s.result_key, target_session_id=s.target_session_id,
         )
 
 
@@ -248,6 +250,12 @@ class StepPageOut(BaseModel):
     follow_up_types: list[StepTypeOut] = []  # live follow-up types, for "Add follow-up step"
     suggested_status: str | None = None  # offered after a result; the user confirms
     needs_answer: bool = False  # highlight "Add follow-up step"
+    # CAL-1
+    target_session: SessionOut | None = None  # the meeting the step aims for
+    sessions: list[SessionOut] = []  # the hospital's upcoming sessions (proposals marked)
+    suggested_session_id: int | None = None  # the hint; nothing is saved until the user picks
+    target_warning: str | None = None  # cancelled | rejected | removed | unavailable
+    session_kinds: list[KindOut] = []
 
 
 class HospitalStepOut(BaseModel):
@@ -305,6 +313,7 @@ class StepPatch(BaseModel):
     subject: str | None = Field(None, max_length=MAX_SUBJECT + 50)
     sequence_no: int | None = None  # null clears the number
     result_key: str | None = Field(None, max_length=40)  # null clears the result
+    target_session_id: int | None = None  # CAL-1; null clears it
     due_on: str | None = Field(None, max_length=10)
     submitted_on: str | None = Field(None, max_length=10)
     decided_on: str | None = Field(None, max_length=10)
@@ -481,6 +490,11 @@ def step_page(
         follow_up_types=[StepTypeOut.of(t) for t in page.step_types],
         suggested_status=page.suggested_status,
         needs_answer=page.needs_answer,
+        target_session=SessionOut.of(page.target_session, user.id) if page.target_session else None,
+        sessions=[SessionOut.of(s, user.id) for s in page.sessions],
+        suggested_session_id=page.suggested_session_id,
+        target_warning=page.target_warning,
+        session_kinds=[KindOut.of(k) for k in page.session_kinds],
     )
 
 

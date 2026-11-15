@@ -9,6 +9,7 @@ from irb_watch.agent.openai_model import OpenAIAgentModel
 from irb_watch.ai.enrich import Enricher
 from irb_watch.ai.jev import JevClassifier
 from irb_watch.ai.openai_summarizer import OpenAISummarizer
+from irb_watch.ai.session_finder import OpenAISessionFinder
 from irb_watch.ai.types import Classifier, Summarizer
 from irb_watch.config import Settings, get_settings
 from irb_watch.docgen.openai_writer import OpenAIDraftWriter
@@ -83,6 +84,19 @@ def _draft_writer(
 def build_draft_writer(settings: Settings | None = None) -> OpenAIDraftWriter | None:
     s = settings or get_settings()
     return _draft_writer(s.openai_api_key, s.openai_model, s.openai_base_url, s.openai_timeout_seconds)
+
+
+@lru_cache
+def _session_finder(api_key: str, model: str, base_url: str, timeout: float) -> OpenAISessionFinder | None:
+    if not api_key or not model:
+        log.warning("Finding IRB sessions with AI is off: set OPENAI_API_KEY and OPENAI_MODEL to enable it")
+        return None
+    return OpenAISessionFinder(api_key, model, base_url or None, max(timeout, 120.0))
+
+
+def build_session_finder(settings: Settings | None = None) -> OpenAISessionFinder | None:
+    s = settings or get_settings()
+    return _session_finder(s.openai_api_key, s.openai_model, s.openai_base_url, s.openai_timeout_seconds)
 
 
 def build_classifier(settings: Settings | None = None) -> Classifier | None:

@@ -134,6 +134,13 @@ class DigestReminder:
     days_left: int  # negative = overdue
     url: str
     site: str = ""  # "01 · PI 김○○": tells two PIs of one hospital apart
+    # CAL-1: step (its due date), cutoff (the meeting a step aims for), task (a project task)
+    kind: str = "step"
+    unconfirmed: bool = False  # the meeting is a proposal, not yet confirmed by an admin
+    detail: str = ""  # cutoff: "정기심의 2026-12-10 접수 마감"
+
+
+_KIND_TAG = {"cutoff": ("IRB 접수 마감", "IRB cutoff"), "task": ("할 일", "task")}
 
 
 def _when(days_left: int, *, korean: bool) -> str:
@@ -150,6 +157,13 @@ def _reminder_block(reminders: list[DigestReminder], *, korean: bool) -> tuple[l
     for r in reminders:
         where = " · ".join(x for x in (one_line(r.project, 100), one_line(r.hospital, 80), one_line(r.site, 130)) if x)
         step = one_line(r.step, 100) or "-"
+        tag = _KIND_TAG.get(r.kind)
+        if tag:
+            step = f"[{tag[0] if korean else tag[1]}] {step}"
+        if r.detail:
+            step = f"{step}: {one_line(r.detail, 80)}"
+        if r.unconfirmed:
+            step = f"{step} ({'확정 전' if korean else 'not confirmed'})"
         when = f"{one_line(r.due_on, 10)} ({_when(r.days_left, korean=korean)})"
         text_lines.append(f"- {step} [{where}] {when} {r.url}")
         rows.append(

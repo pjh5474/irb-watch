@@ -12,6 +12,7 @@ from irb_watch.ai.factory import (
     build_agent_model,
     build_draft_writer,
     build_enricher,
+    build_session_finder,
     build_summarizer,
 )
 from irb_watch.ai.openai_summarizer import OpenAISummarizer
@@ -47,8 +48,10 @@ from irb_watch.db.pipeline_admin import SupabasePipelineSetupStore
 from irb_watch.db.pipelines import SupabasePipelineFiles, SupabasePipelineStore
 from irb_watch.db.project_access import SupabaseProjectAccessStore
 from irb_watch.db.reviews import SupabaseReviewStore
+from irb_watch.db.sessions import SupabaseSessionStore
 from irb_watch.db.sites import SupabaseSiteStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
+from irb_watch.db.tasks import SupabaseTaskStore
 from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
 from irb_watch.services.agent import AgentService
@@ -60,6 +63,7 @@ from irb_watch.services.ai_instructions import (
     summary_preview,
 )
 from irb_watch.services.alerts import AlertService
+from irb_watch.services.calendar import CalendarService
 from irb_watch.services.digest import DigestService
 from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
@@ -75,10 +79,12 @@ from irb_watch.services.project_access import ProjectAccessService
 from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
+from irb_watch.services.sessions import SessionService
 from irb_watch.services.sites import SiteService
 from irb_watch.services.source_login import cookies_for_source, login_site
 from irb_watch.services.sources import RBAY_ADAPTER, Source, SourceService
 from irb_watch.services.summaries import SummaryService
+from irb_watch.services.tasks import TaskService
 from irb_watch.services.token_login import FailureLimiter, TokenLoginService
 from irb_watch.services.users import UserService, UserStore
 from irb_watch.services.weekly import WeeklyStatsService
@@ -148,6 +154,51 @@ def get_pipeline_service() -> PipelineService:
         timezone=settings.scan_timezone,
         access=get_project_access_service(),
         sites=SupabaseSiteStore(client),
+        sessions=_session_service(),  # a step's target meeting (CAL-1)
+    )
+
+
+def _session_service(rules=None) -> SessionService:
+    """IRB sessions (CAL-1). `rules` (the pipeline service) is needed only for user proposals;
+    the pipeline service itself gets one without, so neither builds the other in a loop."""
+    client = get_supabase_client()
+    settings = get_settings()
+    hospitals = SupabaseHospitalStore(client)
+    finder = build_session_finder()
+    return SessionService(
+        SupabaseUserStore(client),
+        SupabaseSessionStore(client, runner=settings.app_env),
+        SupabaseAuditSink(client),
+        finder=finder,
+        runner=_session_job_runner() if finder is not None else None,
+        rules=rules,
+        hospital_exists=lambda hospital_id: hospitals.get(hospital_id) is not None,
+        timezone=settings.scan_timezone,
+    )
+
+
+def get_session_service() -> SessionService:
+    return _session_service(rules=get_pipeline_service())
+
+
+def get_task_service() -> TaskService:
+    return _task_service(get_pipeline_service())
+
+
+def _task_service(pipelines: PipelineService) -> TaskService:
+    client = get_supabase_client()
+    return TaskService(
+        SupabaseUserStore(client), SupabaseTaskStore(client), pipelines, SupabaseAuditSink(client),
+        timezone=get_settings().scan_timezone,
+    )
+
+
+def get_calendar_service() -> CalendarService:
+    settings = get_settings()
+    pipelines = get_pipeline_service()  # built once, shared with the task service
+    return CalendarService(
+        pipelines, _session_service(), _task_service(pipelines),
+        app_url=settings.app_url.strip(), timezone=settings.scan_timezone,
     )
 
 
@@ -164,6 +215,13 @@ def get_site_service() -> SiteService:
 def _job_runner() -> ThreadRunner:
     """One small worker pool for the whole process (AI drafts and revisions)."""
     return ThreadRunner(workers=2)
+
+
+@lru_cache
+def _session_job_runner() -> ThreadRunner:
+    """A separate one-worker pool for the IRB session searches (CAL-1), so a long search never
+    holds a draft worker. Searches queue behind each other."""
+    return ThreadRunner(workers=1, name="session-job")
 
 
 def get_draft_job_service() -> DraftJobService:
@@ -361,6 +419,7 @@ def get_alert_service() -> AlertService:
             unsubscribe_key=settings.unsubscribe_key.strip(),
             timezone=settings.scan_timezone,
             reminders=get_pipeline_service(),  # IRB step reminders (phase A2)
+            calendar=get_calendar_service(),  # cutoff and task lines (CAL-1)
         )
     return AlertService(
         SupabaseAlertStore(client),

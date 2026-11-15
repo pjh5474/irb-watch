@@ -75,6 +75,15 @@ class FakePipelineStore:
             and s.status_key not in skip_statuses
         ]
 
+    def targeted_steps(self, skip_statuses):
+        return [
+            s for s in self.step_rows.values()
+            if s.deleted_at is None and s.target_session_id is not None and s.status_key not in skip_statuses
+        ]
+
+    def hospitals_of_projects(self, project_ids):
+        return {p: set(self.project_hospitals.get(p, set())) for p in project_ids if p in self.project_hospitals}
+
     def get_pipeline(self, pipeline_id):
         return self.pipes.get(pipeline_id)
 

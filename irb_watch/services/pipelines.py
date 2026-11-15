@@ -60,6 +60,7 @@ from irb_watch.services.pipeline_admin import (
     StepType,
 )
 from irb_watch.services.project_access import NEEDS, REFUSALS
+from irb_watch.services.sessions import Session, SessionKind, target_warning
 from irb_watch.services.sites import Site, SiteStore, current_facts
 from irb_watch.services.users import UserStore, active_profile
 
@@ -111,6 +112,7 @@ class Step:
     sequence_no: int | None = None  # "2" in 2차 변경심의 (numbered step types)
     subject: str = ""  # what the step is about: "PT 2.0, CRF 1.1"
     result_key: str | None = None  # the IRB's answer (step_results); None: none yet
+    target_session_id: int | None = None  # the IRB meeting it aims for (CAL-1)
 
     @property
     def label(self) -> str:
@@ -224,6 +226,12 @@ class StepPage:
     step_types: list[StepType] = field(default_factory=list)  # live follow-up types, to add one
     suggested_status: str | None = None  # offered after a result (owner: the user confirms)
     needs_answer: bool = False  # the result asks for an answer: "Add follow-up" is highlighted
+    # CAL-1: the meeting the step aims for, the hospital's upcoming sessions and the hint
+    target_session: Session | None = None
+    sessions: list[Session] = field(default_factory=list)
+    suggested_session_id: int | None = None
+    target_warning: str | None = None  # cancelled | rejected | removed | unavailable
+    session_kinds: list[SessionKind] = field(default_factory=list)  # archived too (labels)
 
 
 @dataclass(frozen=True)
@@ -272,6 +280,17 @@ class WorkStep:
     required_missing: int = 0
     project_owner_id: str | None = None
     site_label: str = ""  # "01 · PI 김○○" (phase B2a; empty for an unnamed site)
+    site_id: int | None = None  # CAL-1: the calendar filters by site
+    target_session_id: int | None = None  # CAL-1: the meeting it aims for
+
+
+class SessionTargets(Protocol):
+    """services.sessions.SessionService: a step's target meeting (CAL-1)."""
+
+    def check_target(self, session_id: int, hospital_id: int) -> Session: ...
+    def upcoming_for(self, hospital_id: int) -> tuple[list[Session], Session | None]: ...
+    def get_many(self, session_ids: list[int]) -> dict[int, Session]: ...
+    def kinds(self, include_archived: bool = False) -> list[SessionKind]: ...
 
 
 class ProjectAccess(Protocol):
@@ -286,6 +305,10 @@ class PipelineStore(Protocol):
     # projects and hospitals
     def project_owner(self, project_id: int) -> str | None: ...
     def project_hospital_ids(self, project_id: int) -> set[int]: ...
+    def hospitals_of_projects(self, project_ids: list[int]) -> dict[int, set[int]]: ...
+    def targeted_steps(self, skip_statuses: list[str]) -> list[Step]:
+        """Live steps with a target meeting whose status is not in skip_statuses (CAL-1)."""
+        ...
     def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]: ...
     def projects_info(self, project_ids: list[int]) -> dict[int, tuple[str, str]]:
         """project id -> (name, owner id)."""
@@ -479,7 +502,9 @@ class PipelineService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         access: ProjectAccess | None = None,
         sites: SiteStore | None = None,
+        sessions: SessionTargets | None = None,
     ) -> None:
+        self._sessions = sessions
         self._sites = sites
         self._users = users
         self._store = store
@@ -714,6 +739,7 @@ class PipelineService:
         result = next((r for r in results if r.key == step.result_key), None)
         parent = next((s for s in steps if s.id == step.parent_step_id), None) if step.parent_step_id else None
         follow_ups = [s for s in steps if s.parent_step_id == step.id and s.deleted_at is None]
+        target, sessions, suggested, warning, kinds = self._step_sessions(pipeline, step)
         return StepPage(
             self._summaries(pipeline.project_id, [pipeline])[0],
             self._views([step])[0],
@@ -729,7 +755,35 @@ class PipelineService:
             # The step's own result counts even when the admin archived it since (as in
             # suggested_status): archiving stops new use, it does not change past answers.
             needs_answer=bool(result and result.needs_answer),
+            target_session=target,
+            sessions=sessions,
+            suggested_session_id=suggested,
+            target_warning=warning,
+            session_kinds=kinds,
         )
+
+    def _step_sessions(
+        self, pipeline: Pipeline, step: Step
+    ) -> tuple[Session | None, list[Session], int | None, str | None, list[SessionKind]]:
+        """The step's target meeting, the hospital's upcoming sessions, the hint and the kinds
+        (CAL-1). A failed read leaves them out with the warning 'unavailable' instead of failing
+        the page."""
+        if self._sessions is None:
+            return None, [], None, None, []
+        try:
+            target = (
+                self._sessions.get_many([step.target_session_id]).get(step.target_session_id)
+                if step.target_session_id is not None else None
+            )
+            sessions, hint = self._sessions.upcoming_for(pipeline.hospital_id)
+            kinds = self._sessions.kinds(include_archived=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("the sessions of step %s could not be read: %s", step.id, type(exc).__name__)
+            return None, [], None, "unavailable", []
+        warning = target_warning(target)
+        if step.target_session_id is not None and target is None:
+            warning = "removed"
+        return target, sessions, hint.id if hint is not None else None, warning, kinds
 
     # -- the hospital page (phase B2b) -------------------------------------------------------
 
@@ -790,9 +844,83 @@ class PipelineService:
                     bool(status and status.closed), s.due_on, s.submitted_on, s.decided_on,
                     len(view.checklist) if view else 0, view.required_missing if view else 0,
                     owner, labels.get(p.site_id, "") if p.site_id is not None else "",
+                    p.site_id, s.target_session_id,
                 )
             )
         return out
+
+    def calendar_steps(self, user_id: str) -> list[WorkStep]:
+        """Every live step of the live pipelines of the projects the user may work on (as the
+        work page), without reading documents. For the calendar (CAL-1)."""
+        return self.calendar_scope(user_id)[0]
+
+    def calendar_scope(self, user_id: str) -> tuple[list[WorkStep], list[int], dict[int, set[int]]]:
+        """The calendar's steps, its projects (workable_project_ids) and project -> hospitals
+        (workable_hospitals_by_project), reading the access rule and the pipelines once."""
+        self._user(user_id)
+        project_ids, pipelines = self._workable(user_id)
+        by_project = self._hospitals_by_project(project_ids, pipelines)
+        if not pipelines:
+            return [], project_ids, by_project
+        steps = [s for s in self._store.steps([p.id for p in pipelines]) if s.deleted_at is None]
+        return self._work_steps(pipelines, steps, {}), project_ids, by_project
+
+    def _workable(self, user_id: str) -> tuple[list[int], list[Pipeline]]:
+        """The projects the user may work on and their live pipelines."""
+        if self._access is not None:
+            project_ids = self._access.workable_project_ids(user_id)
+            return project_ids, self._store.live_pipelines_of_projects(project_ids) if project_ids else []
+        pipelines = self._store.live_pipelines_of_user(user_id)
+        return sorted({p.project_id for p in pipelines}), pipelines
+
+    def _hospitals_by_project(self, project_ids: list[int], pipelines: list[Pipeline]) -> dict[int, set[int]]:
+        if not project_ids:
+            return {}
+        out = {p: set(h) for p, h in self._store.hospitals_of_projects(project_ids).items()}
+        for p in pipelines:
+            out.setdefault(p.project_id, set()).add(p.hospital_id)
+        return out
+
+    def workable_project_ids(self, user_id: str) -> list[int]:
+        """The projects the calendar and the reminders cover (owner, manage, pm, edit)."""
+        if self._access is not None:
+            return self._access.workable_project_ids(user_id)
+        return sorted({p.project_id for p in self._store.live_pipelines_of_user(user_id)})
+
+    def workable_hospital_ids(self, user_id: str) -> set[int]:
+        """Hospitals of the projects the user may work on: in the project, or of one of its live
+        pipelines (a hospital may leave a project while its pipeline goes on). Who may propose
+        a session for a hospital (CAL-1), and the calendar's default hospitals."""
+        return set().union(set(), *self.workable_hospitals_by_project(user_id).values())
+
+    def workable_hospitals_by_project(self, user_id: str) -> dict[int, set[int]]:
+        """project -> its hospitals (in the project, or of one of its live pipelines), for the
+        projects the user may work on."""
+        project_ids = self.workable_project_ids(user_id)
+        if not project_ids:
+            return {}
+        return self._hospitals_by_project(project_ids, self._store.live_pipelines_of_projects(project_ids))
+
+    def project_owners(self, project_ids: list[int]) -> dict[int, tuple[str, str | None]]:
+        """project -> (name, owner id), for the calendar and the reminders."""
+        return {k: (v[0], v[1]) for k, v in self._store.projects_info(sorted(set(project_ids))).items()}
+
+    def project_pms(self, project_ids: list[int]) -> dict[int, str]:
+        return self._access.pms(sorted(set(project_ids))) if self._access is not None and project_ids else {}
+
+    def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]:
+        return self._store.hospital_names(sorted(set(hospital_ids))) if hospital_ids else {}
+
+    def cutoff_steps(self) -> list[WorkStep]:
+        """Live steps of live pipelines that aim for a meeting and are still open and not
+        submitted: the cutoff reminders (CAL-1). Documents are not read."""
+        closed = [s.key for s in self._setup.statuses(include_archived=True) if s.closed]
+        steps = self._store.targeted_steps(sorted({*closed, SUBMITTED}))
+        if not steps:
+            return []
+        pipelines = self._store.live_pipelines(sorted({s.pipeline_id for s in steps}))
+        live = {p.id for p in pipelines}
+        return self._work_steps(pipelines, [s for s in steps if s.pipeline_id in live and s.deleted_at is None], {})
 
     def work_steps(self, user_id: str) -> list[WorkStep]:
         """Every live step of the live pipelines of every project the user may work on (owner,
@@ -1046,6 +1174,25 @@ class PipelineService:
         pipeline = self._store.get_pipeline(step.pipeline_id) if step is not None else None
         return pipeline.site_id if pipeline is not None else None
 
+    def site_labels(self, site_ids: list[int]) -> dict[int, tuple[str, int]]:
+        """site -> (label, hospital id), for the calendar (the caller checked the projects)."""
+        if self._sites is None or not site_ids:
+            return {}
+        return {s.id: (s.label, s.hospital_id) for s in self._sites.sites(sorted(set(site_ids)))}
+
+    # -- for the tasks service (services/tasks.py TaskRules) ----------------------------------
+
+    def site_project(self, site_id: int) -> int | None:
+        site = self._sites.get_site(site_id) if self._sites is not None else None
+        return site.project_id if site is not None and site.deleted_at is None else None
+
+    def step_project(self, step_id: int) -> int | None:
+        step = self._store.get_step(step_id)
+        if step is None or step.deleted_at is not None:
+            return None
+        pipeline = self._store.get_pipeline(step.pipeline_id)
+        return pipeline.project_id if pipeline is not None else None
+
     # -- steps --------------------------------------------------------------------------------
 
     def add_step(
@@ -1110,8 +1257,9 @@ class PipelineService:
 
     def update_step(self, user_id: str, pipeline_id: int, step_id: int, changes: dict) -> Step:
         """`changes` holds only the fields sent: name, status_key, due_on, submitted_on,
-        decided_on, note (a date of None or "" clears it), and from phase B2b subject,
-        sequence_no (None clears it) and result_key (None clears it). Setting a result fills
+        decided_on, note (a date of None or "" clears it), from phase B2b subject,
+        sequence_no (None clears it) and result_key (None clears it), and from CAL-1
+        target_session_id (a session of the pipeline's hospital; None clears it). Setting a result fills
         the decision date when it is empty and not sent; the status is never changed by it
         (the page offers one, owner 2026-11-14)."""
         pipeline = self._pipeline(user_id, pipeline_id)
@@ -1135,6 +1283,13 @@ class PipelineService:
                 if "decided_on" not in changes and not step.decided_on:
                     values["decided_on"] = self._today()
             values["result_key"] = key
+        if "target_session_id" in changes and changes["target_session_id"] != step.target_session_id:
+            target = changes["target_session_id"]
+            if target is not None:
+                if self._sessions is None:
+                    raise ConflictError("IRB sessions are not set up on this server")
+                self._sessions.check_target(int(target), pipeline.hospital_id)
+            values["target_session_id"] = target
         if "note" in changes:
             note = (changes["note"] or "").strip()
             if len(note) > MAX_NOTE:

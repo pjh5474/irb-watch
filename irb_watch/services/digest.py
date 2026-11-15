@@ -85,6 +85,16 @@ class ReminderSource(Protocol):
     def reminder_steps(self, until: str) -> dict[str, list[WorkStep]]: ...
 
 
+class CalendarReminders(Protocol):
+    """services.calendar.CalendarService: today's cutoff and task lines per recipient (CAL-1).
+    Never raises for a broken part; it logs, calls on_failure with the part's name, and leaves
+    that part out."""
+
+    def reminder_lines(
+        self, on_failure: Callable[[str], None] | None = None,
+    ) -> dict[str, list[t.DigestReminder]]: ...
+
+
 def _dt(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
@@ -103,8 +113,10 @@ class DigestService:
         timezone: str = "Asia/Seoul",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         reminders: ReminderSource | None = None,
+        calendar: CalendarReminders | None = None,
     ) -> None:
         self._reminders = reminders
+        self._calendar = calendar
         self._store = store
         self._mailer = mailer
         self._audit = audit
@@ -133,12 +145,15 @@ class DigestService:
             log.warning("the digest read %d cards (the limit); older ones may be missing", MAX_CARDS)
         sources = {s.id: s for s in self._store.sources()}
         memberships = self._store.memberships()
-        due = self._due_steps(now) if any(u.reminders_enabled for u in users) else {}
+        wants = any(u.reminders_enabled for u in users)
+        due = self._due_steps(now) if wants else {}
+        lines = self._calendar_lines() if wants else {}
 
         for user in users:
             try:
                 outcome = self._digest_one(
-                    user, since[user.id], now, day, cards, sources, memberships, due.get(user.id, []), counts
+                    user, since[user.id], now, day, cards, sources, memberships, due.get(user.id, []), counts,
+                    lines.get(user.id, []),
                 )
             except Exception:  # one user must never stop the others
                 log.exception("the digest crashed for one user")
@@ -169,6 +184,27 @@ class DigestService:
                 log.exception("the reminder failure could not be written to the audit log")
             return {}
 
+    def _calendar_lines(self) -> dict[str, list[t.DigestReminder]]:
+        """Cutoff and task lines (CAL-1). A failure leaves them out of today's mails (logged)."""
+        if self._calendar is None:
+            return {}
+        try:
+            return self._calendar.reminder_lines(on_failure=self._calendar_failed)
+        except Exception:
+            log.exception("the calendar reminders could not be read; today's mails go without them")
+            self._calendar_failed("all")
+            return {}
+
+    def _calendar_failed(self, part: str) -> None:
+        """Tell admins (audit log) that today's mails go without some calendar lines."""
+        try:  # best effort: a failing audit write must not stop the document news
+            self._audit.record(
+                "admin", "mail.reminders_failed", None, title="IRB calendar reminders could not be read",
+                payload={"calendar": part},
+            )
+        except Exception:
+            log.exception("the calendar reminder failure could not be written to the audit log")
+
     # -- one user ---------------------------------------------------------------------------------
 
     @staticmethod
@@ -189,6 +225,7 @@ class DigestService:
         memberships: dict[str, set[int]],
         due_steps: list[WorkStep],
         counts: dict[str, int],
+        calendar_lines: list[t.DigestReminder] | None = None,
     ) -> str:
         readable = (
             set(sources)
@@ -207,6 +244,7 @@ class DigestService:
                 )
                 for w, left in reminders_for(due_steps, now.astimezone(self._tz).date())
             ]
+            reminders += calendar_lines or []  # cutoffs and tasks (CAL-1), the same switch
         # One entry per document: the newest title, and the most telling kind of its events.
         docs: dict[int, tuple[int, str, str, int, datetime]] = {}  # id -> (order, kind, title, source, newest)
         for card in cards if user.enabled else ():

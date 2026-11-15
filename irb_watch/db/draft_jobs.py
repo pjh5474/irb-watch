@@ -116,8 +116,8 @@ class ThreadRunner:
     """A small pool inside the API process. A separate worker can replace it later: the queue
     is the table, the runner only decides where the work runs."""
 
-    def __init__(self, workers: int = 2) -> None:
-        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="draft-job")
+    def __init__(self, workers: int = 2, name: str = "draft-job") -> None:
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
 
     def submit(self, work: Callable[[], None]) -> None:
         self._pool.submit(work)

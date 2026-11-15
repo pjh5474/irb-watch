@@ -1,12 +1,13 @@
 """Supabase-backed store and file bucket for services.pipelines."""
 
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from postgrest.exceptions import APIError
 from supabase import Client
 
+from irb_watch.db.paging import chunks as _chunks
+from irb_watch.db.paging import paged as _paged
 from irb_watch.services.pipelines import (
     DocVersion,
     Event,
@@ -24,7 +25,7 @@ FOREIGN_KEY_VIOLATION = "23503"
 BUCKET = "pipeline-files"
 _STEP_COLUMNS = (
     "id, pipeline_id, step_type_id, name, position, status_key, due_on, submitted_on, decided_on, "
-    "note, deleted_at, updated_at, parent_step_id, sequence_no, subject, result_key"
+    "note, deleted_at, updated_at, parent_step_id, sequence_no, subject, result_key, target_session_id"
 )
 _VERSION_COLUMNS = (
     "id, document_id, version_no, filename, storage_path, sha256, size_bytes, has_text, text_note, created_at"
@@ -48,6 +49,7 @@ def _step(r: dict) -> Step:
         parent_step_id=int(r["parent_step_id"]) if r.get("parent_step_id") is not None else None,
         sequence_no=int(r["sequence_no"]) if r.get("sequence_no") is not None else None,
         subject=r.get("subject") or "", result_key=r.get("result_key"),
+        target_session_id=int(r["target_session_id"]) if r.get("target_session_id") is not None else None,
     )
 
 
@@ -63,26 +65,6 @@ def _version(r: dict) -> DocVersion:
 def _unique(exc: APIError) -> bool:
     return exc.code == UNIQUE_VIOLATION
 
-
-_PAGE = 1000
-_IN_CHUNK = 200  # ids per `in` filter, so the request address stays short
-
-
-def _chunks(ids: list[int]) -> list[list[int]]:
-    return [ids[i : i + _IN_CHUNK] for i in range(0, len(ids), _IN_CHUNK)]
-
-
-def _paged(make_query: Callable[[], Any]) -> list[dict]:
-    """Every row of an ordered query: the API answers at most 1,000 rows per request, and a cut
-    answer would look like real data."""
-    out: list[dict] = []
-    start = 0
-    while True:
-        rows = make_query().range(start, start + _PAGE - 1).execute().data
-        out += rows
-        if len(rows) < _PAGE:
-            return out
-        start += _PAGE
 
 
 class SupabasePipelineStore:
@@ -164,6 +146,29 @@ class SupabasePipelineStore:
 
         rows = _paged(query)
         return [_step(r) for r in rows]
+
+    def targeted_steps(self, skip_statuses: list[str]) -> list[Step]:
+        def query():
+            q = (
+                self._c.table("pipeline_steps").select(_STEP_COLUMNS).not_.is_("target_session_id", "null")
+                .is_("deleted_at", "null")
+            )
+            if skip_statuses:
+                q = q.not_.in_("status_key", skip_statuses)
+            return q.order("id")
+
+        return [_step(r) for r in _paged(query)]
+
+    def hospitals_of_projects(self, project_ids: list[int]) -> dict[int, set[int]]:
+        out: dict[int, set[int]] = {}
+        for chunk in _chunks(sorted(set(project_ids))):
+            rows = (
+                self._c.table("project_hospitals").select("project_id, hospital_id").in_("project_id", chunk)
+                .execute().data
+            )
+            for r in rows:
+                out.setdefault(int(r["project_id"]), set()).add(int(r["hospital_id"]))
+        return out
 
     def get_pipeline(self, pipeline_id: int) -> Pipeline | None:
         rows = self._c.table("pipelines").select("*").eq("id", pipeline_id).limit(1).execute().data
