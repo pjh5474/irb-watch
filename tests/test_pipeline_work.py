@@ -1,6 +1,5 @@
 """IRB pipeline phase A2: the work page and the IRB step reminders in the daily mail (offline)."""
 
-from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -96,11 +95,12 @@ def test_work_lists():
 
 def test_work_steps_are_the_users_own_live_steps_with_names_and_checklist_counts():
     service, store, _, setup_store, *_ = make()
-    setup_store.types[1] = replace(setup_store.types[1], required_documents=("Protocol", "Consent"))
+    setup_store.add_kinds(1, ["Protocol", "Consent"])
     mine = service.start("u1", 1, 4)
     service.start("u2", 2, 4)
     steps = sorted(store.steps([mine.id]), key=lambda s: s.position)
-    service.upload("u1", mine.id, steps[0].id, "Protocol", "p.xlsx", b"abc")
+    doc, _ = service.upload("u1", mine.id, steps[0].id, "Protocol", "p.xlsx", b"abc")
+    service.update_document("u1", mine.id, steps[0].id, doc.id, {"status": "final"})  # phase C1: done = final
     service.remove_step("u1", mine.id, steps[3].id)
     work = service.work_steps("u1")
     assert [w.step_id for w in sorted(work, key=lambda w: w.step_id)] == [s.id for s in steps[:3]]

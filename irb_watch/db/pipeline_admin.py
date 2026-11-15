@@ -5,7 +5,10 @@ from datetime import UTC, datetime
 from postgrest.exceptions import APIError
 from supabase import Client
 
+from irb_watch.db.paging import paged
 from irb_watch.services.pipeline_admin import (
+    DocumentKind,
+    DocumentKindEdit,
     NameTakenError,
     PipelineTemplate,
     StepResult,
@@ -17,8 +20,18 @@ from irb_watch.services.pipeline_admin import (
 UNIQUE_VIOLATION = "23505"
 _TYPE_COLUMNS = (
     "id, name, description, instructions, guide_ids, form_template_id, input_earlier_steps, "
-    "input_board_documents, required_documents, archived_at, updated_at, category, numbered"
+    "input_board_documents, archived_at, updated_at, category, numbered"
 )
+_KIND_COLUMNS = "id, step_type_id, hospital_id, name, section, origin, required, position, archived_at"
+
+
+def _kind(row: dict) -> DocumentKind:
+    return DocumentKind(
+        id=int(row["id"]), step_type_id=int(row["step_type_id"]),
+        hospital_id=int(row["hospital_id"]) if row.get("hospital_id") is not None else None,
+        name=row["name"], section=row["section"], origin=row["origin"], required=bool(row["required"]),
+        position=int(row["position"]), archived_at=row.get("archived_at"),
+    )
 
 
 def _result(row: dict) -> StepResult:
@@ -52,7 +65,6 @@ def _type(row: dict) -> StepType:
         form_template_id=row.get("form_template_id"),
         input_earlier_steps=bool(row.get("input_earlier_steps")),
         input_board_documents=bool(row.get("input_board_documents")),
-        required_documents=tuple(row.get("required_documents") or []),
         archived_at=row.get("archived_at"),
         updated_at=row.get("updated_at") or "",
         category=row.get("category") or "other",
@@ -136,7 +148,6 @@ class SupabasePipelineSetupStore:
                     "form_template_id": edit.form_template_id,
                     "input_earlier_steps": edit.input_earlier_steps,
                     "input_board_documents": edit.input_board_documents,
-                    "required_documents": edit.required_documents,
                     "category": edit.category,
                     "numbered": edit.numbered,
                     "updated_by": actor_id,
@@ -205,3 +216,39 @@ class SupabasePipelineSetupStore:
     def hospital_exists(self, hospital_id: int) -> bool:
         rows = self._c.table("hospitals").select("id").eq("id", hospital_id).limit(1).execute().data
         return bool(rows)
+
+    # document lists (phase C1)
+    def document_kinds(self, step_type_ids: list[int] | None = None) -> list[DocumentKind]:
+        def query():
+            q = self._c.table("step_type_documents").select(_KIND_COLUMNS)
+            return (q.in_("step_type_id", step_type_ids) if step_type_ids is not None else q).order("id")
+
+        if step_type_ids is not None and not step_type_ids:
+            return []
+        return [_kind(r) for r in paged(query)]
+
+    def save_document_kinds(
+        self, step_type_id: int, hospital_id: int | None, rows: list[DocumentKindEdit], actor_id: str
+    ) -> None:
+        payload = [
+            {"id": r.id, "name": r.name, "section": r.section, "origin": r.origin, "required": r.required}
+            for r in rows
+        ]
+        try:
+            self._c.rpc(
+                "save_step_type_documents",
+                {"p_step_type_id": step_type_id, "p_hospital_id": hospital_id, "p_rows": payload, "p_actor": actor_id},
+            ).execute()
+        except APIError as exc:
+            if exc.code == "P0001":
+                raise LookupError("a row is not in this list") from exc
+            if exc.code == UNIQUE_VIOLATION:
+                raise NameTakenError from exc
+            raise
+
+    def delete_document_kinds(self, step_type_id: int, hospital_id: int) -> int:
+        rows = (
+            self._c.table("step_type_documents").delete().eq("step_type_id", step_type_id)
+            .eq("hospital_id", hospital_id).execute().data
+        )
+        return len(rows)

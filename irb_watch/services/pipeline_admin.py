@@ -17,6 +17,14 @@ Rules (owner, 2026-11-11; see docs/decisions.md "IRB pipeline: admin setup"):
     no repeats. A per-hospital list can be removed (the hospital then uses the global one); the
     global list cannot. A new pipeline copies the matching list (phase 2), so later edits do not
     change existing pipelines.
+
+Phase C1 (owner, 2026-11-15; decisions.md "IRB pipeline phase C1: document lists and slots"):
+  * Document lists replace a step type's required documents: per step type a global list and
+    optional per-hospital lists, like the step order. A hospital has its own list once one is
+    saved for it (even an empty one = "no documents"); removing it goes back to the global
+    list. A list is saved whole: name (unique in the list, any case), section, origin,
+    required; at most 50 rows. Documents from the IRB (section `received`) and reference
+    documents are never required. A new step copies the matching list (its slots).
 """
 
 import re
@@ -33,9 +41,13 @@ MAX_LABEL_CHARS = 60
 MAX_NAME_CHARS = 100
 MAX_DESCRIPTION_CHARS = 1000
 MAX_INSTRUCTIONS_CHARS = 4000
-MAX_REQUIRED_DOCS = 50
-MAX_REQUIRED_DOC_CHARS = 200
+MAX_DOCUMENT_KINDS = 50  # rows of one document list (the old checklist limit)
+MAX_DOCUMENT_NAME_CHARS = 200
 MAX_GUIDES = 20
+# Document slots (phase C1): where a document sits in a step, and what the slot offers first.
+SECTIONS = ("application", "submission", "received", "reference")
+ORIGINS = ("draft", "upload", "library", "received")
+NEVER_REQUIRED = ("received", "reference")  # sections whose documents never count as required
 MAX_TEMPLATE_STEPS = 30
 _KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 # Step type categories (phase B2b); follow_up types answer another step and are never in a
@@ -63,7 +75,6 @@ class StepType:
     form_template_id: int | None = None
     input_earlier_steps: bool = True
     input_board_documents: bool = False
-    required_documents: tuple[str, ...] = ()
     archived_at: str | None = None
     updated_at: str = ""
     category: str = "other"
@@ -94,9 +105,43 @@ class StepTypeEdit:
     form_template_id: int | None = None
     input_earlier_steps: bool = True
     input_board_documents: bool = False
-    required_documents: list[str] = field(default_factory=list)
     category: str = "other"
     numbered: bool = False
+
+
+@dataclass(frozen=True)
+class DocumentKind:
+    """One row of a step type's document list (phase C1). hospital_id None: the global list."""
+
+    id: int
+    step_type_id: int
+    hospital_id: int | None
+    name: str
+    section: str
+    origin: str
+    required: bool
+    position: int
+    archived_at: str | None = None
+
+
+@dataclass(frozen=True)
+class DocumentKindEdit:
+    """A row as the admin saves it: id of a row of the same list to keep it, else None (new)."""
+
+    name: str
+    section: str = "submission"
+    origin: str = "upload"
+    required: bool = False
+    id: int | None = None
+
+
+@dataclass(frozen=True)
+class DocumentLists:
+    """A step type's lists: the global one and each hospital's own (live rows, in order)."""
+
+    step_type_id: int
+    global_list: list[DocumentKind]
+    hospitals: dict[int, list[DocumentKind]]
 
 
 @dataclass(frozen=True)
@@ -130,6 +175,19 @@ class PipelineSetupStore(Protocol):
     def live_guide_ids(self, ids: list[int]) -> set[int]: ...
     def form_template_ready(self, template_id: int) -> bool: ...
     def hospital_exists(self, hospital_id: int) -> bool: ...
+    # document lists (phase C1)
+    def document_kinds(self, step_type_ids: list[int] | None = None) -> list[DocumentKind]:
+        """Every row (archived ones too) of the given step types' lists; None: all types."""
+        ...
+    def save_document_kinds(
+        self, step_type_id: int, hospital_id: int | None, rows: list[DocumentKindEdit], actor_id: str
+    ) -> None:
+        """Replaces the live list in one statement (rows in order); LookupError when an id is
+        not a row of this list."""
+        ...
+    def delete_document_kinds(self, step_type_id: int, hospital_id: int) -> int:
+        """Deletes one hospital's list (back to global); returns the rows deleted."""
+        ...
 
 
 def _text(value: str, limit: int, what: str, *, required: bool = False) -> str:
@@ -351,13 +409,6 @@ class PipelineSetupService:
             raise ValidationError(f"guides not found or archived: {sorted(missing)}")
         if edit.form_template_id is not None and not self._store.form_template_ready(edit.form_template_id):
             raise ValidationError("the form template does not exist, is archived or its fields are not checked yet")
-        docs = []
-        for doc in edit.required_documents:
-            doc = _name(doc, MAX_REQUIRED_DOC_CHARS, "required document name") if doc.strip() else ""
-            if doc and doc.lower() not in (d.lower() for d in docs):
-                docs.append(doc)
-        if len(docs) > MAX_REQUIRED_DOCS:
-            raise ValidationError(f"at most {MAX_REQUIRED_DOCS} required documents")
         if edit.category not in CATEGORIES:
             raise ValidationError(f"the category must be one of {', '.join(CATEGORIES)}")
         return StepTypeEdit(
@@ -368,7 +419,6 @@ class PipelineSetupService:
             form_template_id=edit.form_template_id,
             input_earlier_steps=edit.input_earlier_steps,
             input_board_documents=edit.input_board_documents,
-            required_documents=docs,
             category=edit.category,
             numbered=edit.numbered,
         )
@@ -408,7 +458,6 @@ class PipelineSetupService:
             "form_template_id": edit.form_template_id,
             "input_earlier_steps": edit.input_earlier_steps,
             "input_board_documents": edit.input_board_documents,
-            "required_documents": edit.required_documents,
             "category": edit.category,
             "numbered": edit.numbered,
             "updated_at": self._clock().isoformat(),
@@ -508,3 +557,118 @@ class PipelineSetupService:
             actor_id, "pipeline.template_deleted", f"Step order for hospital #{hospital_id} removed",
             {"hospital_id": hospital_id},
         )
+
+    # -- document lists (phase C1) ------------------------------------------------------------
+
+    @staticmethod
+    def _live_lists(rows: list[DocumentKind]) -> tuple[list[DocumentKind], dict[int, list[DocumentKind]]]:
+        """(global live rows, hospital -> live rows) in order. A hospital with rows (even only
+        archived ones) has its own list."""
+        def key(k: DocumentKind) -> tuple[int, int]:
+            return (k.position, k.id)
+
+        global_list = sorted((k for k in rows if k.hospital_id is None and k.archived_at is None), key=key)
+        hospitals: dict[int, list[DocumentKind]] = {}
+        for k in rows:
+            if k.hospital_id is not None:
+                hospitals.setdefault(k.hospital_id, [])
+                if k.archived_at is None:
+                    hospitals[k.hospital_id].append(k)
+        return global_list, {h: sorted(v, key=key) for h, v in hospitals.items()}
+
+    def document_lists(self, step_type_id: int) -> DocumentLists:
+        self.get_step_type(step_type_id)
+        return self._lists(step_type_id)
+
+    def _lists(self, step_type_id: int, rows: list[DocumentKind] | None = None) -> DocumentLists:
+        global_list, hospitals = self._live_lists(
+            self._store.document_kinds([step_type_id]) if rows is None else rows
+        )
+        return DocumentLists(step_type_id, global_list, hospitals)
+
+    def document_kinds_for(self, step_type_ids: list[int], hospital_id: int | None) -> dict[int, list[DocumentKind]]:
+        """step type -> the live list a new step at this hospital copies: the hospital's own list
+        for the type if it has one, else the global one. One read for all the types."""
+        ids = sorted(set(step_type_ids))
+        if not ids:
+            return {}
+        by_type: dict[int, list[DocumentKind]] = {}
+        for k in self._store.document_kinds(ids):
+            by_type.setdefault(k.step_type_id, []).append(k)
+        out = {}
+        for tid in ids:
+            global_list, hospitals = self._live_lists(by_type.get(tid, []))
+            out[tid] = hospitals[hospital_id] if hospital_id is not None and hospital_id in hospitals else global_list
+        return out
+
+    @staticmethod
+    def _clean_kinds(
+        existing: list[DocumentKind], hospital_id: int | None, rows: list[DocumentKindEdit]
+    ) -> list[DocumentKindEdit]:
+        """The one place the "never required" rule is applied: slots copy the list's flag."""
+        if len(rows) > MAX_DOCUMENT_KINDS:
+            raise ValidationError(f"a document list may have at most {MAX_DOCUMENT_KINDS} rows")
+        own = {k.id for k in existing if k.hospital_id == hospital_id}
+        if hospital_id is not None and not rows:
+            # owner 2026-11-15: refused rather than an empty own list (a hospital without rows
+            # uses the global list, so an empty first save would silently change nothing).
+            raise ValidationError(
+                "a hospital list needs at least one document; to use the global list, remove the "
+                "hospital's list, and in a step mark documents not needed"
+            )
+        seen: set[str] = set()
+        ids: set[int] = set()
+        out = []
+        for row in rows:
+            name = _name(row.name, MAX_DOCUMENT_NAME_CHARS, "document name")
+            if name.lower() in seen:
+                raise ValidationError(f"{name} is in the list twice")
+            seen.add(name.lower())
+            if row.section not in SECTIONS:
+                raise ValidationError(f"the section must be one of {', '.join(SECTIONS)}")
+            if row.origin not in ORIGINS:
+                raise ValidationError(f"the origin must be one of {', '.join(ORIGINS)}")
+            if row.id is not None:
+                if row.id not in own or row.id in ids:
+                    raise ValidationError("a row of another list was sent; reload the page")
+                ids.add(row.id)
+            out.append(DocumentKindEdit(
+                name, row.section, row.origin, bool(row.required) and row.section not in NEVER_REQUIRED, row.id,
+            ))
+        return out
+
+    def save_document_kinds(
+        self, actor_id: str, step_type_id: int, hospital_id: int | None, rows: list[DocumentKindEdit]
+    ) -> DocumentLists:
+        """Saves one list whole. For a hospital without a list this makes its own list: the
+        admin page sends the global rows without their ids (an id must be a row of the list
+        being saved)."""
+        stype = self.get_step_type(step_type_id)
+        if stype.archived_at is not None:
+            raise ConflictError("this step type is archived; restore it first")
+        if hospital_id is not None and not self._store.hospital_exists(hospital_id):
+            raise NotFoundError("hospital not found")
+        rows = self._clean_kinds(self._store.document_kinds([step_type_id]), hospital_id, rows)
+        try:
+            self._store.save_document_kinds(step_type_id, hospital_id, rows, actor_id)
+        except LookupError as exc:
+            raise ConflictError("the list was changed at the same moment; reload the page") from exc
+        except NameTakenError as exc:
+            raise ConflictError("a document name is in the list twice") from exc
+        self._record(
+            actor_id, "pipeline.documents_saved",
+            f"Documents of {stype.name} saved" + ("" if hospital_id is None else f" for hospital #{hospital_id}"),
+            {"step_type_id": step_type_id, "hospital_id": hospital_id, "names": [r.name for r in rows]},
+        )
+        return self._lists(step_type_id)  # read again: new rows have their ids now
+
+    def delete_document_kinds(self, actor_id: str, step_type_id: int, hospital_id: int) -> DocumentLists:
+        """The hospital goes back to the global list for this step type."""
+        stype = self.get_step_type(step_type_id)
+        if not self._store.delete_document_kinds(step_type_id, hospital_id):
+            raise NotFoundError("this hospital has no document list of its own for this step type")
+        self._record(
+            actor_id, "pipeline.documents_deleted", f"Documents of {stype.name} for hospital #{hospital_id} removed",
+            {"step_type_id": step_type_id, "hospital_id": hospital_id},
+        )
+        return self._lists(step_type_id)

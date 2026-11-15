@@ -25,6 +25,8 @@ from irb_watch.services.errors import ValidationError
 from irb_watch.services.pipeline_admin import StepResult, StepStatus, StepType
 from irb_watch.services.pipelines import (
     MAX_DOC_NAME,
+    MAX_DOC_NOTE,
+    MAX_DOCUMENTS,
     MAX_NOTE,
     MAX_STEP_NAME,
     MAX_SUBJECT,
@@ -99,17 +101,27 @@ class VersionOut(BaseModel):
 
 
 class DocumentOut(BaseModel):
+    """A document slot (phase C1). listed: copied from the step type's list (its name and
+    section stay); otherwise the user's own."""
+
     id: int
     name: str
     created_at: str
     deleted_at: str | None
     versions: list[VersionOut]
+    listed: bool = False
+    section: str = "submission"
+    origin: str = "upload"
+    required: bool = False
+    status: str = "needed"
+    note: str = ""
 
     @classmethod
     def of(cls, d: StepDocument) -> "DocumentOut":
         return cls(
             id=d.id, name=d.name, created_at=d.created_at, deleted_at=d.deleted_at,
-            versions=[VersionOut.of(v) for v in d.versions],
+            versions=[VersionOut.of(v) for v in d.versions], listed=d.listed,
+            section=d.section, origin=d.origin, required=d.required, status=d.status, note=d.note,
         )
 
 
@@ -163,8 +175,8 @@ class OverviewStepOut(StepOut):
     """A step row of the overview: counts only, no documents (they are on the step page)."""
 
     documents: int  # live documents with at least one file
-    required: int  # checklist names of the step type
-    required_missing: int
+    required: int  # required slots (phase C1)
+    required_missing: int  # required slots not final and not marked not needed
     drafts: int  # the user's drafts made in this step
     open_jobs: int  # draft jobs queued or running for this step
 
@@ -179,7 +191,9 @@ class OverviewStepOut(StepOut):
 
 class ChecklistOut(BaseModel):
     name: str
-    uploaded: bool
+    done: bool  # final or not needed (phase C1)
+    status: str
+    document_id: int | None
 
 
 class StatusOut(BaseModel):
@@ -333,8 +347,31 @@ class UploadFileIn(BaseModel):
 
 
 class UploadIn(BaseModel):
-    name: str = Field(max_length=MAX_DOC_NAME + 50)
+    """Into a slot (document_id), or by name (the slot of that name, else a new one of the
+    user's in `section`)."""
+
+    name: str = Field("", max_length=MAX_DOC_NAME + 50)
     file: UploadFileIn
+    document_id: int | None = None
+    section: str | None = Field(None, max_length=20)
+
+
+class DocumentIn(BaseModel):
+    name: str = Field(max_length=MAX_DOC_NAME + 50)
+    section: str = Field("submission", max_length=20)
+
+
+class DocumentPatch(BaseModel):
+    """Only the fields sent change (a null name or section is refused by the service)."""
+
+    name: str | None = Field(None, max_length=MAX_DOC_NAME + 50)
+    section: str | None = Field(None, max_length=20)
+    note: str | None = Field(None, max_length=MAX_DOC_NOTE + 100)
+    status: str | None = Field(None, max_length=20)
+
+
+class DocumentOrderIn(BaseModel):
+    document_ids: list[int] = Field(max_length=MAX_DOCUMENTS + 10)
 
 
 class UploadOut(BaseModel):
@@ -476,7 +513,9 @@ def step_page(
         pipeline=PipelineOut.of(page.summary),
         step=StepOut.of(v.step, v.step_type_name),
         documents=[DocumentOut.of(d) for d in v.documents],
-        checklist=[ChecklistOut(name=c.name, uploaded=c.uploaded) for c in v.checklist],
+        checklist=[
+            ChecklistOut(name=c.name, done=c.done, status=c.status, document_id=c.document_id) for c in v.checklist
+        ],
         drafts=[DraftOut.of(d, user.id, names) for d in drafts],
         jobs=[JobOut.of(j, user.id, names) for j in step_jobs],
         previous_step_id=page.previous_step_id,
@@ -644,8 +683,39 @@ def upload_document(
     user: AuthUser = Depends(current_user),
     service: Service = Depends(get_pipeline_service),
 ) -> UploadOut:
-    doc, version = service.upload(user.id, pipeline_id, step_id, body.name, body.file.filename, _decode(body.file))
+    doc, version = service.upload(
+        user.id, pipeline_id, step_id, body.name, body.file.filename, _decode(body.file),
+        document_id=body.document_id, section=body.section,
+    )
     return UploadOut(document=DocumentOut.of(doc), version_no=version.version_no)
+
+
+@router.post("/pipelines/{pipeline_id}/steps/{step_id}/document-slots", status_code=201, response_model=DocumentOut)
+def add_document(
+    pipeline_id: int, step_id: int, body: DocumentIn,
+    user: AuthUser = Depends(current_user), service: Service = Depends(get_pipeline_service),
+) -> DocumentOut:
+    """A document of the user's own, without a file yet (phase C1)."""
+    return DocumentOut.of(service.add_document(user.id, pipeline_id, step_id, body.name, body.section))
+
+
+@router.patch("/pipelines/{pipeline_id}/steps/{step_id}/documents/{document_id}", response_model=DocumentOut)
+def update_document(
+    pipeline_id: int, step_id: int, document_id: int, body: DocumentPatch,
+    user: AuthUser = Depends(current_user), service: Service = Depends(get_pipeline_service),
+) -> DocumentOut:
+    changes = {k: getattr(body, k) for k in body.model_fields_set}
+    if any(changes.get(k, "") is None for k in ("name", "section", "status")):
+        raise ValidationError("name, section and status cannot be null")
+    return DocumentOut.of(service.update_document(user.id, pipeline_id, step_id, document_id, changes))
+
+
+@router.put("/pipelines/{pipeline_id}/steps/{step_id}/documents/order", response_model=list[DocumentOut])
+def reorder_documents(
+    pipeline_id: int, step_id: int, body: DocumentOrderIn,
+    user: AuthUser = Depends(current_user), service: Service = Depends(get_pipeline_service),
+) -> list[DocumentOut]:
+    return [DocumentOut.of(d) for d in service.reorder_documents(user.id, pipeline_id, step_id, body.document_ids)]
 
 
 @router.post(

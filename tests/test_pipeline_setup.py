@@ -84,7 +84,6 @@ def edit(**changes) -> StepTypeEdit:
         "form_template_id": 20,
         "input_earlier_steps": True,
         "input_board_documents": False,
-        "required_documents": [" 보고서 ", "보고서", "", "CIOMS"],
     }
     return StepTypeEdit(**{**base, **changes})
 
@@ -93,7 +92,6 @@ def test_create_cleans_values_and_checks_guides_and_form():
     service, store, audit = make()
     created = service.create_step_type("admin", edit())
     assert created.guide_ids == (10, 11)
-    assert created.required_documents == ("보고서", "CIOMS")
     assert store.updated_by[created.id] == "admin"
     assert audit.entries[-1]["event_type"] == "pipeline.step_type_created"
     with pytest.raises(ConflictError):
@@ -217,11 +215,11 @@ def test_api_statuses(api):
 
 def test_api_step_types(api):
     client, _ = api
-    body = {"name": "안전성 보고", "instructions": "x", "guide_ids": [10], "required_documents": ["CIOMS"]}
+    body = {"name": "안전성 보고", "instructions": "x", "guide_ids": [10]}
     r = client.post("/admin/pipeline/step-types", headers=ADMIN, json=body)
     assert r.status_code == 201
     created = r.json()
-    assert created["guide_ids"] == [10] and created["required_documents"] == ["CIOMS"]
+    assert created["guide_ids"] == [10] and "required_documents" not in created
     r = client.put(f"/admin/pipeline/step-types/{created['id']}", headers=ADMIN, json={**body, "form_template_id": 21})
     assert r.status_code == 422 and "form" in r.json()["detail"]
     assert client.post("/admin/pipeline/step-types/1/archive", headers=ADMIN).status_code == 409

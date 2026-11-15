@@ -181,7 +181,7 @@ def test_follow_up_rules(env):
 def test_the_database_refusal_of_a_parent_is_a_clear_conflict(env, monkeypatch):
     pipeline, steps = env.pipeline()
 
-    def refuse(pipeline_id, values):
+    def refuse(pipeline_id, values, documents=None):
         raise StepParentError("a follow-up step answers a main step, not another follow-up")
 
     monkeypatch.setattr(env.pstore, "add_step", refuse)

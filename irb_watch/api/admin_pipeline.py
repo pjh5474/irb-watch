@@ -9,9 +9,14 @@ from irb_watch.api.deps import get_pipeline_setup_service, require_admin
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.services.pipeline_admin import (
     MAX_DESCRIPTION_CHARS,
+    MAX_DOCUMENT_KINDS,
+    MAX_DOCUMENT_NAME_CHARS,
     MAX_INSTRUCTIONS_CHARS,
     MAX_LABEL_CHARS,
     MAX_NAME_CHARS,
+    DocumentKind,
+    DocumentKindEdit,
+    DocumentLists,
     PipelineSetupService,
     PipelineTemplate,
     StepResult,
@@ -83,7 +88,6 @@ class StepTypeOut(BaseModel):
     form_template_id: int | None
     input_earlier_steps: bool
     input_board_documents: bool
-    required_documents: list[str]
     archived_at: str | None
     updated_at: str
     category: str
@@ -91,9 +95,7 @@ class StepTypeOut(BaseModel):
 
     @classmethod
     def of(cls, t: StepType) -> "StepTypeOut":
-        return cls(
-            **{**t.__dict__, "guide_ids": list(t.guide_ids), "required_documents": list(t.required_documents)}
-        )
+        return cls(**{**t.__dict__, "guide_ids": list(t.guide_ids)})
 
 
 class StepTypeIn(BaseModel):
@@ -104,7 +106,6 @@ class StepTypeIn(BaseModel):
     form_template_id: int | None = None
     input_earlier_steps: bool = True
     input_board_documents: bool = False
-    required_documents: list[str] = Field(default_factory=list, max_length=100)
     # One list of categories: the service checks it (services.pipeline_admin.CATEGORIES, 422).
     category: str = Field("other", max_length=40)
     numbered: bool = False
@@ -125,6 +126,61 @@ class TemplateOut(BaseModel):
 
 class TemplateIn(BaseModel):
     step_type_ids: list[int] = Field(max_length=100)
+
+
+# -- document lists (phase C1) ----------------------------------------------------------------
+
+
+class DocumentKindOut(BaseModel):
+    id: int
+    name: str
+    section: str
+    origin: str
+    required: bool
+
+    @classmethod
+    def of(cls, k: DocumentKind) -> "DocumentKindOut":
+        return cls(id=k.id, name=k.name, section=k.section, origin=k.origin, required=k.required)
+
+
+class HospitalDocumentsOut(BaseModel):
+    hospital_id: int
+    documents: list[DocumentKindOut]
+
+
+class DocumentListsOut(BaseModel):
+    step_type_id: int
+    global_documents: list[DocumentKindOut]
+    hospitals: list[HospitalDocumentsOut]  # only hospitals with a list of their own
+
+    @classmethod
+    def of(cls, lists: DocumentLists) -> "DocumentListsOut":
+        return cls(
+            step_type_id=lists.step_type_id,
+            global_documents=[DocumentKindOut.of(k) for k in lists.global_list],
+            hospitals=[
+                HospitalDocumentsOut(hospital_id=h, documents=[DocumentKindOut.of(k) for k in rows])
+                for h, rows in sorted(lists.hospitals.items())
+            ],
+        )
+
+
+class DocumentKindIn(BaseModel):
+    # A row of the list being saved, to keep it; None adds one. Making a hospital's own list
+    # from the global one sends the global rows without their ids.
+    id: int | None = None
+    # Lengths and the allowed values are checked by the service (422 with the reason).
+    name: str = Field(max_length=MAX_DOCUMENT_NAME_CHARS + 50)
+    section: str = Field("submission", max_length=20)
+    origin: str = Field("upload", max_length=20)
+    required: bool = False
+
+
+class DocumentListIn(BaseModel):
+    documents: list[DocumentKindIn] = Field(max_length=MAX_DOCUMENT_KINDS + 10)
+
+    def edits(self) -> list[DocumentKindEdit]:
+        return [DocumentKindEdit(d.name, d.section, d.origin, d.required, d.id) for d in self.documents]
 
 
 Service = PipelineSetupService
@@ -327,3 +383,34 @@ def delete_hospital_template(
 ) -> Response:
     service.delete_template(admin.id, hospital_id)
     return Response(status_code=204)
+
+
+@router.get("/step-types/{type_id}/documents", response_model=DocumentListsOut)
+def get_document_lists(
+    type_id: int, _admin: AuthUser = Depends(require_admin), service: Service = Depends(get_pipeline_setup_service),
+) -> DocumentListsOut:
+    return DocumentListsOut.of(service.document_lists(type_id))
+
+
+@router.put("/step-types/{type_id}/documents/global", response_model=DocumentListsOut)
+def save_global_documents(
+    type_id: int, body: DocumentListIn,
+    admin: AuthUser = Depends(require_admin), service: Service = Depends(get_pipeline_setup_service),
+) -> DocumentListsOut:
+    return DocumentListsOut.of(service.save_document_kinds(admin.id, type_id, None, body.edits()))
+
+
+@router.put("/step-types/{type_id}/documents/hospitals/{hospital_id}", response_model=DocumentListsOut)
+def save_hospital_documents(
+    type_id: int, hospital_id: int, body: DocumentListIn,
+    admin: AuthUser = Depends(require_admin), service: Service = Depends(get_pipeline_setup_service),
+) -> DocumentListsOut:
+    return DocumentListsOut.of(service.save_document_kinds(admin.id, type_id, hospital_id, body.edits()))
+
+
+@router.delete("/step-types/{type_id}/documents/hospitals/{hospital_id}", response_model=DocumentListsOut)
+def delete_hospital_documents(
+    type_id: int, hospital_id: int,
+    admin: AuthUser = Depends(require_admin), service: Service = Depends(get_pipeline_setup_service),
+) -> DocumentListsOut:
+    return DocumentListsOut.of(service.delete_document_kinds(admin.id, type_id, hospital_id))

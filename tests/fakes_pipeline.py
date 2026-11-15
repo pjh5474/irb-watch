@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 from irb_watch.services.pipeline_admin import (
+    DocumentKind,
     NameTakenError,
     PipelineTemplate,
     StepResult,
@@ -58,6 +59,8 @@ class FakePipelineSetupStore:
         self.ready_forms = {20}
         self.hospitals = {4, 5}
         self.updated_by: dict[int, str] = {}
+        self.kind_rows: dict[int, DocumentKind] = {}  # no seeded lists: tests add their own
+        self._next_kind = 0
 
     def statuses(self):
         return list(self.status_rows.values())
@@ -100,7 +103,7 @@ class FakePipelineSetupStore:
         self.types[new_id] = StepType(
             new_id, edit.name, edit.description, edit.instructions, tuple(edit.guide_ids),
             edit.form_template_id, edit.input_earlier_steps, edit.input_board_documents,
-            tuple(edit.required_documents), category=edit.category, numbered=edit.numbered,
+            category=edit.category, numbered=edit.numbered,
         )
         self.updated_by[new_id] = actor_id
         return self.types[new_id]
@@ -112,9 +115,8 @@ class FakePipelineSetupStore:
         if ("name" in values or unarchiving) and self._name_taken(name, type_id):
             raise NameTakenError
         values = {k: v for k, v in values.items() if k != "updated_at"}
-        for key in ("guide_ids", "required_documents"):
-            if key in values:
-                values[key] = tuple(values[key])
+        if "guide_ids" in values:
+            values["guide_ids"] = tuple(values["guide_ids"])
         self.types[type_id] = replace(current, **values)
         self.updated_by[type_id] = actor_id
         return self.types[type_id]
@@ -140,3 +142,43 @@ class FakePipelineSetupStore:
 
     def hospital_exists(self, hospital_id):
         return hospital_id in self.hospitals
+
+    # document lists (phase C1), as the save_step_type_documents function does it
+    def document_kinds(self, step_type_ids=None):
+        return [k for k in self.kind_rows.values() if step_type_ids is None or k.step_type_id in step_type_ids]
+
+    def save_document_kinds(self, step_type_id, hospital_id, rows, actor_id):
+        mine = {
+            k.id: k for k in self.kind_rows.values() if k.step_type_id == step_type_id and k.hospital_id == hospital_id
+        }
+        if any(r.id is not None and r.id not in mine for r in rows):
+            raise LookupError("a row is not in this list")
+        now = "2026-11-16T00:00:00+00:00"
+        for k in mine.values():
+            if k.archived_at is None:
+                self.kind_rows[k.id] = replace(k, archived_at=now)
+        for n, r in enumerate(rows, start=1):
+            values = {"name": r.name, "section": r.section, "origin": r.origin, "required": r.required, "position": n}
+            if r.id is not None:
+                self.kind_rows[r.id] = replace(self.kind_rows[r.id], archived_at=None, **values)
+            else:
+                self._next_kind += 1
+                self.kind_rows[self._next_kind] = DocumentKind(self._next_kind, step_type_id, hospital_id, **values)
+
+    def delete_document_kinds(self, step_type_id, hospital_id):
+        gone = [k.id for k in self.kind_rows.values() if k.step_type_id == step_type_id and k.hospital_id == hospital_id]
+        for i in gone:
+            del self.kind_rows[i]
+        return len(gone)
+
+    def add_kinds(self, step_type_id, names, hospital_id=None, **flags):
+        """Test helper: a list of names (section submission, origin upload; flags for all)."""
+        from irb_watch.services.pipeline_admin import DocumentKindEdit
+
+        current = [
+            DocumentKindEdit(k.name, k.section, k.origin, k.required, k.id)
+            for k in sorted(self.kind_rows.values(), key=lambda k: (k.position, k.id))
+            if k.step_type_id == step_type_id and k.hospital_id == hospital_id and k.archived_at is None
+        ]
+        new = [DocumentKindEdit(n, flags.get("section", "submission"), flags.get("origin", "upload"), flags.get("required", True)) for n in names]
+        self.save_document_kinds(step_type_id, hospital_id, current + new, "admin")

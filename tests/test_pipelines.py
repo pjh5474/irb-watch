@@ -205,17 +205,15 @@ def test_reorder_remove_and_restore_steps():
 
 def test_step_page_has_its_documents_and_neighbours_in_overview_order():
     service, store, _, setup_store, *_ = make()
-    setup_store.types[1] = setup_store.types[1].__class__(
-        **{**setup_store.types[1].__dict__, "required_documents": ("연구계획서", "동의서")}
-    )
+    setup_store.add_kinds(1, ["연구계획서", "동의서"])
     pipeline = service.start("u1", 1, 4)
     ids = [s.id for s in sorted(store.steps([pipeline.id]), key=lambda s: s.position)]
     service.upload("u1", pipeline.id, ids[0], "연구계획서", "p.xlsx", b"abc")
     service.upload("u1", pipeline.id, ids[1], "Other step", "o.xlsx", b"abc")
 
     page = service.step_page("u1", pipeline.id, ids[0])
-    assert [d.name for d in page.view.documents] == ["연구계획서"]  # this step's only
-    assert (page.view.documents_with_files, page.view.required_missing) == (1, 1)
+    assert [d.name for d in page.view.documents] == ["연구계획서", "동의서"]  # this step's slots only
+    assert (page.view.documents_with_files, page.view.required_missing) == (1, 2)  # a file is not final
     assert (page.previous_step_id, page.next_step_id) == (None, ids[1])
     assert page.summary.hospital_name == "SNUH" and page.statuses
 
@@ -306,19 +304,22 @@ def test_storage_failures_leave_nothing_behind():
     assert files.stored == {} and len(files.deleted) == 1
 
 
-def test_checklist_follows_live_documents_with_versions():
+def test_checklist_counts_required_slots_that_are_final_or_not_needed():
     service, store, _, setup_store, *_ = make()
-    setup_store.types[1] = setup_store.types[1].__class__(
-        **{**setup_store.types[1].__dict__, "required_documents": ("연구계획서", "동의서")}
-    )
+    setup_store.add_kinds(1, ["연구계획서", "동의서"])
     pipeline = service.start("u1", 1, 4)
     step = min(store.steps([pipeline.id]), key=lambda s: s.position)
     doc, _ = service.upload("u1", pipeline.id, step.id, "연구계획서", "p.xlsx", b"abc")
     view = service.detail("u1", pipeline.id).steps[0]
-    assert [(c.name, c.uploaded) for c in view.checklist] == [("연구계획서", True), ("동의서", False)]
-    service.remove_document("u1", pipeline.id, step.id, doc.id)
-    view = service.detail("u1", pipeline.id).steps[0]
-    assert view.checklist[0].uploaded is False
+    assert [(c.name, c.done, c.status) for c in view.checklist] == [
+        ("연구계획서", False, "in_progress"), ("동의서", False, "needed"),
+    ]
+    service.update_document("u1", pipeline.id, step.id, doc.id, {"status": "final"})
+    other = next(d for d in view.documents if d.name == "동의서")
+    service.update_document("u1", pipeline.id, step.id, other.id, {"status": "not_needed"})
+    assert service.detail("u1", pipeline.id).steps[0].required_missing == 0
+    with pytest.raises(ValidationError, match="not needed instead"):  # a listed slot stays on the checklist
+        service.remove_document("u1", pipeline.id, step.id, doc.id)
 
 
 def test_remove_restore_document_and_name_clash():

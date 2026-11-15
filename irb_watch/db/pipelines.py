@@ -62,6 +62,24 @@ def _version(r: dict) -> DocVersion:
     )
 
 
+_DOC_COLUMNS = (
+    "id, step_id, name, created_at, deleted_at, kind_id, section, origin, required, status, position, note, "
+    "updated_at, listed"
+)
+
+
+def _document(r: dict, versions: tuple[DocVersion, ...] = ()) -> StepDocument:
+    return StepDocument(
+        id=int(r["id"]), step_id=int(r["step_id"]), name=r["name"], created_at=r["created_at"],
+        deleted_at=r.get("deleted_at"), versions=versions,
+        kind_id=int(r["kind_id"]) if r.get("kind_id") is not None else None,
+        section=r.get("section") or "submission", origin=r.get("origin") or "upload",
+        required=bool(r.get("required")), status=r.get("status") or "needed",
+        position=int(r.get("position") or 0), note=r.get("note") or "", updated_at=r.get("updated_at") or "",
+        listed=bool(r.get("listed")),
+    )
+
+
 def _unique(exc: APIError) -> bool:
     return exc.code == UNIQUE_VIOLATION
 
@@ -194,9 +212,17 @@ class SupabasePipelineStore:
             raise
         try:
             if steps:
-                self._c.table("pipeline_steps").insert([{**s, "pipeline_id": row["id"]} for s in steps]).execute()
+                rows = [{k: v for k, v in s.items() if k != "documents"} | {"pipeline_id": row["id"]} for s in steps]
+                made = self._c.table("pipeline_steps").insert(rows).execute().data
+                # Slots (phase C1): matched by position, unique in a new pipeline.
+                by_position = {int(m["position"]): int(m["id"]) for m in made}
+                slots = [
+                    {**d, "step_id": by_position[int(s["position"])]} for s in steps for d in s.get("documents") or []
+                ]
+                if slots:
+                    self._c.table("step_documents").insert(slots).execute()
         except Exception:
-            # Do not leave a pipeline without its steps.
+            # Do not leave a pipeline without its steps or slots (the steps and slots cascade).
             self._c.table("pipelines").delete().eq("id", row["id"]).execute()
             raise
         return _pipeline(row)
@@ -238,7 +264,7 @@ class SupabasePipelineStore:
         )
         return rows[0].get("body_text") if rows else None
 
-    def add_step(self, pipeline_id: int, values: dict) -> Step:
+    def add_step(self, pipeline_id: int, values: dict, documents: list[dict] | None = None) -> Step:
         try:
             rows = self._c.table("pipeline_steps").insert({**values, "pipeline_id": pipeline_id}).execute().data
         except APIError as exc:
@@ -247,7 +273,14 @@ class SupabasePipelineStore:
             if exc.code == FOREIGN_KEY_VIOLATION and values.get("parent_step_id") is not None:
                 raise StepParentError("the step to answer is gone or in another pipeline") from exc
             raise
-        return _step(rows[0])
+        step = _step(rows[0])
+        if documents:
+            try:
+                self._c.table("step_documents").insert([{**d, "step_id": step.id} for d in documents]).execute()
+            except Exception:
+                self._c.table("pipeline_steps").delete().eq("id", step.id).execute()  # no step without its slots
+                raise
+        return step
 
     def update_step(self, step_id: int, values: dict) -> Step:
         try:
@@ -276,7 +309,7 @@ class SupabasePipelineStore:
         for chunk in _chunks(sorted(set(step_ids))):
             docs += _paged(
                 lambda chunk=chunk: self._c.table("step_documents")
-                .select("id, step_id, name, created_at, deleted_at").in_("step_id", chunk).order("id")
+                .select(_DOC_COLUMNS).in_("step_id", chunk).order("id")
             )
         if not docs:
             return []
@@ -289,22 +322,38 @@ class SupabasePipelineStore:
         by_doc: dict[int, list[DocVersion]] = {}
         for v in sorted(versions, key=lambda v: int(v["version_no"]), reverse=True):  # newest first
             by_doc.setdefault(int(v["document_id"]), []).append(_version(v))
-        return [
-            StepDocument(
-                id=int(d["id"]), step_id=int(d["step_id"]), name=d["name"], created_at=d["created_at"],
-                deleted_at=d.get("deleted_at"), versions=tuple(by_doc.get(int(d["id"]), [])),
-            )
-            for d in docs
-        ]
+        return [_document(d, tuple(by_doc.get(int(d["id"]), []))) for d in docs]
 
-    def create_document(self, step_id: int, name: str) -> StepDocument:
+    def create_document(self, step_id: int, name: str, values: dict | None = None) -> StepDocument:
         try:
-            row = self._c.table("step_documents").insert({"step_id": step_id, "name": name}).execute().data[0]
+            row = (
+                self._c.table("step_documents").insert({**(values or {}), "step_id": step_id, "name": name})
+                .execute().data[0]
+            )
         except APIError as exc:
             if _unique(exc):
                 raise NameTakenError from exc
             raise
-        return StepDocument(int(row["id"]), int(row["step_id"]), row["name"], row["created_at"])
+        return _document(row)
+
+    def update_document(self, document_id: int, values: dict) -> StepDocument:
+        try:
+            rows = self._c.table("step_documents").update(values).eq("id", document_id).execute().data
+        except APIError as exc:
+            if _unique(exc):
+                raise NameTakenError from exc
+            raise
+        if not rows:
+            raise LookupError("document not found")
+        return _document(rows[0])
+
+    def reorder_documents(self, step_id: int, document_ids: list[int]) -> None:
+        try:
+            self._c.rpc("reorder_step_documents", {"p_step_id": step_id, "p_document_ids": document_ids}).execute()
+        except APIError as exc:
+            if exc.code == "P0001":
+                raise StepListError from exc
+            raise
 
     def delete_empty_document(self, document_id: int) -> None:
         # Only a document no version was saved for (a failed first upload).
@@ -325,8 +374,7 @@ class SupabasePipelineStore:
             if _unique(exc):
                 raise NameTakenError from exc
             raise
-        r = rows[0]
-        return StepDocument(int(r["id"]), int(r["step_id"]), r["name"], r["created_at"], r.get("deleted_at"))
+        return _document(rows[0])
 
     def add_version(self, document_id: int, version: NewVersion) -> DocVersion:
         last = (

@@ -98,7 +98,7 @@ class FakePipelineStore:
         pid = next(self._ids)
         self.pipes[pid] = Pipeline(pid, user_id, project_id, hospital_id, _now(), _now(), site_id=site_id)
         for s in steps:
-            self.add_step(pid, s)
+            self.add_step(pid, {k: v for k, v in s.items() if k != "documents"}, s.get("documents"))
         return self.pipes[pid]
 
     def set_pipeline_deleted(self, pipeline_id, deleted_at):
@@ -125,7 +125,13 @@ class FakePipelineStore:
     def version_text(self, version_id):
         return self.texts.get(version_id)
 
-    def add_step(self, pipeline_id, values):
+    def add_step(self, pipeline_id, values, documents=None):
+        step = self._add_step(pipeline_id, values)
+        for d in documents or []:
+            self.create_document(step.id, d["name"], {k: v for k, v in d.items() if k != "name"})
+        return step
+
+    def _add_step(self, pipeline_id, values):
         parent = values.get("parent_step_id")
         if parent is not None:  # the composite key and the one-level trigger
             row = self.step_rows.get(parent)
@@ -174,12 +180,28 @@ class FakePipelineStore:
             for d in self.docs.values()
         )
 
-    def create_document(self, step_id, name):
+    def create_document(self, step_id, name, values=None):
         if self._live_name_taken(step_id, name):
             raise NameTakenError
         did = next(self._ids)
-        self.docs[did] = StepDocument(did, step_id, name, _now())
+        self.docs[did] = StepDocument(did, step_id, name, _now(), **(values or {}))
         return self.docs[did]
+
+    def update_document(self, document_id, values):
+        d = self.docs.get(document_id)
+        if d is None:
+            raise LookupError("document not found")
+        if "name" in values and self._live_name_taken(d.step_id, values["name"], d.id):
+            raise NameTakenError
+        self.docs[document_id] = replace(d, **values)
+        return self.docs[document_id]
+
+    def reorder_documents(self, step_id, document_ids):
+        live = sorted(d.id for d in self.docs.values() if d.step_id == step_id and d.deleted_at is None)
+        if sorted(document_ids) != live or len(set(document_ids)) != len(document_ids):
+            raise StepListError
+        for n, did in enumerate(document_ids, start=1):
+            self.docs[did] = replace(self.docs[did], position=n)
 
     def delete_empty_document(self, document_id):
         if not self.versions.get(document_id):

@@ -37,7 +37,7 @@ import logging
 import re
 import secrets
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -54,6 +54,8 @@ from irb_watch.services.errors import (
 )
 from irb_watch.services.pipeline_admin import (
     FOLLOW_UP,
+    SECTIONS,
+    DocumentKind,
     PipelineSetupService,
     StepResult,
     StepStatus,
@@ -78,6 +80,12 @@ MAX_SEQUENCE = 999
 SUBMITTED = "submitted"
 DONE = "done"  # the closed status offered after an approved result (migration step_structure)
 ANSWERING = "revisions_requested"  # the work state offered after a result that needs an answer
+# Slot statuses (phase C1, fixed in code): needed (nothing yet), in_progress (a file arrived),
+# final (marked by a user; needs a file), not_needed (marked by a user; counts as done).
+NEEDED, IN_PROGRESS, FINAL, NOT_NEEDED = "needed", "in_progress", "final", "not_needed"
+SLOT_STATUSES = (NEEDED, IN_PROGRESS, FINAL, NOT_NEEDED)
+MAX_DOCUMENTS = 60  # live slots per step (a list has at most 50, plus the user's own)
+MAX_DOC_NOTE = 2000
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -136,12 +144,30 @@ class DocVersion:
 
 @dataclass(frozen=True)
 class StepDocument:
+    """A document slot of a step (phase C1): every upload is a version, the newest first."""
+
     id: int
     step_id: int
     name: str
     created_at: str
     deleted_at: str | None = None
     versions: tuple[DocVersion, ...] = ()  # newest first
+    kind_id: int | None = None  # the list row it was copied from; None: added by a user
+    section: str = "submission"
+    origin: str = "upload"
+    required: bool = False
+    status: str = NEEDED
+    position: int = 0
+    note: str = ""
+    updated_at: str = ""
+    # Copied from a document list: name and section stay and it is not removed (the user marks
+    # it not needed). Kept when the list row is deleted later (kind_id is then None).
+    listed: bool = False
+
+    @property
+    def done(self) -> bool:
+        """Counts as done for the checklist: marked final, or not needed."""
+        return self.status in (FINAL, NOT_NEEDED)
 
 
 @dataclass(frozen=True)
@@ -167,8 +193,12 @@ class Event:
 
 @dataclass(frozen=True)
 class ChecklistItem:
+    """A required slot (phase C1): done when final or not needed."""
+
     name: str
-    uploaded: bool
+    done: bool
+    status: str = NEEDED
+    document_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -185,7 +215,7 @@ class StepView:
 
     @property
     def required_missing(self) -> int:
-        return sum(1 for c in self.checklist if not c.uploaded)
+        return sum(1 for c in self.checklist if not c.done)
 
 
 @dataclass(frozen=True)
@@ -325,7 +355,10 @@ class PipelineStore(Protocol):
     def get_pipeline(self, pipeline_id: int) -> Pipeline | None: ...
     def create_pipeline(
         self, user_id: str, project_id: int, hospital_id: int, steps: list[dict], site_id: int | None = None
-    ) -> Pipeline: ...
+    ) -> Pipeline:
+        """A step dict may hold "documents": its slots (as add_step); nothing is left behind
+        when a part fails."""
+        ...
     def set_pipeline_deleted(self, pipeline_id: int, deleted_at: str | None) -> Pipeline: ...
     def touch_pipeline(self, pipeline_id: int) -> None: ...
     # steps
@@ -335,14 +368,26 @@ class PipelineStore(Protocol):
         """The text read from one uploaded version (None: no text was read)."""
         ...
 
-    def add_step(self, pipeline_id: int, values: dict) -> Step: ...
+    def add_step(self, pipeline_id: int, values: dict, documents: list[dict] | None = None) -> Step:
+        """The step and its slots (phase C1: `documents` are step_documents values without
+        step_id); a failed slot insert leaves no step behind."""
+        ...
     def update_step(self, step_id: int, values: dict) -> Step: ...
     def reorder_steps(self, pipeline_id: int, step_ids: list[int]) -> None:
         """All or nothing; raises StepListError if the list is not exactly the live steps."""
         ...
-    # documents
+    # documents (slots, phase C1)
     def documents(self, step_ids: list[int]) -> list[StepDocument]: ...
-    def create_document(self, step_id: int, name: str) -> StepDocument: ...
+    def create_document(self, step_id: int, name: str, values: dict | None = None) -> StepDocument:
+        """values: section, origin, required, status, position, kind_id (defaults otherwise).
+        NameTakenError when a live slot of the step has the name."""
+        ...
+    def update_document(self, document_id: int, values: dict) -> StepDocument:
+        """NameTakenError on a rename to a live slot's name; LookupError when gone."""
+        ...
+    def reorder_documents(self, step_id: int, document_ids: list[int]) -> None:
+        """All or nothing; raises StepListError if the list is not exactly the live slots."""
+        ...
     def delete_empty_document(self, document_id: int) -> None: ...
     def set_document_deleted(self, document_id: int, deleted_at: str | None) -> StepDocument: ...
     def add_version(self, document_id: int, version: NewVersion) -> DocVersion:
@@ -471,6 +516,34 @@ def display_order(steps: list[Step]) -> list[Step]:
 
     live = sorted((s for s in steps if s.deleted_at is None), key=key)
     return [s for group in _groups(live) for s in group] + sorted((s for s in steps if s.deleted_at is not None), key=key)
+
+
+def slots_from(kinds: list[DocumentKind]) -> list[dict]:
+    """The slots a new step gets from its document list (phase C1), in the list's order."""
+    return [
+        {
+            # required as the list has it: saving a list clears it for NEVER_REQUIRED sections
+            "name": k.name, "kind_id": k.id, "listed": True, "section": k.section, "origin": k.origin,
+            "required": k.required, "status": NEEDED, "position": n,
+        }
+        for n, k in enumerate(kinds, start=1)
+    ]
+
+
+_SECTION_ORDER = {s: i for i, s in enumerate(("application", "received", "submission", "reference"))}
+
+
+def slot_order(docs: list[StepDocument]) -> list[StepDocument]:
+    """Live slots by section (신청서 및 통지서, 제출서류, 참고자료) and position; removed ones last."""
+    return sorted(
+        docs, key=lambda d: (d.deleted_at is not None, _SECTION_ORDER.get(d.section, 9), d.position, d.id)
+    )
+
+
+def checklist(docs: list[StepDocument]) -> list[ChecklistItem]:
+    """Required live slots. Only listed slots are required, and a list never marks documents
+    from the IRB or reference ones required (PipelineSetupService._clean_kinds)."""
+    return [ChecklistItem(d.name, d.done, d.status, d.id) for d in slot_order(docs) if d.deleted_at is None and d.required]
 
 
 def suggested_status(step: Step, result: StepResult | None, statuses: list[StepStatus]) -> str | None:
@@ -663,11 +736,16 @@ class PipelineService:
         # Follow-up types answer another step: never started on their own (phase B2b).
         live = {t.id: t for t in self._setup.step_types() if t.category != FOLLOW_UP}
         status = self._first_open_status()
+        type_ids = [t for t in order.step_type_ids if t in live]
+        kinds = self._setup.document_kinds_for(type_ids, hospital_id)  # phase C1: each step's slots
         steps = []
         seen: dict[int, int] = {}  # numbered types: 1차, 2차, ... in the order's sequence
-        for i, tid in enumerate((t for t in order.step_type_ids if t in live), start=1):
+        for i, tid in enumerate(type_ids, start=1):
             seen[tid] = seen.get(tid, 0) + 1
-            row = {"step_type_id": tid, "name": live[tid].name, "position": i, "status_key": status}
+            row = {
+                "step_type_id": tid, "name": live[tid].name, "position": i, "status_key": status,
+                "documents": slots_from(kinds.get(tid, [])),
+            }
             if live[tid].numbered:
                 row["sequence_no"] = seen[tid]
             steps.append(row)
@@ -697,17 +775,8 @@ class PipelineService:
         views = []
         for step in steps:
             own = by_step.get(step.id, [])
-            live_names = {d.name.lower() for d in own if d.deleted_at is None and d.versions}
             stype = all_types.get(step.step_type_id) if step.step_type_id else None
-            required = list(stype.required_documents) if stype else []
-            views.append(
-                StepView(
-                    step,
-                    stype.name if stype else None,
-                    sorted(own, key=lambda d: (d.deleted_at is not None, d.name.lower())),
-                    [ChecklistItem(r, r.lower() in live_names) for r in required],
-                )
-            )
+            views.append(StepView(step, stype.name if stype else None, slot_order(own), checklist(own)))
         return views
 
     def detail(self, user_id: str, pipeline_id: int) -> PipelineDetail:
@@ -1242,8 +1311,9 @@ class PipelineService:
             # 3차 must not give a second 2차).
             siblings = [s for s in live if s.step_type_id == stype.id and s.parent_step_id == (parent.id if parent else None)]
             values["sequence_no"] = min(max((s.sequence_no or 0 for s in siblings), default=0) + 1, MAX_SEQUENCE)
+        slots = slots_from(self._setup.document_kinds_for([stype.id], pipeline.hospital_id)[stype.id]) if stype else []
         try:
-            step = self._store.add_step(pipeline.id, values)
+            step = self._store.add_step(pipeline.id, values, slots)
         except StepParentError as exc:
             raise ConflictError(f"{exc}; reload the page") from exc
         self._event(
@@ -1378,11 +1448,31 @@ class PipelineService:
         return doc
 
     def upload(
-        self, user_id: str, pipeline_id: int, step_id: int, name: str, filename: str, content: bytes
+        self, user_id: str, pipeline_id: int, step_id: int, name: str, filename: str, content: bytes,
+        document_id: int | None = None, section: str | None = None,
     ) -> tuple[StepDocument, DocVersion]:
+        """Into a slot (`document_id`), or by name: the live slot of that name, else a new slot
+        of the user's in `section` (default 제출서류). A new file sets the slot in progress,
+        also a final one (phase C1: the user marks the newest file final again)."""
         pipeline = self._pipeline(user_id, pipeline_id)
         step = self._step(pipeline, step_id)
-        name = _clean(name, MAX_DOC_NAME, "document name")
+        docs = self._store.documents([step.id])  # read once for the whole upload
+        if document_id is not None:
+            doc = next((d for d in docs if d.id == document_id), None)
+            if doc is None:
+                raise NotFoundError("document not found")
+            if doc.deleted_at is not None:
+                raise ConflictError("this document is removed; restore it first")
+            name = doc.name
+        else:
+            name = _clean(name, MAX_DOC_NAME, "document name")
+            doc = next((d for d in docs if d.deleted_at is None and d.name.lower() == name.lower()), None)
+            section = section or "submission"
+            if doc is None:  # the section is used only for a new slot
+                if section not in SECTIONS:
+                    raise ValidationError(f"the section must be one of {', '.join(SECTIONS)}")
+                if sum(1 for d in docs if d.deleted_at is None) >= MAX_DOCUMENTS:
+                    raise ConflictError(f"a step may have at most {MAX_DOCUMENTS} documents")
         filename = filename.strip().replace("\\", "/").rsplit("/", 1)[-1]
         if not filename or len(filename) > 255:
             raise ValidationError("the file needs a name of at most 255 characters")
@@ -1391,8 +1481,6 @@ class PipelineService:
         if len(content) > self._max_bytes:
             raise ValidationError(f"the file is larger than {self._max_bytes // 1_000_000} MB")
         sha = hashlib.sha256(content).hexdigest()
-        docs = self._store.documents([step.id])
-        doc = next((d for d in docs if d.deleted_at is None and d.name.lower() == name.lower()), None)
         if doc is not None and doc.versions and doc.versions[0].sha256 == sha:
             raise ConflictError(f"this file is the same as version {doc.versions[0].version_no} of {doc.name}")
         try:
@@ -1409,7 +1497,10 @@ class PipelineService:
         try:
             if doc is None:
                 try:
-                    doc = created = self._store.create_document(step.id, name)
+                    doc = created = self._store.create_document(
+                        step.id, name,
+                        {"section": section, "status": IN_PROGRESS, "position": self._next_position(docs, section or "submission")},
+                    )
                 except NameTakenError:
                     doc = next(
                         d for d in self._store.documents([step.id])
@@ -1431,13 +1522,108 @@ class PipelineService:
                     "another upload of this document was saved at the same moment; reload the page and try again"
                 ) from exc
             raise
-        self._event(
-            pipeline.id, step.id, user_id, "document.uploaded",
-            {"document_id": doc.id, "name": doc.name, "version_no": version.version_no, "filename": filename},
-        )
-        # Read again so the answer includes the version just added.
-        fresh = next((d for d in self._store.documents([step.id]) if d.id == doc.id), doc)
-        return fresh, version
+        payload = {"document_id": doc.id, "name": doc.name, "version_no": version.version_no, "filename": filename}
+        status = doc.status
+        if doc.status != IN_PROGRESS:
+            try:
+                self._store.update_document(doc.id, {"status": IN_PROGRESS, "updated_at": self._now()})
+                payload["status"] = {"from": doc.status, "to": IN_PROGRESS}
+                status = IN_PROGRESS
+            except Exception:
+                # The file is saved; a status left behind is shown as it is, and the next
+                # upload or "Mark final" fixes it.
+                log.exception("the status of document %s could not be set after an upload", doc.id)
+        self._event(pipeline.id, step.id, user_id, "document.uploaded", payload)
+        # The answer includes the version just added (newest first), without reading again.
+        return replace(doc, versions=(version, *doc.versions), status=status), version
+
+    @staticmethod
+    def _next_position(docs: list[StepDocument], section: str) -> int:
+        return max((d.position for d in docs if d.section == section), default=0) + 1
+
+    def add_document(self, user_id: str, pipeline_id: int, step_id: int, name: str, section: str = "submission") -> StepDocument:
+        """A slot of the user's own, without a file (phase C1): not required."""
+        pipeline = self._pipeline(user_id, pipeline_id)
+        step = self._step(pipeline, step_id)
+        name = _clean(name, MAX_DOC_NAME, "document name")
+        if section not in SECTIONS:
+            raise ValidationError(f"the section must be one of {', '.join(SECTIONS)}")
+        docs = self._store.documents([step.id])
+        if sum(1 for d in docs if d.deleted_at is None) >= MAX_DOCUMENTS:
+            raise ConflictError(f"a step may have at most {MAX_DOCUMENTS} documents")
+        try:
+            doc = self._store.create_document(
+                step.id, name, {"section": section, "status": NEEDED, "position": self._next_position(docs, section)},
+            )
+        except NameTakenError as exc:
+            raise ConflictError("a document with this name exists in the step") from exc
+        self._event(pipeline.id, step.id, user_id, "document.added", {"document_id": doc.id, "name": name, "section": section})
+        return doc
+
+    def update_document(self, user_id: str, pipeline_id: int, step_id: int, document_id: int, changes: dict) -> StepDocument:
+        """`changes` holds the fields sent: name and section (a user's own slot only; a listed
+        document keeps the list's), note, status. Status: final (needs a file), not_needed, or
+        needed / in_progress to reopen it (the server picks: in progress when it has a file)."""
+        pipeline = self._pipeline(user_id, pipeline_id)
+        step = self._step(pipeline, step_id)
+        doc = self._document(step, document_id)
+        values: dict = {}
+        if ("name" in changes or "section" in changes) and doc.listed:
+            raise ValidationError("a listed document keeps its name and section; add your own document instead")
+        if "name" in changes:
+            name = _clean(changes["name"] or "", MAX_DOC_NAME, "document name")
+            if name != doc.name:
+                values["name"] = name
+        if "section" in changes:
+            if changes["section"] not in SECTIONS:
+                raise ValidationError(f"the section must be one of {', '.join(SECTIONS)}")
+            if changes["section"] != doc.section:
+                values["section"] = changes["section"]
+                values["position"] = self._next_position(self._store.documents([step.id]), changes["section"])
+        if "note" in changes:
+            note = (changes["note"] or "").strip()
+            if len(note) > MAX_DOC_NOTE:
+                raise ValidationError(f"the note may have at most {MAX_DOC_NOTE:,} characters")
+            if note != doc.note:
+                values["note"] = note
+        if "status" in changes:
+            status = changes["status"]
+            if status not in SLOT_STATUSES:
+                raise ValidationError(f"the status must be one of {', '.join(SLOT_STATUSES)}")
+            if status == FINAL and not doc.versions:
+                raise ValidationError("upload a file before marking the document final")
+            if status in (NEEDED, IN_PROGRESS):
+                status = IN_PROGRESS if doc.versions else NEEDED
+            if status != doc.status:
+                values["status"] = status
+        if not values:
+            return doc
+        try:
+            updated = self._store.update_document(doc.id, {**values, "updated_at": self._now()})
+        except NameTakenError as exc:
+            raise ConflictError("a document with this name exists in the step") from exc
+        except LookupError as exc:
+            raise NotFoundError("document not found") from exc
+        payload: dict = {"document_id": doc.id, "name": updated.name}
+        for k, v in values.items():
+            if k == "note":
+                payload["note"] = True  # the text stays out of the history, as for steps
+            elif k != "position":
+                payload[k] = {"from": getattr(doc, k), "to": v}
+        self._event(pipeline.id, step.id, user_id, "document.updated", payload)
+        return replace(updated, versions=doc.versions)
+
+    def reorder_documents(self, user_id: str, pipeline_id: int, step_id: int, document_ids: list[int]) -> list[StepDocument]:
+        """Every live slot of the step, each once, in the new order (positions across sections;
+        the page groups them by section)."""
+        pipeline = self._pipeline(user_id, pipeline_id)
+        step = self._step(pipeline, step_id)
+        try:
+            self._store.reorder_documents(step.id, document_ids)
+        except StepListError as exc:
+            raise ConflictError("the documents changed meanwhile; reload the page") from exc
+        self._event(pipeline.id, step.id, user_id, "documents.reordered", {"document_ids": document_ids})
+        return slot_order(self._store.documents([step.id]))
 
     def _drop(self, paths: list[str]) -> None:
         try:
@@ -1449,6 +1635,8 @@ class PipelineService:
         pipeline = self._pipeline(user_id, pipeline_id)
         step = self._step(pipeline, step_id)
         doc = self._document(step, document_id)
+        if doc.listed:  # owner 2026-11-15: a listed document stays; the checklist must not lose it
+            raise ValidationError("a listed document cannot be removed; mark it not needed instead")
         removed = self._store.set_document_deleted(doc.id, self._now())
         self._event(pipeline.id, step.id, user_id, "document.removed", {"document_id": doc.id, "name": doc.name})
         return removed
@@ -1456,9 +1644,14 @@ class PipelineService:
     def restore_document(self, user_id: str, pipeline_id: int, step_id: int, document_id: int) -> StepDocument:
         pipeline = self._pipeline(user_id, pipeline_id)
         step = self._step(pipeline, step_id)
-        doc = self._document(step, document_id, live=False)
+        docs = self._store.documents([step.id])
+        doc = next((d for d in docs if d.id == document_id), None)
+        if doc is None:
+            raise NotFoundError("document not found")
         if doc.deleted_at is None:
             raise ConflictError("this document is not removed")
+        if sum(1 for d in docs if d.deleted_at is None) >= MAX_DOCUMENTS:
+            raise ConflictError(f"a step may have at most {MAX_DOCUMENTS} documents; remove one first")
         try:
             restored = self._store.set_document_deleted(doc.id, None)
         except NameTakenError as exc:
