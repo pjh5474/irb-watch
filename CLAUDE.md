@@ -57,7 +57,7 @@ npx supabase db push --remote --dry-run           # preview
 npx supabase db push --remote --yes               # apply (only after the owner says go)
 npx supabase db query --remote --read-only "<sql>"   # verify; use has_table_privilege() for grants
 ```
-Supabase CLI v3 targets the local stack by default; hosted needs `--remote`. There is no Docker, so no local stack. The CLI labels the one project "production"; it is the owner's test project.
+Supabase CLI v3 targets the local stack by default; hosted needs `--remote`. There is no Docker, so no local stack. The CLI labels the project "production"; it is the owner's demo and dev project. **Since 2026-11-16 the project is `qhtjighvtbvvxswyklae` ("Mira", company account, Seoul `ap-northeast-2`, next to the EC2 server);** the CLI is linked to it and signed in to the company account. The old project `jlkkoaugtovvaxrqxoyx` (personal account, Mumbai `ap-south-1`, 0.2-0.5 s per database call from the server) is kept untouched as a backup for 1-2 weeks; the CLI cannot reach it (403). See `docs/move-supabase.md`.
 
 ## Rules that are easy to get wrong
 - **Never edit an applied migration;** add a new one. The project's default privileges give `service_role` every privilege on new tables, so always `revoke all` first, then grant exactly what is needed. `audit_logs` is append-only: cards cannot be edited after writing, so summaries are decided before the card is written.

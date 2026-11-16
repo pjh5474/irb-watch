@@ -38,7 +38,7 @@ irb-watch/
 ## Implementation steps
 1. [done] `pyproject.toml` for uv, `.env.example`, `Dockerfile`.
 2. [done] `config.py`, `main.py`, `/health`, `tests/test_health.py`. Python pinned to 3.12.
-3. [done] Supabase migrations applied to project `jlkkoaugtovvaxrqxoyx` and verified with read-only queries: `profiles` + signup trigger, domain tables + audit log + private bucket, audit-log append-only fix. **Not yet exercised with real users:** RLS policies and the three triggers.
+3. [done] Supabase migrations applied to project `jlkkoaugtovvaxrqxoyx` (moved 2026-11-16 to `qhtjighvtbvvxswyklae` in Seoul, see `docs/move-supabase.md`) and verified with read-only queries: `profiles` + signup trigger, domain tables + audit log + private bucket, audit-log append-only fix. **Not yet exercised with real users:** RLS policies and the three triggers.
 4. [done] JWT verification (`auth/jwt.py`, ES256/RS256 via the public key list, no secret), `require_admin` (role looked up in the DB on every call), admin API `/admin/users` (create, list, change role, soft delete, restore) with lock-out guards, `profiles.deleted_at` migration, first-admin script, `APP_ENV` settings loader, CORS. 108 offline tests plus a live lifecycle test (`RUN_LIVE=1`) that passed against the real project. Commands in `docs/runbook.md`. **Not yet verified:** RLS from a real user's token, refresh-token behaviour after a ban, a real login token against the verifier. **No admin exists yet:** run the first-admin script.
 5. [done] `security/url_guard` + `limits` + tests.
 6. [done] Scan pipeline, verified end to end by a live test (`tests/test_live_scan.py`, board 2605277029, about 10 minutes for 3 scans):

@@ -1,5 +1,18 @@
 # Moving to another Supabase project (2026-11-16: Mumbai -> Seoul)
 
+**Done 2026-11-16.** Files: 865 + 3 copied, 0 failed, 0 left. Database: row counts of every
+public table and of `auth.users` / `auth.identities` equal; identity sequences not behind;
+access equal except Supabase's own `rls_auto_enable()` in the new project (event-trigger
+function, harmless). Checked in Mira after: 2 users, 34 sources, 1,040 documents, 11 stored
+logins, every stored file path has its file. Server and Vercel switched; the owner saw the
+pages faster and every request in the API log answered 200. Lessons, for the next move:
+- `read -rs` must be typed alone, not pasted with the next lines (a paste feeds them to `read`);
+- use the **Session pooler** URI: the direct `db.<ref>` host is IPv6 only and EC2 has no IPv6;
+- create `scripts/move` through git before mounting it into a container (Docker makes a missing
+  mount folder as root, and then `git pull` fails);
+- the dump folder is written by root inside the container: delete it with `sudo rm -rf`;
+- materialize the table list before `query_to_xml` (the planner may call it on other schemas).
+
 Why: the old project `jlkkoaugtovvaxrqxoyx` is in `ap-south-1` (Mumbai) while the server is in
 `ap-northeast-2` (Seoul). Every database call took 0.2-0.5 s, a step page 19 calls = 5.5 s
 (measured on the server, 2026-11-16). The new project `qhtjighvtbvvxswyklae` ("Mira", company
