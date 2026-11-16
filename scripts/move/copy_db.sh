@@ -17,11 +17,16 @@ set -euo pipefail
 W=/w
 mode="${1:-}"
 
+# The table lists are materialized first: otherwise the planner may run query_to_xml on rows
+# the schema filter has not removed yet (seen 2026-11-16: realtime.subscription).
 COUNTS="
+with t as materialized (
+  select table_name from information_schema.tables
+  where table_schema = 'public' and table_type = 'BASE TABLE'
+)
 select 'public.' || table_name || ' ' ||
        (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from public.%I', table_name), false, true, '')))[1]::text
-from information_schema.tables
-where table_schema = 'public' and table_type = 'BASE TABLE'
+from t
 union all select 'auth.users ' || count(*) from auth.users
 union all select 'auth.identities ' || count(*) from auth.identities
 order by 1;"
@@ -50,7 +55,7 @@ order by 1;"
 # insert after the switch fails. Raises (and so rolls back) when one is behind.
 SEQUENCES="
 do \$\$ declare bad text; begin
-  with c as (
+  with c as materialized (
     select table_name as t, column_name as col,
            pg_get_serial_sequence(format('public.%I', table_name), column_name) as s
     from information_schema.columns where table_schema = 'public' and is_identity = 'YES'
