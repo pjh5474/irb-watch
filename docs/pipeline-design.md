@@ -445,6 +445,13 @@ null for a plain upload): which draft version an uploaded final file came from.
 
 Same IRB, so the next PI's submission is mostly the first PI's with other names.
 
+**Built 2026-11-16 (phase C2), with the owner's answers; they replace the first bullet where
+they differ (decisions.md "IRB pipeline phase C2"):** main steps only; the due date and target
+meeting come along too; a sibling's untouched step of the same type is filled (empty fields
+only) instead of adding a second one; with no untouched step, a numbered type gets a new step
+and other types are skipped; free steps are always added; a sibling without a pipeline is
+skipped. There are no library versions to copy yet (phase D).
+
 - **"Copy step to sibling sites"** (D15) on a step page: the user ticks sibling sites (same
   project, same hospital, live pipeline). For each, the server adds a step of the same type
   with the same `subject`, the same slots (kinds and the user's free slots, in the same
@@ -874,7 +881,7 @@ migration dry-run, the owner's "go" before applying, then both repos deployed to
 | **B1. Sharing** | `project_members`, PM, organization admins, hand-over, the two access functions, new RLS policies on `projects` and `project_hospitals`, server access helper for today's pipelines, steps, files, step drafts and their jobs, Members tab, organization projects page. **A2 follow-up:** `/work` (`PipelineService.work_steps`) and the reminder recipients (`reminder_steps`) key on `pipelines.user_id` today; switch both to project access (`/work`: every project the user may open, with "mine only"; reminders: owner and PM), or after a hand-over the old creator keeps the reminders and the new owner's `/work` is empty | `project_sharing` (**changes RLS on live tables: test with a rolled-back RLS test and a real second user before applying**) | A |
 | **B2a. Sites per PI** (split 2026-11-13, owner) | `project_sites` (PI optional), `site_facts` with history and corrections, `pipelines.site_id`, sites grouped by hospital on the project page, site details, site details in drafts (D18). **Built 2026-11-13** | `project_sites` (a trigger gives the previous server's pipeline inserts the unnamed site) | A, B1 |
 | **B2b. Steps** | follow-up steps, numbering, subject, step type category and seeds, `step_results`, global order = 초기 심의; **the hospital page** (moved from B2a). **Built 2026-11-14** (decisions.md "IRB pipeline redesign, phase B2b: steps"); the service split moved to C | `step_structure` (applied 2026-11-14) | B2a |
-| **C. Document slots** | `step_type_documents` (global + per hospital), slot columns, per-slot drafts and job limit, shared pipeline drafts, "use as final" and upload-from-draft, copy step to sibling sites, sibling file as draft input, admin kinds editor. **Split 2026-11-15 (owner):** C1 = lists, slots, status, checklist, admin editor (**built 2026-11-15**, decisions.md "IRB pipeline phase C1"; no kind instructions, guides, forms or per-slot drafts, 14.1); C2 = "use as final", upload-from-draft, copy step to siblings | `step_document_slots` (C1, applied 2026-11-15) | A, B2 |
+| **C. Document slots** | `step_type_documents` (global + per hospital), slot columns, per-slot drafts and job limit, shared pipeline drafts, "use as final" and upload-from-draft, copy step to sibling sites, sibling file as draft input, admin kinds editor. **Split 2026-11-15 (owner):** C1 = lists, slots, status, checklist, admin editor (**built 2026-11-15**, decisions.md "IRB pipeline phase C1"; no kind instructions, guides, forms or per-slot drafts, 14.1); C2 = "use as final", upload-from-draft, copy step to siblings. **C2 narrowed 2026-11-16 (owner):** copy step to siblings only (**built 2026-11-16**, decisions.md "IRB pipeline phase C2"); "use as final" and upload-from-draft wait for the Agent | `step_document_slots` (C1, applied 2026-11-15), `step_copies` (C2) | A, B2 |
 | **D. Study library** | library tables at three levels, attach by reference, status table with flags, change log, `study_events` + "start amendment", library versions in drafts, from/to comparison | `study_library` | B2, C |
 | **E. Batch drafts** | **Moved to the Clinical Document Agent (2026-11-14; section 14).** Was: "draft for all" on a study event, new job limits, worker outside the API process | (none here) | D |
 | **CAL. IRB calendar** (2026-11-14) | Read view over step dates, hospital review sessions, project tasks; section 14 | `calendar` (name open) | B2b |

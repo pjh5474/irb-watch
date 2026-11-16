@@ -15,6 +15,7 @@ from irb_watch.services.pipelines import (
     NewVersion,
     Pipeline,
     Step,
+    StepCopyError,
     StepDocument,
     StepListError,
     StepParentError,
@@ -25,7 +26,8 @@ FOREIGN_KEY_VIOLATION = "23503"
 BUCKET = "pipeline-files"
 _STEP_COLUMNS = (
     "id, pipeline_id, step_type_id, name, position, status_key, due_on, submitted_on, decided_on, "
-    "note, deleted_at, updated_at, parent_step_id, sequence_no, subject, result_key, target_session_id"
+    "note, deleted_at, updated_at, parent_step_id, sequence_no, subject, result_key, target_session_id, "
+    "copied_from_step_id"
 )
 _VERSION_COLUMNS = (
     "id, document_id, version_no, filename, storage_path, sha256, size_bytes, has_text, text_note, created_at"
@@ -50,6 +52,7 @@ def _step(r: dict) -> Step:
         sequence_no=int(r["sequence_no"]) if r.get("sequence_no") is not None else None,
         subject=r.get("subject") or "", result_key=r.get("result_key"),
         target_session_id=int(r["target_session_id"]) if r.get("target_session_id") is not None else None,
+        copied_from_step_id=int(r["copied_from_step_id"]) if r.get("copied_from_step_id") is not None else None,
     )
 
 
@@ -64,7 +67,7 @@ def _version(r: dict) -> DocVersion:
 
 _DOC_COLUMNS = (
     "id, step_id, name, created_at, deleted_at, kind_id, section, origin, required, status, position, note, "
-    "updated_at, listed"
+    "updated_at, listed, copied_from_document_id"
 )
 
 
@@ -77,6 +80,9 @@ def _document(r: dict, versions: tuple[DocVersion, ...] = ()) -> StepDocument:
         required=bool(r.get("required")), status=r.get("status") or "needed",
         position=int(r.get("position") or 0), note=r.get("note") or "", updated_at=r.get("updated_at") or "",
         listed=bool(r.get("listed")),
+        copied_from_document_id=(
+            int(r["copied_from_document_id"]) if r.get("copied_from_document_id") is not None else None
+        ),
     )
 
 
@@ -288,6 +294,8 @@ class SupabasePipelineStore:
         except APIError as exc:
             if exc.code == "P0001":  # check_step_removal: a follow-up was added at the same moment
                 raise StepParentError(exc.message or "this step has follow-up steps; remove them first") from exc
+            if _unique(exc):  # pipeline_steps_live_copy_key: restoring a second live copy (phase C2)
+                raise NameTakenError from exc
             raise
         if not rows:
             raise LookupError("step not found")
@@ -300,6 +308,22 @@ class SupabasePipelineStore:
             if exc.code == "P0001":
                 raise StepListError from exc
             raise
+
+    def copy_step(self, step_id: int, actor_id: str, targets: list[dict], skipped: list[dict]) -> list[dict]:
+        try:
+            data = self._c.rpc(
+                "copy_pipeline_step",
+                {"p_step_id": step_id, "p_actor": actor_id, "p_targets": targets, "p_skipped": skipped},
+            ).execute().data
+        except APIError as exc:
+            if exc.code == "P0001":
+                raise StepCopyError(exc.message or "something changed meanwhile") from exc
+            if _unique(exc):
+                raise StepCopyError("the step was just copied to one of the sites, or a document name is taken") from exc
+            if exc.code == FOREIGN_KEY_VIOLATION:
+                raise StepCopyError("a document list row or a meeting was just deleted") from exc
+            raise
+        return list(data or [])
 
     # documents
     def documents(self, step_ids: list[int]) -> list[StepDocument]:

@@ -121,6 +121,7 @@ class Step:
     subject: str = ""  # what the step is about: "PT 2.0, CRF 1.1"
     result_key: str | None = None  # the IRB's answer (step_results); None: none yet
     target_session_id: int | None = None  # the IRB meeting it aims for (CAL-1)
+    copied_from_step_id: int | None = None  # phase C2: the sibling site's step it was copied from
 
     @property
     def label(self) -> str:
@@ -163,6 +164,7 @@ class StepDocument:
     # Copied from a document list: name and section stay and it is not removed (the user marks
     # it not needed). Kept when the list row is deleted later (kind_id is then None).
     listed: bool = False
+    copied_from_document_id: int | None = None  # phase C2: the slot it was copied from
 
     @property
     def done(self) -> bool:
@@ -262,6 +264,18 @@ class StepPage:
     suggested_session_id: int | None = None
     target_warning: str | None = None  # cancelled | rejected | removed | unavailable
     session_kinds: list[SessionKind] = field(default_factory=list)  # archived too (labels)
+    copied_from: "StepOrigin | None" = None  # phase C2
+
+
+@dataclass(frozen=True)
+class StepOrigin:
+    """The step a copied step came from (phase C2), for "copied from <site>"."""
+
+    pipeline_id: int
+    step_id: int
+    step_label: str
+    site_label: str  # "" for an unnamed site
+    removed: bool  # the step, its pipeline or its site is removed
 
 
 @dataclass(frozen=True)
@@ -394,6 +408,12 @@ class PipelineStore(Protocol):
         """Raises NameTakenError if another upload took the same version number."""
         ...
     # history
+    # copy to sibling sites (phase C2)
+    def copy_step(self, step_id: int, actor_id: str, targets: list[dict], skipped: list[dict]) -> list[dict]:
+        """Writes every target of step_copy.plan_copy in one transaction with the history rows
+        (function copy_pipeline_step); returns [{pipeline_id, step_id, mode}]. Raises
+        StepCopyError with the reason when something changed meanwhile; nothing is written then."""
+        ...
     def add_event(self, pipeline_id: int, step_id: int | None, actor_id: str, event_type: str, payload: dict) -> None: ...
     def events(self, pipeline_id: int, limit: int, step_id: int | None = None) -> list[Event]:
         """Newest first; with step_id, only that step's events."""
@@ -453,6 +473,11 @@ class StepParentError(Exception):
     """Raised by the store when the database refuses a follow-up's parent (one live level, same
     pipeline: trigger check_step_parent and the composite key), or the removal of a step that
     has live follow-ups (trigger check_step_removal). The message says why."""
+
+
+class StepCopyError(Exception):
+    """Raised by the store when a copy to sibling sites was refused because something changed
+    meanwhile (phase C2). The message says what; nothing was written."""
 
 
 PURGE_KINDS = ("pipelines", "steps", "documents")
@@ -829,7 +854,112 @@ class PipelineService:
             suggested_session_id=suggested,
             target_warning=warning,
             session_kinds=kinds,
+            copied_from=self._origin(pipeline, step),
         )
+
+    def _origin(self, pipeline: Pipeline, step: Step) -> StepOrigin | None:
+        """Where a copied step came from (phase C2): three reads, only for a copy. None when the
+        source was purged (the column is then null) or is not in this project."""
+        if step.copied_from_step_id is None:
+            return None
+        source = self._store.get_step(step.copied_from_step_id)
+        origin = self._store.get_pipeline(source.pipeline_id) if source is not None else None
+        if source is None or origin is None or origin.project_id != pipeline.project_id:
+            return None
+        site = self._sites.sites([origin.site_id]) if self._sites is not None and origin.site_id is not None else []
+        return StepOrigin(
+            origin.id, source.id, source.label, site[0].label if site else "",
+            source.deleted_at is not None or origin.deleted_at is not None
+            or bool(site and site[0].deleted_at is not None),
+        )
+
+    # -- copy to sibling sites (phase C2; the rules are in services/step_copy.py) -----------
+
+    def _copy_plan(self, user_id: str, pipeline_id: int, step_id: int) -> tuple[Step, list]:
+        """The source step and step_copy.plan_copy's answer for every sibling site. Edit access,
+        like any change. About 10-12 database reads (user, pipeline, access, sites, pipelines,
+        steps, documents and versions, step types, statuses, the meeting), whatever the number
+        of sites."""
+        from irb_watch.services import step_copy  # it imports this module
+
+        pipeline = self._pipeline(user_id, pipeline_id)
+        if self._sites is None or pipeline.site_id is None:
+            raise ConflictError("this server has no sites set up; a step cannot be copied")
+        sites = [
+            s for s in self._sites.sites_of_project(pipeline.project_id)
+            if s.hospital_id == pipeline.hospital_id and s.deleted_at is None and s.id != pipeline.site_id
+        ]
+        pipes = {
+            p.site_id: p for p in self._store.pipelines_of_project(pipeline.project_id)
+            if p.deleted_at is None and p.site_id is not None and p.id != pipeline.id
+        }
+        siblings = [(s, pipes.get(s.id)) for s in sites]
+        steps = self._store.steps([pipeline.id, *(p.id for _, p in siblings if p is not None)])
+        step = next((s for s in steps if s.id == step_id and s.pipeline_id == pipeline.id), None)
+        if step is None:
+            raise NotFoundError("step not found")
+        if step.deleted_at is not None:
+            raise ConflictError("this step is removed; restore it first")
+        if step.parent_step_id is not None:
+            raise ValidationError("a follow-up step is not copied; add it at each site")
+        others = [s for s in steps if s.pipeline_id != pipeline.id]
+        candidates = [
+            s.id for s in others
+            if s.deleted_at is None and s.parent_step_id is None
+            and step.step_type_id is not None and s.step_type_id == step.step_type_id
+        ]
+        docs = self._store.documents([step.id, *candidates])
+        stype = next((t for t in self._setup.step_types(include_archived=True) if t.id == step.step_type_id), None)
+        statuses = self._setup.statuses(include_archived=True)
+        first = next((s.key for s in statuses if not s.closed and s.archived_at is None), None)
+        if first is None:
+            raise ConflictError("no open step status is set; ask an admin")
+        meeting_ok = False
+        if step.target_session_id is not None and self._sessions is not None:
+            try:
+                self._sessions.check_target(step.target_session_id, pipeline.hospital_id)
+                meeting_ok = True
+            except (ValidationError, NotFoundError):
+                meeting_ok = False
+        targets = step_copy.plan_copy(
+            step, [d for d in docs if d.step_id == step.id], siblings, others,
+            [d for d in docs if d.step_id != step.id],
+            numbered=bool(stype and stype.numbered), closed={s.key for s in statuses if s.closed},
+            first_status=first, meeting_ok=meeting_ok,
+        )
+        return step, targets
+
+    def copy_targets(self, user_id: str, pipeline_id: int, step_id: int) -> list:
+        """What "Copy to other PIs" would do at each sibling site (nothing is written)."""
+        return self._copy_plan(user_id, pipeline_id, step_id)[1]
+
+    def copy_step(self, user_id: str, pipeline_id: int, step_id: int, site_ids: list[int]) -> list:
+        """Copies the step to the chosen sibling sites, planned again here (the dialog's preview
+        is not trusted). All or nothing. The answer has one row per chosen site: added, filled,
+        or skipped with its reason; when every chosen site is skipped, nothing is written and
+        the reasons are the error."""
+        from irb_watch.services.step_copy import REASONS, SKIP
+
+        if not site_ids:
+            raise ValidationError("choose at least one site")
+        step, targets = self._copy_plan(user_id, pipeline_id, step_id)
+        by_site = {t.site.id: t for t in targets}
+        if any(i not in by_site for i in site_ids):
+            raise ValidationError("copy only to other sites of this hospital in the project")
+        chosen = [by_site[i] for i in dict.fromkeys(site_ids)]
+        doing = [t for t in chosen if t.action != SKIP]
+        if not doing:
+            raise ConflictError(
+                "nothing was copied: "
+                + "; ".join(f"{t.site_label or 'the unnamed site'}: {REASONS[t.reason or '']}" for t in chosen)
+            )
+        skipped = [{"site_id": t.site.id, "reason": t.reason} for t in chosen if t.action == SKIP]
+        try:
+            done = self._store.copy_step(step.id, user_id, [t.plan for t in doing], skipped)
+        except StepCopyError as exc:
+            raise ConflictError(f"{exc}; nothing was copied, reload and try again") from exc
+        made = {int(r["pipeline_id"]): int(r["step_id"]) for r in done}
+        return [replace(t, step_id=made.get(t.pipeline_id, t.step_id)) if t.action != SKIP else t for t in chosen]
 
     def _step_sessions(
         self, pipeline: Pipeline, step: Step
@@ -1433,7 +1563,12 @@ class PipelineService:
         if len(live) >= MAX_STEPS:
             raise ConflictError(f"a pipeline may have at most {MAX_STEPS} steps; remove one first")
         position = max((s.position for s in live), default=0) + 1
-        restored = self._update_step(step.id, {"deleted_at": None, "position": position})
+        try:
+            restored = self._update_step(step.id, {"deleted_at": None, "position": position})
+        except NameTakenError as exc:  # pipeline_steps_live_copy_key (phase C2)
+            raise ConflictError(
+                "another live step of this pipeline is a copy of the same step; remove that one first"
+            ) from exc
         self._event(pipeline.id, step.id, user_id, "step.restored", {"name": step.name})
         return restored
 

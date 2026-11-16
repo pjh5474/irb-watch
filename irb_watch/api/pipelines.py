@@ -144,6 +144,7 @@ class StepOut(BaseModel):
     subject: str = ""
     result_key: str | None = None
     target_session_id: int | None = None  # CAL-1: the IRB meeting it aims for
+    copied_from_step_id: int | None = None  # phase C2: copied from a sibling site's step
 
     @classmethod
     def of(cls, s: Step, type_name: str | None = None) -> "StepOut":
@@ -153,6 +154,7 @@ class StepOut(BaseModel):
             decided_on=s.decided_on, note=s.note, deleted_at=s.deleted_at,
             parent_step_id=s.parent_step_id, sequence_no=s.sequence_no, label=s.label,
             subject=s.subject, result_key=s.result_key, target_session_id=s.target_session_id,
+            copied_from_step_id=s.copied_from_step_id,
         )
 
 
@@ -241,6 +243,17 @@ class DetailOut(BaseModel):
         )
 
 
+class OriginOut(BaseModel):
+    """The step a copied step came from (phase C2). removed: that step, its pipeline or its
+    site is removed."""
+
+    pipeline_id: int
+    step_id: int
+    step_label: str
+    site_label: str  # "" for an unnamed site
+    removed: bool
+
+
 class StepPageOut(BaseModel):
     """The step page in one call: the step, its documents with every version, the checklist,
     the step's drafts (everyone's: they belong to the project) and its open or recently failed
@@ -270,6 +283,35 @@ class StepPageOut(BaseModel):
     suggested_session_id: int | None = None  # the hint; nothing is saved until the user picks
     target_warning: str | None = None  # cancelled | rejected | removed | unavailable
     session_kinds: list[KindOut] = []
+    copied_from: OriginOut | None = None  # phase C2
+
+
+class CopyTargetOut(BaseModel):
+    """One sibling site in "Copy to other PIs" (phase C2). action: add (a new step), fill (the
+    site's untouched step of the same type), skip (reason: no_pipeline, already_copied,
+    has_work, copied_from_other, too_many_steps, too_many_documents). notes: meeting_not_copied."""
+
+    site_id: int
+    site_no: str
+    pi_name: str
+    pipeline_id: int | None
+    action: str
+    reason: str | None
+    step_id: int | None  # fill: the step filled; skip: the step in the way; after a copy: the new step
+    step_label: str
+    notes: list[str]
+
+    @classmethod
+    def of(cls, t) -> "CopyTargetOut":
+        return cls(
+            site_id=t.site.id, site_no=t.site.site_no, pi_name=t.site.pi_name, pipeline_id=t.pipeline_id,
+            action=t.action, reason=t.reason, step_id=t.step_id, step_label=t.step_label, notes=list(t.notes),
+        )
+
+
+class CopyIn(BaseModel):
+    site_ids: list[int] = Field(min_length=1, max_length=200)
+
 
 
 class HospitalStepOut(BaseModel):
@@ -534,7 +576,34 @@ def step_page(
         suggested_session_id=page.suggested_session_id,
         target_warning=page.target_warning,
         session_kinds=[KindOut.of(k) for k in page.session_kinds],
+        copied_from=OriginOut(**vars(page.copied_from)) if page.copied_from else None,
     )
+
+
+@router.get("/pipelines/{pipeline_id}/steps/{step_id}/copy-targets", response_model=list[CopyTargetOut])
+def copy_targets(
+    pipeline_id: int,
+    step_id: int,
+    user: AuthUser = Depends(current_user),
+    service: Service = Depends(get_pipeline_service),
+) -> list[CopyTargetOut]:
+    """What copying a main step to the other sites (PIs) of its hospital would do at each one.
+    Nothing is written. Edit access."""
+    return [CopyTargetOut.of(t) for t in service.copy_targets(user.id, pipeline_id, step_id)]
+
+
+@router.post("/pipelines/{pipeline_id}/steps/{step_id}/copy", response_model=list[CopyTargetOut])
+def copy_step(
+    pipeline_id: int,
+    step_id: int,
+    body: CopyIn,
+    user: AuthUser = Depends(current_user),
+    service: Service = Depends(get_pipeline_service),
+) -> list[CopyTargetOut]:
+    """Copies the step to the chosen sibling sites, all or nothing: one row per chosen site
+    (added, filled, or skipped with its reason). 409 with the reasons when every chosen site is
+    skipped, or when something changed meanwhile."""
+    return [CopyTargetOut.of(t) for t in service.copy_step(user.id, pipeline_id, step_id, body.site_ids)]
 
 
 @router.get("/projects/{project_id}/hospitals/{hospital_id}", response_model=HospitalPageOut)

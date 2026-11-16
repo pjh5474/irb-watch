@@ -11,6 +11,7 @@ from irb_watch.services.pipelines import (
     NewVersion,
     Pipeline,
     Step,
+    StepCopyError,
     StepDocument,
     StepListError,
     StepParentError,
@@ -37,6 +38,9 @@ class FakePipelineStore:
         self.version_race = False
         self.steps_changed_meanwhile = False
         self.fail_purge_rows: set[str] = set()
+        self.copy_refusal: str | None = None  # copy_step refuses with this reason (a race)
+        self.copy_calls = 0
+        self.closed_statuses = {"approved", "rejected", "not_needed", "done"}  # step_statuses.closed, for copy_step
 
     def add_project(self, project_id: int, owner: str, hospitals: set[int]) -> None:
         self.projects[project_id] = owner
@@ -145,12 +149,24 @@ class FakePipelineStore:
         self.step_rows[sid] = Step(
             sid, pipeline_id, values.get("step_type_id"), values["name"], values["position"], values["status_key"],
             parent_step_id=parent, sequence_no=values.get("sequence_no"), subject=values.get("subject", ""),
+            due_on=values.get("due_on"), target_session_id=values.get("target_session_id"),
+            copied_from_step_id=values.get("copied_from_step_id"),
         )
         return self.step_rows[sid]
+
+    def _copy_taken(self, step):
+        """pipeline_steps_live_copy_key: one live copy of a step per pipeline (phase C2)."""
+        return step.copied_from_step_id is not None and any(
+            s.id != step.id and s.pipeline_id == step.pipeline_id and s.deleted_at is None
+            and s.copied_from_step_id == step.copied_from_step_id
+            for s in self.step_rows.values()
+        )
 
     def update_step(self, step_id, values):
         if step_id not in self.step_rows:
             raise LookupError("step not found")
+        if "deleted_at" in values and values["deleted_at"] is None and self._copy_taken(self.step_rows[step_id]):
+            raise NameTakenError
         if values.get("deleted_at") and any(  # trigger check_step_removal
             s.parent_step_id == step_id and s.deleted_at is None for s in self.step_rows.values()
         ):
@@ -165,6 +181,78 @@ class FakePipelineStore:
             raise StepListError
         for n, sid in enumerate(step_ids, start=1):
             self.step_rows[sid] = replace(self.step_rows[sid], position=n)
+
+    def copy_step(self, step_id, actor_id, targets, skipped):
+        """copy_pipeline_step: checks again, then writes everything or nothing."""
+        if self.copy_refusal:
+            raise StepCopyError(self.copy_refusal)
+        src = self.step_rows.get(step_id)
+        if src is None or src.deleted_at is not None or src.parent_step_id is not None:
+            raise StepCopyError("the step to copy was removed meanwhile")
+        home = self.pipes[src.pipeline_id]
+        before = (dict(self.step_rows), dict(self.docs), list(self.event_rows))
+        done = []
+        try:
+            for t in targets:
+                p = self.pipes.get(t["pipeline_id"])
+                if p is None or p.deleted_at is not None or p.project_id != home.project_id or p.id == home.id:
+                    raise StepCopyError("the pipeline of a site was removed meanwhile")
+                s = t.get("step") or {}
+                if t["mode"] == "add":
+                    if sum(1 for x in self.step_rows.values() if x.pipeline_id == p.id and x.deleted_at is None) >= 60:
+                        raise StepCopyError("the pipeline of a site reached 60 steps meanwhile")
+                    position = max((x.position for x in self.step_rows.values() if x.pipeline_id == p.id), default=0) + 1
+                    row = self._add_step(p.id, {**s, "position": position, "copied_from_step_id": src.id})
+                    if self._copy_taken(row):
+                        raise StepCopyError("the step was just copied to one of the sites")
+                    target = row.id
+                else:
+                    target = t["step_id"]
+                    row = self.step_rows.get(target)
+                    has_file = any(self.versions.get(d.id) for d in self.docs.values() if d.step_id == target)
+                    answered = any(
+                        x.parent_step_id == target and x.deleted_at is None for x in self.step_rows.values()
+                    )
+                    # The same checks as the SQL function (the closed statuses of the seed).
+                    if row is None or row.pipeline_id != p.id or row.deleted_at is not None or has_file \
+                            or row.step_type_id != src.step_type_id \
+                            or answered or row.parent_step_id is not None \
+                            or row.copied_from_step_id is not None or row.submitted_on or row.decided_on \
+                            or row.result_key or row.status_key in self.closed_statuses | {"submitted"}:
+                        raise StepCopyError("a step at one of the sites changed meanwhile")
+                    self.step_rows[target] = replace(
+                        row,
+                        subject=row.subject if row.subject.strip() else (s.get("subject") or row.subject),
+                        due_on=row.due_on or s.get("due_on"),
+                        target_session_id=row.target_session_id or s.get("target_session_id"),
+                        copied_from_step_id=src.id,
+                    )
+                for u in t.get("slot_updates") or []:
+                    d = self.docs.get(u["id"])
+                    if d is None or d.step_id != target or d.deleted_at is not None:
+                        raise StepCopyError("a document of a step at one of the sites changed meanwhile")
+                    self.docs[d.id] = replace(
+                        d, position=u["position"], status=u.get("status") or d.status,
+                        copied_from_document_id=u.get("copied_from_document_id") or d.copied_from_document_id,
+                    )
+                for x in t.get("slot_inserts") or []:
+                    try:
+                        self.create_document(target, x["name"], {k: v for k, v in x.items() if k != "name"})
+                    except NameTakenError as exc:
+                        raise StepCopyError("a document name is taken") from exc
+                if sum(1 for d in self.docs.values() if d.step_id == target and d.deleted_at is None) > 60:
+                    raise StepCopyError("a step at one of the sites would have more than 60 documents")
+                self.add_event(
+                    p.id, target, actor_id, "step.copied_in",
+                    {"from_pipeline_id": home.id, "from_step_id": src.id, "mode": t["mode"], "name": src.name},
+                )
+                done.append({"pipeline_id": p.id, "step_id": target, "mode": t["mode"]})
+        except StepCopyError:
+            self.step_rows, self.docs, self.event_rows = before
+            raise
+        self.add_event(home.id, src.id, actor_id, "step.copied", {"to": done, "skipped": skipped})
+        self.copy_calls += 1
+        return done
 
     # documents
     def documents(self, step_ids):
@@ -269,6 +357,12 @@ class FakePipelineStore:
         for sid, row in list(self.step_rows.items()):  # on delete set null (parent_step_id)
             if row.parent_step_id is not None and row.parent_step_id not in self.step_rows:
                 self.step_rows[sid] = replace(row, parent_step_id=None)
+        for sid, row in list(self.step_rows.items()):  # on delete set null (copied_from_step_id)
+            if row.copied_from_step_id is not None and row.copied_from_step_id not in self.step_rows:
+                self.step_rows[sid] = replace(row, copied_from_step_id=None)
+        for did, doc in list(self.docs.items()):  # on delete set null (copied_from_document_id)
+            if doc.copied_from_document_id is not None and doc.copied_from_document_id not in self.docs:
+                self.docs[did] = replace(doc, copied_from_document_id=None)
         for i in ids:
             self._rows(kind).pop(i, None)
 
