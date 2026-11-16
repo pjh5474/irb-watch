@@ -7,7 +7,9 @@ Rules (docs/decisions.md):
     counted as missing, unchanged or deleted;
   * unreadable posts (secret posts) are neither seen nor missing;
   * a title change alone is an update (low priority); file bytes that changed while the
-    extracted text did not are recorded as a silent 'resaved' version.
+    extracted text did not are recorded as a silent 'resaved' version;
+  * images of the post's text appearing for the first time, with nothing else changed, are
+    also a silent 'resaved' version (the catch-up after scans began reading them).
 
 `detect_changes` updates `store` in place; the database layer will persist the same
 decisions later.
@@ -128,7 +130,7 @@ def _update_existing(
     if previous.content.fingerprint() != obs.content.fingerprint():
         detail = describe_change(previous.content, obs.content)
         version_no = previous.version_no + 1
-        if detail.only_resaved:
+        if detail.only_resaved or detail.first_images_only(previous.content):
             doc.versions.append(StoredVersion(version_no, scan.now, RESAVED, obs.content))
         else:
             doc.versions.append(StoredVersion(version_no, scan.now, UPDATED, obs.content))

@@ -38,14 +38,38 @@ class DownloadLink:
     filename: str
 
 
+@dataclass(frozen=True)
+class ImageLink:
+    file_id: int
+    filename: str
+    url: str
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+IMAGES_PER_VERSION = 40  # 20 text images plus attached images, more than any post seen
+IMAGE_TTL_SECONDS = 600  # the page shows them at once; a long page may still be read later
+
+
+def is_shown_image(filename: str, hash_only_reason: str | None) -> bool:
+    """Images the document page shows: those of the post's text, and attached image files."""
+    return hash_only_reason == "inline_image" or filename.lower().endswith(IMAGE_EXTENSIONS)
+
+
 class DownloadRepo(Protocol):
     def get_file(self, file_id: int) -> StoredFile | None: ...
     def may_read(self, user_id: str, source_id: int, now: datetime) -> bool: ...
     def count_links_since(self, user_id: str, since: datetime) -> int: ...
+    def version_images(self, version_id: int) -> tuple[int, int, int, list[StoredFile]] | None:
+        """(source id, document id, version no, the version's stored image files) or None."""
+        ...
+    def count_image_views_since(self, user_id: str, since: datetime) -> int: ...
 
 
 class UrlSigner(Protocol):
     def sign(self, storage_path: str, filename: str, expires_in: int) -> str: ...
+    def sign_inline(self, storage_path: str, expires_in: int) -> str:
+        """A link the browser shows in the page (no download disposition)."""
+        ...
 
 
 class DownloadService:
@@ -58,7 +82,9 @@ class DownloadService:
         ttl_seconds: int = 60,
         daily_limit: int = 200,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        image_views_per_day: int = 1000,
     ) -> None:
+        self._image_views = image_views_per_day
         self._users = users
         self._repo = repo
         self._signer = signer
@@ -105,3 +131,40 @@ class DownloadService:
             document_id=file.document_id,
         )
         return DownloadLink(url, now + timedelta(seconds=self._ttl), file.filename)
+
+    def image_links(self, user_id: str, version_id: int) -> tuple[list[ImageLink], datetime]:
+        """Links that show one version's images in the page (owner, 2026-11-16: shown
+        automatically). One call per page view, whatever the number of images: the same read
+        rule as downloads (not found otherwise), its own daily cap (server-wide default) and
+        one log entry per call, written before any link is handed out. Downloads keep their
+        own cap and log. Server-wide for now: per-organization limits come with SaaS."""
+        profile = active_profile(self._users, user_id, "this account cannot view files")
+        is_admin = profile.role == "admin"
+        now = self._clock()
+        found = self._repo.version_images(version_id)
+        if found is None or not (is_admin or self._repo.may_read(user_id, found[0], now)):
+            raise NotFoundError("version not found")
+        source_id, document_id, version_no, files = found
+        files = [f for f in files if f.storage_path][:IMAGES_PER_VERSION]
+        expires = now + timedelta(seconds=IMAGE_TTL_SECONDS)
+        if not files:
+            return [], expires
+        if not is_admin and self._repo.count_image_views_since(user_id, now - timedelta(days=1)) >= self._image_views:
+            raise TooManyRequestsError(
+                f"daily limit of {self._image_views} image views reached; download single files instead"
+            )
+        try:
+            links = [ImageLink(f.file_id, f.filename, self._signer.sign_inline(f.storage_path, IMAGE_TTL_SECONDS))
+                     for f in files]  # type: ignore[arg-type]
+        except Exception as exc:
+            raise UpstreamError(f"could not create the image links ({type(exc).__name__})") from exc
+        self._audit.record_required(
+            "user",
+            "file.image_links",
+            user_id,
+            title=None,
+            payload={"version_no": version_no, "files": [f.file_id for f in files]},
+            source_id=source_id,
+            document_id=document_id,
+        )
+        return links, expires

@@ -14,10 +14,22 @@ from collections.abc import Callable, Iterable
 
 from irb_watch.core.hashing import sha256_hex
 from irb_watch.core.models import AttachmentRef, DownloadedFile
-from irb_watch.core.state import FileContent
-from irb_watch.crawlers.errors import FileTooLargeError
+from irb_watch.core.state import TEXT_IMAGE_NOTE, FileContent
+from irb_watch.crawlers.errors import (
+    FetchError,
+    FileTooLargeError,
+    RobotsDisallowedError,
+    SiteUnavailableError,
+    TransientFetchError,
+)
 from irb_watch.parsers.archive import ArchiveError, is_zip, iter_zip
-from irb_watch.parsers.errors import TOO_LARGE, UNREADABLE, UNSUPPORTED_FORMAT, ParseError
+from irb_watch.parsers.errors import (
+    INLINE_IMAGE,
+    TOO_LARGE,
+    UNREADABLE,
+    UNSUPPORTED_FORMAT,
+    ParseError,
+)
 from irb_watch.parsers.formats import extract_text
 
 # file_sink(sha256, filename, content) stores the original and returns its storage path.
@@ -126,6 +138,64 @@ def too_large_record(
     )
 
 
+_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+
+
+def is_image(content: bytes) -> bool:
+    """PNG, JPEG, GIF or WebP, by their first bytes (an HTML error page is not one)."""
+    return content.startswith(_IMAGE_MAGIC) or (content[:4] == b"RIFF" and content[8:12] == b"WEBP")
+
+
+def _text_image(
+    name: str,
+    ref: AttachmentRef,
+    download: Callable[[AttachmentRef, int], DownloadedFile],
+    max_file_bytes: int,
+    file_sink: FileSink,
+) -> tuple[FileContent, str | None]:
+    """An image of the post's text -> (record, warning or None). Stored without text (reason
+    inline_image, never a warning). A permanent problem (the site answers an error, or the bytes
+    are not an image) keeps the post with a placeholder whose hash depends only on the address,
+    so the same broken image is "unchanged" next time, plus a warning an admin can mark OK.
+    Temporary errors (timeouts, the site down, an ended session) are not caught: the post then
+    fails and keeps its old state, as for attachments, so a blip never looks like a change."""
+    try:
+        downloaded = download(ref, max_file_bytes)
+    except FileTooLargeError:
+        record = too_large_record(name, ref.size_label, max_file_bytes, ref.stable_id)
+        return record, f"{name}: {record.note}"
+    except (TransientFetchError, SiteUnavailableError):
+        raise
+    except (FetchError, RobotsDisallowedError) as exc:
+        return _image_placeholder(name, ref, f"could not be loaded ({plain_note(str(exc))[:160]})")
+    if not is_image(downloaded.content):
+        return _image_placeholder(name, ref, "the site sent something that is not an image")
+    sha = downloaded.sha256
+    return FileContent(
+        filename=name,
+        size_label=size_label(len(downloaded.content)),
+        sha256=sha,
+        text=None,
+        hash_only_reason=INLINE_IMAGE,
+        storage_path=file_sink(sha, name, downloaded.content),
+        note=TEXT_IMAGE_NOTE,
+    ), None
+
+
+def _image_placeholder(name: str, ref: AttachmentRef, why: str) -> tuple[FileContent, str]:
+    note = f"{TEXT_IMAGE_NOTE}: {why}, open the post on the hospital site"
+    record = FileContent(
+        filename=name,
+        size_label="",
+        sha256=sha256_hex(f"text-image-unavailable\0{ref.stable_id or ref.url}".encode()),
+        text=None,
+        hash_only_reason=UNREADABLE,
+        storage_path=None,
+        note=note,
+    )
+    return record, f"{name}: {note}"
+
+
 def observe_files(
     refs: Iterable[AttachmentRef],
     download: Callable[[AttachmentRef, int], DownloadedFile],
@@ -141,6 +211,11 @@ def observe_files(
         count = seen.get(ref.filename, 0) + 1
         seen[ref.filename] = count
         name = ref.filename if count == 1 else f"{ref.filename} ({count})"
+        if ref.inline_image:
+            record, problem = _text_image(name, ref, download, max_file_bytes, file_sink)
+            files.append(record)
+            warnings.extend([problem] if problem else [])
+            continue
         try:
             downloaded = download(ref, max_file_bytes)
         except FileTooLargeError:

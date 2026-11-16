@@ -20,6 +20,14 @@ from irb_watch.ai.digest import Digest, change_digest, new_post_digest
 from irb_watch.ai.templates import template_summary
 from irb_watch.ai.types import CHANGE, NEW, Classification, Classifier, Summarizer
 from irb_watch.core.detect import ChangeEvent, DocumentStore
+from irb_watch.core.state import VersionContent, is_text_image
+
+
+def _images_only(event: ChangeEvent, content: VersionContent) -> bool:
+    """A change of text images only, or a new post with no text and only text images."""
+    if event.kind == "new":
+        return not content.body_text.strip() and bool(content.files) and all(is_text_image(f) for f in content.files)
+    return event.detail is not None and event.detail.images_only
 
 log = logging.getLogger(__name__)
 
@@ -76,9 +84,15 @@ class Enricher:
                 else change_digest(event.detail, version.content)
             )
 
-            classification, note = self._classify(digest, include_substantive=not is_new)
+            # Images have no text: a change of text images only, or a new post that is only
+            # images, sends nothing to Jev or OpenAI (owner, 2026-11-16).
+            images_only = _images_only(event, version.content)
+            if images_only:
+                classification, note = None, None
+            else:
+                classification, note = self._classify(digest, include_substantive=not is_new)
             priority = self._priority(event, classification)
-            template_only = not is_new and self._is_cosmetic(event, classification)
+            template_only = images_only or (not is_new and self._is_cosmetic(event, classification))
 
             summary, source, ai_note, summaries_left = self._summary(
                 event, version.content.title, digest, template_only, summaries_left

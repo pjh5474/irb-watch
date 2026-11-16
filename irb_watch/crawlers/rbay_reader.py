@@ -15,7 +15,7 @@ from irb_watch.crawlers.attachments import FileSink, observe_files
 from irb_watch.crawlers.credentials import CredentialStore
 from irb_watch.crawlers.errors import CrawlError, LoginExpiredError, SiteUnavailableError
 from irb_watch.crawlers.fetcher import SafeFetcher
-from irb_watch.crawlers.rbay import RbayAdapter
+from irb_watch.crawlers.rbay import MAX_TEXT_IMAGES, RbayAdapter
 from irb_watch.crawlers.rbay_login import RbaySession, RbaySessionPool
 from irb_watch.crawlers.snuh_reader import ScanReading, pick_window
 from irb_watch.parsers.errors import ParseError
@@ -93,6 +93,11 @@ class RbaySourceReader:
     def _observe(self, adapter: RbayAdapter, summary, file_sink: FileSink) -> Observation:
         detail = adapter.fetch_post(summary)
         files, warnings = observe_files(detail.attachments, adapter.download, self._max_file_bytes, file_sink)
+        if detail.skipped_images:
+            warnings.append(
+                f"{detail.skipped_images} more images in the post's text were not saved "
+                f"(at most {MAX_TEXT_IMAGES} per post)"
+            )
         return Observation(
             external_id=summary.post_id,
             source_url=summary.detail_url,

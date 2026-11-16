@@ -7,6 +7,7 @@ The language follows the document: Korean if its title contains Hangul, else Eng
 import re
 
 from irb_watch.core.diff import ChangeDetail
+from irb_watch.core.state import is_text_image
 
 _HANGUL = re.compile("[가-힣ㄱ-ㆎ]")
 
@@ -17,6 +18,9 @@ _TEXT = {
         "added": "첨부파일이 추가되었습니다: {names}.",
         "removed": "첨부파일이 삭제되었습니다: {names}.",
         "replaced": "첨부파일이 교체되었습니다: {names}.",
+        "image_added": "본문 이미지가 추가되었습니다 ({count}개).",
+        "image_removed": "본문 이미지가 삭제되었습니다 ({count}개).",
+        "image_replaced": "본문 이미지가 바뀌었습니다 ({count}개).",
         "fallback": "문서가 수정되었습니다.",
     },
     "en": {
@@ -25,6 +29,9 @@ _TEXT = {
         "added": "Attachments added: {names}.",
         "removed": "Attachments removed: {names}.",
         "replaced": "Attachments replaced: {names}.",
+        "image_added": "Images added to the text ({count}).",
+        "image_removed": "Images removed from the text ({count}).",
+        "image_replaced": "Images in the text changed ({count}).",
         "fallback": "The document was edited.",
     },
 }
@@ -42,8 +49,13 @@ def template_summary(detail: ChangeDetail, title: str) -> str:
         parts.append(words["title"].format(old=old, new=new))
     if detail.body_diff is not None:
         parts.append(words["body"])
+    changes = detail.meaningful_file_changes
     for kind in ("added", "removed", "replaced"):
-        names = ", ".join(c.filename for c in detail.meaningful_file_changes if c.kind == kind)
+        # Images of the post's text are counted; their file names (upload numbers) say nothing.
+        names = ", ".join(c.filename for c in changes if c.kind == kind and not is_text_image(c.new or c.old))
         if names:
             parts.append(words[kind].format(names=names))
+        count = sum(1 for c in changes if c.kind == kind and is_text_image(c.new or c.old))
+        if count:
+            parts.append(words[f"image_{kind}"].format(count=count))
     return " ".join(parts) or words["fallback"]

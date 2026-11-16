@@ -29,3 +29,31 @@ def create_download_link(
     """
     link = service.download_link(user.id, file_id)
     return DownloadLinkOut(url=link.url, expires_at=link.expires_at.isoformat(), filename=link.filename)
+
+
+class ImageLinkOut(BaseModel):
+    file_id: int
+    filename: str
+    url: str  # shown in the page; works for about 10 minutes
+
+
+class ImageLinksOut(BaseModel):
+    images: list[ImageLinkOut]
+    expires_at: str
+
+
+@router.post("/versions/{version_id}/image-links", response_model=ImageLinksOut)
+def create_image_links(
+    version_id: int,
+    user: AuthUser = Depends(current_user),
+    service: DownloadService = Depends(get_download_service),
+) -> ImageLinksOut:
+    """Links that show the images of one stored version in the page: images of the post's text
+    and attached image files. `version_id` is `document_versions.id`. Same access as reading
+    the document (404 otherwise). One call per page view, logged and capped per day on its
+    own; downloads keep their own cap."""
+    links, expires = service.image_links(user.id, version_id)
+    return ImageLinksOut(
+        images=[ImageLinkOut(file_id=x.file_id, filename=x.filename, url=x.url) for x in links],
+        expires_at=expires.isoformat(),
+    )

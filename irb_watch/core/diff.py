@@ -7,7 +7,7 @@ numbers or between two dates (see StoredDocument.version_as_of).
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-from irb_watch.core.state import FileContent, VersionContent
+from irb_watch.core.state import FileContent, VersionContent, is_text_image
 
 MAX_TOKENS = 20_000  # per side; beyond this a word-level diff gets too slow
 
@@ -101,6 +101,29 @@ class ChangeDetail:
             and self.body_diff is None
             and bool(self.file_changes)
             and not self.meaningful_file_changes
+        )
+
+    @property
+    def images_only(self) -> bool:
+        """Only images of the post's text changed (no title, text or attachment change): the
+        card is the template ("images added / changed / removed") and nothing goes to the AI."""
+        changes = self.meaningful_file_changes
+        return (
+            self.title_change is None
+            and self.body_diff is None
+            and bool(changes)
+            and all(is_text_image(c.new or c.old) for c in changes)  # type: ignore[arg-type]
+        )
+
+    def first_images_only(self, old: VersionContent) -> bool:
+        """Images of the post's text appear for the first time and nothing else changed: the
+        quiet catch-up after scans began reading them (owner, 2026-11-16). Later image changes
+        are cards. Known miss: the very first image added to a post with no other change is
+        also quiet (still kept as a version)."""
+        return (
+            self.images_only
+            and all(c.kind == "added" for c in self.meaningful_file_changes)
+            and not any(is_text_image(f) for f in old.files)
         )
 
     @property

@@ -15,7 +15,7 @@ instead of looking like "no change".
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -201,14 +201,45 @@ def parse_detail(html: str, summary: PostSummary) -> PostDetail:
                     stable_id=key,  # the same file keeps its key across sessions (seen live)
                 )
             )
-    if not body and not attachments:
-        raise LayoutChangedError("empty post (no text and no files)")
+    images, skipped = text_images(editor)
+    if not body and not attachments and not images:
+        raise LayoutChangedError("empty post (no text, no files and no images from R-BAY)")
     return PostDetail(
         summary=summary,
         body_text=body,
         body_hash=sha256_hex(body.encode("utf-8")),
-        attachments=attachments,
+        attachments=attachments + images,
+        skipped_images=skipped,
     )
+
+
+MAX_TEXT_IMAGES = 20  # per post (owner, 2026-11-16)
+IMAGE_PATH = "/images/"  # where R-BAY's editor keeps uploaded images (seen live: /images/editorUpload/)
+
+
+def image_url(src: str) -> str | None:
+    """The absolute address of an image in a post's text when it is R-BAY's own image, else
+    None (embedded data: images and images on other hosts are not fetched)."""
+    if not src or src.startswith("data:"):
+        return None
+    url = urljoin(f"{BASE_URL}/", src.strip())
+    parts = urlsplit(url)
+    if parts.scheme != "https" or parts.hostname not in HOSTS or not parts.path.startswith(IMAGE_PATH):
+        return None
+    return url
+
+
+def text_images(editor) -> tuple[list[AttachmentRef], int]:
+    """R-BAY images shown in the post's text, in page order, each address once; at most
+    MAX_TEXT_IMAGES (the rest are counted). The name is the image's own file name, which R-BAY
+    makes unique per upload (seen live: /images/editorUpload/20260615/084145598410.png)."""
+    urls = list(dict.fromkeys(u for u in (image_url(i.get("src") or "") for i in editor.select("img")) if u))
+    refs = []
+    for url in urls[:MAX_TEXT_IMAGES]:
+        path = urlsplit(url).path
+        name = unquote(path.rsplit("/", 1)[-1]) or "image"
+        refs.append(AttachmentRef(filename=name, size_label="", url=url, stable_id=path, inline_image=True))
+    return refs, max(0, len(urls) - MAX_TEXT_IMAGES)
 
 
 class RbayAdapter:
@@ -287,6 +318,8 @@ class RbayAdapter:
         return self._page(menu.post_path, data)
 
     def download(self, attachment: AttachmentRef, max_bytes: int | None = None) -> DownloadedFile:
+        if attachment.inline_image:
+            return self._image(attachment, max_bytes)
         key = attachment.url
         if not _KEY.match(key):
             raise FetchError(f"bad download key for {attachment.filename}")
@@ -312,6 +345,18 @@ class RbayAdapter:
         if not response.content:
             raise FetchError(f"empty download for {attachment.filename}")
         # The name people see is the post's link text (the served name was the same live).
+        return DownloadedFile(attachment.filename, response.content, sha256_hex(response.content))
+
+    def _image(self, attachment: AttachmentRef, max_bytes: int | None) -> DownloadedFile:
+        """An image of the post's text: a plain GET (seen live: served the same with or without
+        the session, the same bytes every time). A session that ended answers with a login
+        page, so that is checked first; whether the bytes are an image is checked by the caller."""
+        if image_url(attachment.url) != attachment.url:
+            raise FetchError(f"not an R-BAY image address: {attachment.filename}")
+        response = self._fetcher.get(attachment.url, max_bytes=max_bytes)
+        self._check_session(response)
+        if not response.content:
+            raise FetchError(f"empty answer for the image {attachment.filename}")
         return DownloadedFile(attachment.filename, response.content, sha256_hex(response.content))
 
 

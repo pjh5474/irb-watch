@@ -39,6 +39,16 @@ class FileContent:
 # File reasons that come with a warning (an admin can mark them OK): unreadable files and
 # attachments too big to download. Same strings as parsers/errors.py.
 FLAGGED_REASONS = ("unreadable", "too_large")
+# parsers.errors.INLINE_IMAGE by value (core imports nothing from parsers); keep them equal.
+# TEXT_IMAGE_NOTE starts the note of every text image (crawlers.attachments uses this one).
+INLINE_IMAGE_REASON = "inline_image"
+TEXT_IMAGE_NOTE = "image in the post's text"
+
+
+def is_text_image(f: "FileContent") -> bool:
+    """An image of the post's text: stored (reason inline_image), or a placeholder for one that
+    could not be loaded (its note says so)."""
+    return f.hash_only_reason == INLINE_IMAGE_REASON or (f.note or "").startswith(TEXT_IMAGE_NOTE)
 
 
 def warning_key(reason: str, files: tuple["FileContent", ...]) -> str:

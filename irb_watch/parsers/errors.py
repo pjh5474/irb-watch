@@ -21,6 +21,7 @@ UNSUPPORTED_FORMAT = "unsupported_format"
 DISTRIBUTION_PROTECTED = "distribution_protected"
 UNREADABLE = "unreadable"
 TOO_LARGE = "too_large"  # an attachment over the size limit: listed, not downloaded
+INLINE_IMAGE = "inline_image"  # an image in the post's text: stored and shown, no text, no warning
 # (core/state.py FLAGGED_REASONS lists UNREADABLE and TOO_LARGE by value; keep them equal.)
 
 

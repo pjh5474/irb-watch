@@ -21,6 +21,9 @@ class AttachmentRef:
     # An id the site keeps for this very file across sessions (R-BAY's download key), if any.
     # Lets a file that is never downloaded (too large) still be told apart from a replacement.
     stable_id: str | None = None
+    # An image shown in the post's text (url: its absolute address on the site), not an
+    # attachment: fetched with a plain GET and stored without text (reason inline_image).
+    inline_image: bool = False
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,8 @@ class PostDetail:
     summary: PostSummary
     body_text: str  # normalized: no view count, no prev/next links
     body_hash: str
-    attachments: list[AttachmentRef] = field(default_factory=list)
+    attachments: list[AttachmentRef] = field(default_factory=list)  # files, then text images
+    skipped_images: int = 0  # images in the text over the per-post limit (not saved)
 
 
 @dataclass(frozen=True)
