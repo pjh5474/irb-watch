@@ -261,6 +261,10 @@ class RbayAdapter:
         return declared, list(seen.values())
 
     def fetch_post(self, summary: PostSummary) -> PostDetail:
+        return parse_detail(self.post_page(summary).text, summary)
+
+    def post_page(self, summary: PostSummary) -> FetchedResponse:
+        """The post's raw page (for fetch_post, and for the live check script)."""
         menu = self.menu(summary.board_key)
         form = self._forms.get(summary.board_key)
         if form is None:
@@ -280,8 +284,7 @@ class RbayAdapter:
             "searchTitle": "",
             "rowsPerPage": "20",
         }
-        response = self._page(menu.post_path, data)
-        return parse_detail(response.text, summary)
+        return self._page(menu.post_path, data)
 
     def download(self, attachment: AttachmentRef, max_bytes: int | None = None) -> DownloadedFile:
         key = attachment.url
