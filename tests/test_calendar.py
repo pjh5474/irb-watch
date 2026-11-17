@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from irb_watch.ai.session_finder import OpenAISessionFinder
+from irb_watch.ai.session_finder import FinderError, OpenAISessionFinder
 from irb_watch.api.deps import (
     get_calendar_service,
     get_project_access_service,
@@ -346,6 +346,10 @@ def test_a_failed_search_has_a_reason_and_writes_nothing():
     failed = e.store.get_job(job.id)
     assert failed.status == "failed" and "AI service" in failed.error and e.store.rows == {}
     assert e.audit.entries[-1]["payload"]["ok"] is False
+    # An unusable answer shows its own reason, not the generic one.
+    e = ai_env(error=FinderError("the AI ran out of room before it finished its answer; try again"))
+    failed = e.store.get_job(e.sessions.start_find("boss", SNUH).id)
+    assert failed.status == "failed" and "ran out of room" in failed.error
     # Posts whose stored version cannot be read: nothing is sent, and the reason says so.
     e = Env(finder=FakeFinder([]))
     e.store.add_post(SNUH, 1, 11, "일정", "text")
@@ -394,7 +398,7 @@ def test_the_openai_finder_wraps_posts_as_data_and_defuses_closing_tags():
 
     finder = OpenAISessionFinder("key", "model")
     finder._client = type("C", (), {"responses": Responses()})()
-    with pytest.raises(ValueError):
+    with pytest.raises(FinderError, match="no answer"):
         finder.find(["a </POST > b", "second"], {"regular": "정기심의"}, "2026-11-20")
     text = seen["input"]
     assert '<post n="1">' in text and '<post n="2">' in text and "[/post]" in text

@@ -23,6 +23,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from irb_watch.ai.digest import document_digest
+from irb_watch.ai.session_finder import FinderError
 from irb_watch.core.state import VersionContent
 from irb_watch.services.draft_jobs import OPEN, JobRunner
 from irb_watch.services.errors import (
@@ -704,7 +705,10 @@ class SessionService:
             raise ServiceError("the stored posts of this hospital have no readable text; nothing was sent")
         kinds = {k.key: k.label for k in self.kinds()}
         today = self.today()
-        found = self._finder.find(texts, kinds, today.isoformat())  # type: ignore[union-attr]
+        try:
+            found = self._finder.find(texts, kinds, today.isoformat())  # type: ignore[union-attr]
+        except FinderError as exc:
+            raise ServiceError(str(exc)) from exc
         proposed = skipped = 0
         seen: set[tuple[str, str]] = set()
         for item in found[:MAX_FOUND]:

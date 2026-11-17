@@ -2,11 +2,17 @@
 typed answer. The answer is only a PROPOSAL list; services/sessions.py checks every field and
 a person approves each session (CAL-1, owner 2026-11-15)."""
 
-from openai import OpenAI
-from pydantic import BaseModel, Field
+from openai import OpenAI, OpenAIError
+from pydantic import BaseModel, Field, ValidationError
 
 from irb_watch.ai.openai_summarizer import OPENAI_DIRECT_URL
 from irb_watch.ai.tags import defuse
+
+MAX_OUTPUT_TOKENS = 16000
+
+
+class FinderError(Exception):
+    """The model's answer was unusable; the message is safe to show to the admin."""
 
 INSTRUCTIONS = (
     "You read posts published by a hospital's institutional review board (IRB) and list the "
@@ -48,15 +54,25 @@ class OpenAISessionFinder:
         kind_lines = "\n".join(f"{k}: {label}" for k, label in kinds.items())
         # <post n="1"> ... </post>: a closing </post> inside the text is defused (any case, spaces).
         body = "\n".join(f'<post n="{i + 1}">\n{defuse(text, "post")}\n</post>' for i, text in enumerate(posts))
-        response = self._client.responses.parse(
-            model=self.model,
-            instructions=INSTRUCTIONS,
-            input=f"Today is {today}.\n<kinds>\n{kind_lines}\n</kinds>\n{body}",
-            text_format=FoundSessions,
-            store=False,  # do not keep the request or answer on OpenAI's side
-            max_output_tokens=4000,
-        )
+        # The cap counts hidden reasoning tokens too; 4000 was used up before any answer on
+        # hospitals with many notices (answer cut off or empty).
+        try:
+            response = self._client.responses.parse(
+                model=self.model,
+                instructions=INSTRUCTIONS,
+                input=f"Today is {today}.\n<kinds>\n{kind_lines}\n</kinds>\n{body}",
+                text_format=FoundSessions,
+                store=False,  # do not keep the request or answer on OpenAI's side
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+            )
+        except ValidationError as exc:
+            raise FinderError("the AI's answer was cut off or malformed; try again") from exc
+        except OpenAIError as exc:
+            # Timeout, rate limit, rejected request: the type is safe to show, the text may not be.
+            raise FinderError(f"the AI service refused or did not answer ({type(exc).__name__}); try again later") from exc
+        if getattr(response, "status", None) == "incomplete":
+            raise FinderError("the AI ran out of room before it finished its answer; try again")
         parsed = response.output_parsed
         if parsed is None:
-            raise ValueError("the model returned no answer")
+            raise FinderError("the AI returned no answer; try again")
         return list(parsed.sessions)
