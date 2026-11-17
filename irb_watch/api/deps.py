@@ -133,7 +133,7 @@ def get_organization_service() -> OrganizationService:
 
 def get_pipeline_setup_service() -> PipelineSetupService:
     client = get_supabase_client()
-    # The lists are cached for 60 s and cleared by every admin write (db/read_cache.py).
+    # The lists are cached for 10 minutes and cleared by every admin write (db/read_cache.py).
     return PipelineSetupService(cached_setup_store(SupabasePipelineSetupStore(client)), SupabaseAuditSink(client))
 
 

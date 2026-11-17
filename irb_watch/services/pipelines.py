@@ -52,6 +52,7 @@ from irb_watch.services.errors import (
     UpstreamError,
     ValidationError,
 )
+from irb_watch.services.parallel import together
 from irb_watch.services.pipeline_admin import (
     FOLLOW_UP,
     SECTIONS,
@@ -693,19 +694,28 @@ class PipelineService:
     # -- pipelines ----------------------------------------------------------------------------
 
     def _summaries(
-        self, project_id: int, pipelines: list[Pipeline], loaded: list[Step] | None = None
+        self,
+        project_id: int,
+        pipelines: list[Pipeline],
+        loaded: list[Step] | None = None,
+        prefetched: tuple[set[int], dict[int, str], list[Site]] | None = None,
     ) -> list[PipelineSummary]:
         """`loaded`: the steps of these pipelines, when the caller already read them (the step
-        page), so they are not read twice."""
-        in_project = self._store.project_hospital_ids(project_id)
-        names = self._store.hospital_names([p.hospital_id for p in pipelines])
+        page), so they are not read twice. `prefetched`: the project's hospital ids, the hospital
+        names and the sites, when the caller read them at the same time as other things."""
+        if prefetched is None:
+            in_project = self._store.project_hospital_ids(project_id)
+            names = self._store.hospital_names([p.hospital_id for p in pipelines])
+            site_ids = sorted({p.site_id for p in pipelines if p.site_id is not None})
+            site_rows = self._sites.sites(site_ids) if self._sites is not None and site_ids else []
+        else:
+            in_project, names, site_rows = prefetched
         closed = {s.key for s in self._setup.statuses(include_archived=True) if s.closed}
         steps = [
             s for s in (loaded if loaded is not None else self._store.steps([p.id for p in pipelines]))
             if s.deleted_at is None
         ]
-        site_ids = sorted({p.site_id for p in pipelines if p.site_id is not None})
-        sites = {s.id: s for s in self._sites.sites(site_ids)} if self._sites is not None and site_ids else {}
+        sites = {s.id: s for s in site_rows}
         out = []
         for p in pipelines:
             own = [s for s in steps if s.pipeline_id == p.id]
@@ -800,11 +810,21 @@ class PipelineService:
         )
         return pipeline
 
-    def _views(self, steps: list[Step]) -> list[StepView]:
+    def _views(
+        self,
+        steps: list[Step],
+        documents: list[StepDocument] | None = None,
+        types: list[StepType] | None = None,
+    ) -> list[StepView]:
+        """`documents` and `types` (all, archived too): when the caller read them already."""
         by_step: dict[int, list[StepDocument]] = {}
-        for d in self._store.documents([s.id for s in steps]):  # grouped once, not per step
+        if documents is None:
+            documents = self._store.documents([s.id for s in steps])
+        for d in documents:  # grouped once, not per step
             by_step.setdefault(d.step_id, []).append(d)
-        all_types = {t.id: t for t in self._setup.step_types(include_archived=True)}
+        if types is None:
+            types = self._setup.step_types(include_archived=True)
+        all_types = {t.id: t for t in types}
         views = []
         for step in steps:
             own = by_step.get(step.id, [])
@@ -828,7 +848,23 @@ class PipelineService:
         """One step for its own page. A removed step or a step of a removed pipeline still
         opens (read-only in the page; files stay downloadable); a stranger gets not found."""
         pipeline, level = self._pipeline_at(user_id, pipeline_id, live=False, need="read")
-        all_steps = self._store.steps([pipeline.id])  # read once; the summary and the order use it
+        # Everything below that does not depend on another answer is read at the same time (about
+        # 15 calls one after another took 0.7 s warm and 1.3 s cold; owner's measurement
+        # 2026-11-17). The steps are read once; the summary and the order use them.
+        site_ids = [pipeline.site_id] if pipeline.site_id is not None else []
+        (
+            all_steps, statuses, results, all_types, in_project, names, site_rows, documents, hospital_sessions,
+        ) = together(
+            lambda: self._store.steps([pipeline.id]),
+            lambda: self._setup.statuses(include_archived=True),
+            lambda: self._setup.results(include_archived=True),
+            lambda: self._setup.step_types(include_archived=True),
+            lambda: self._store.project_hospital_ids(pipeline.project_id),
+            lambda: self._store.hospital_names([pipeline.hospital_id]),
+            lambda: self._sites.sites(site_ids) if self._sites is not None and site_ids else [],
+            lambda: self._store.documents([step_id]),
+            lambda: self._hospital_sessions(pipeline),
+        )
         steps = display_order(all_steps)
         step = next((s for s in steps if s.id == step_id), None)
         if step is None:
@@ -839,15 +875,21 @@ class PipelineService:
             at = live.index(step.id)
             previous_id = live[at - 1] if at > 0 else None
             next_id = live[at + 1] if at + 1 < len(live) else None
-        statuses = self._setup.statuses(include_archived=True)
-        results = self._setup.results(include_archived=True)
         result = next((r for r in results if r.key == step.result_key), None)
         parent = next((s for s in steps if s.id == step.parent_step_id), None) if step.parent_step_id else None
         follow_ups = [s for s in steps if s.parent_step_id == step.id and s.deleted_at is None]
-        target, sessions, suggested, warning, kinds = self._step_sessions(pipeline, step)
+        # These two need the step: its target meeting and (for a copy) where it came from.
+        target_read, copied_from = together(
+            lambda: self._target_session(step),
+            lambda: self._origin(pipeline, step),
+        )
+        target, sessions, suggested, warning, kinds = self._step_sessions_from(
+            step, hospital_sessions, target_read
+        )
+        live_types = [t for t in all_types if t.archived_at is None]
         return StepPage(
-            self._summaries(pipeline.project_id, [pipeline], all_steps)[0],
-            self._views([step])[0],
+            self._summaries(pipeline.project_id, [pipeline], all_steps, (in_project, names, site_rows))[0],
+            self._views([step], documents, all_types)[0],
             previous_id,
             next_id,
             statuses,
@@ -855,7 +897,7 @@ class PipelineService:
             results=results,
             parent=parent,
             follow_ups=follow_ups,
-            step_types=[t for t in self._setup.step_types() if t.category == FOLLOW_UP],
+            step_types=[t for t in live_types if t.category == FOLLOW_UP],
             suggested_status=suggested_status(step, result, statuses),
             # The step's own result counts even when the admin archived it since (as in
             # suggested_status): archiving stops new use, it does not change past answers.
@@ -865,7 +907,7 @@ class PipelineService:
             suggested_session_id=suggested,
             target_warning=warning,
             session_kinds=kinds,
-            copied_from=self._origin(pipeline, step),
+            copied_from=copied_from,
         )
 
     def _origin(self, pipeline: Pipeline, step: Step) -> StepOrigin | None:
@@ -972,24 +1014,43 @@ class PipelineService:
         made = {int(r["pipeline_id"]): int(r["step_id"]) for r in done}
         return [replace(t, step_id=made.get(t.pipeline_id, t.step_id)) if t.action != SKIP else t for t in chosen]
 
-    def _step_sessions(
-        self, pipeline: Pipeline, step: Step
+    def _hospital_sessions(self, pipeline: Pipeline) -> tuple[list[Session], Session | None, list[SessionKind]] | None:
+        """The hospital's upcoming sessions, the hint and the kinds (CAL-1). None when the read
+        failed or there is no session service: the page then shows no sessions."""
+        if self._sessions is None:
+            return None
+        try:
+            sessions, hint = self._sessions.upcoming_for(pipeline.hospital_id)
+            return sessions, hint, self._sessions.kinds(include_archived=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("the sessions of pipeline %s could not be read: %s", pipeline.id, type(exc).__name__)
+            return None
+
+    def _target_session(self, step: Step) -> tuple[Session | None, bool]:
+        """The step's target meeting and whether the read failed."""
+        if self._sessions is None or step.target_session_id is None:
+            return None, False
+        try:
+            return self._sessions.get_many([step.target_session_id]).get(step.target_session_id), False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("the target session of step %s could not be read: %s", step.id, type(exc).__name__)
+            return None, True
+
+    def _step_sessions_from(
+        self,
+        step: Step,
+        hospital: tuple[list[Session], Session | None, list[SessionKind]] | None,
+        target_read: tuple[Session | None, bool],
     ) -> tuple[Session | None, list[Session], int | None, str | None, list[SessionKind]]:
-        """The step's target meeting, the hospital's upcoming sessions, the hint and the kinds
-        (CAL-1). A failed read leaves them out with the warning 'unavailable' instead of failing
-        the page."""
+        """The step's target meeting, the hospital's upcoming sessions, the hint, the warning and
+        the kinds. A failed read leaves them out with the warning 'unavailable' instead of
+        failing the page."""
         if self._sessions is None:
             return None, [], None, None, []
-        try:
-            target = (
-                self._sessions.get_many([step.target_session_id]).get(step.target_session_id)
-                if step.target_session_id is not None else None
-            )
-            sessions, hint = self._sessions.upcoming_for(pipeline.hospital_id)
-            kinds = self._sessions.kinds(include_archived=True)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("the sessions of step %s could not be read: %s", step.id, type(exc).__name__)
+        target, target_failed = target_read
+        if hospital is None or target_failed:
             return None, [], None, "unavailable", []
+        sessions, hint, kinds = hospital
         warning = target_warning(target)
         if step.target_session_id is not None and target is None:
             warning = "removed"

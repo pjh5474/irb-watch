@@ -23,7 +23,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-DEFAULT_TTL_SECONDS = 60.0
+# 10 minutes (owner, 2026-11-17; was 60 s): an edit made through this server clears the cache at
+# once, so only an edit made straight in the database waits this long. A user who pauses between
+# clicks used to meet an empty cache on most pages (4 extra calls, about 0.15 s).
+DEFAULT_TTL_SECONDS = 600.0
 
 
 class ReadCache:
