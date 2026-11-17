@@ -67,12 +67,13 @@ def test_the_weekly_mail_goes_to_all_admins_with_the_figures():
     assert mail.to == ("a@example.com", "b@example.com")
     assert "요약 2" in mail.subject and "다운로드 2" in mail.subject and "로그인 2" in mail.subject
     text = mail.text
-    assert "AI summaries requested: 2 (+1)" in text  # 1 the week before
-    assert "File downloads: 2 (+2)" in text
-    assert "Accounts that signed in: 2" in text and "New accounts: 1" in text
+    assert "AI 요약 요청: 2 (+1)" in text  # 1 the week before
+    assert "파일 다운로드: 2 (+2)" in text
+    assert "기간 중 로그인한 계정: 2" in text and "새 계정: 1" in text
     assert "heavy@example.com" in text and "new@example.com" in text
     assert "quiet@example.com" not in text  # no activity this week
-    assert "3 daily runs" not in text and "1 daily runs, 3 source scans, 1 failed" in text
+    assert "일일 실행 1회, 출처 수집 3건, 실패 1건" in text
+    assert "---" not in text and "Weekly usage" not in text  # no English half
     assert "https://app.example.com/ko/admin/sources" in text
 
 
@@ -82,14 +83,14 @@ def test_the_period_is_the_last_seven_days():
     assert "2026-11-02 ~ 2026-11-09" in env.mailer.sent[0].text
 
 
-def test_a_study_appears_as_a_number_and_sources_needing_attention_are_listed():
+def test_a_study_is_named_exactly_and_sources_needing_attention_are_listed():
+    # Owner, 2026-11-17: the weekly mail names members-only sources like the other admin mails.
     env = Env()
     env.service.send_scheduled()
     mail = env.mailer.sent[0]
-    everything = mail.subject + mail.text + mail.html
-    assert "Secret Study" not in everything
-    assert "회원 전용 출처 #6" in mail.text and "Members-only source #6" in mail.text
-    assert "Guides: Needs attention" in mail.text and "Members-only source #6: Problem" in mail.text
+    assert "Secret Study" in mail.text and "Secret Study" in mail.html
+    assert "회원 전용 출처" not in mail.text and "Members-only source" not in mail.text
+    assert "Guides: 확인 필요" in mail.text and "Secret Study: 문제" in mail.text
     assert "Rules: 1 / 0" in mail.text  # one new document, none updated
 
 
@@ -152,7 +153,7 @@ def test_more_than_fifty_active_accounts_are_cut_with_a_count():
     env = Env()
     env.store.user_list = [UserInfo(f"u{i}", f"u{i}@example.com", at(40), at(1)) for i in range(60)]
     env.service.send_scheduled()
-    assert "and 10 more" in env.mailer.sent[0].text and env.mailer.sent[0].text.count("@example.com |") == 100  # 50 rows, 2 languages
+    assert "그 밖에 10명" in env.mailer.sent[0].text and env.mailer.sent[0].text.count("@example.com |") == 50
 
 
 def test_a_quiet_week_still_sends_a_mail_of_zeros():
@@ -160,7 +161,7 @@ def test_a_quiet_week_still_sends_a_mail_of_zeros():
     env.store.event_list, env.store.user_list = [], []
     env.service.send_scheduled()
     text = env.mailer.sent[0].text
-    assert "AI summaries requested: 0 (0)" in text and "none" in text
+    assert "AI 요약 요청: 0 (0)" in text and "없음" in text
 
 
 # ---- the preview --------------------------------------------------------------------------------
@@ -170,7 +171,7 @@ def test_the_preview_goes_to_one_address_only_and_takes_no_claim():
     env = Env(admins=("a@example.com", "b@example.com"))
     env.service.preview("me@example.com")
     assert env.mailer.sent[0].to == ("me@example.com",)
-    assert "Preview" in env.mailer.sent[0].text
+    assert "미리보기" in env.mailer.sent[0].text
     assert env.store.claims == set()
     assert env.service.send_scheduled() is True  # Monday's real mail is not used up
 
