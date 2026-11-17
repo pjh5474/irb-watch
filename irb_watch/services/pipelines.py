@@ -800,11 +800,6 @@ class PipelineService:
         )
         return pipeline
 
-    def _ordered_steps(self, pipeline: Pipeline) -> list[Step]:
-        """The overview's order (phase B2b): each live main step by position, followed by its
-        live follow-ups (by position); then removed steps."""
-        return display_order(self._store.steps([pipeline.id]))
-
     def _views(self, steps: list[Step]) -> list[StepView]:
         by_step: dict[int, list[StepDocument]] = {}
         for d in self._store.documents([s.id for s in steps]):  # grouped once, not per step
@@ -818,13 +813,15 @@ class PipelineService:
         return views
 
     def detail(self, user_id: str, pipeline_id: int) -> PipelineDetail:
-        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
-        summary = self._summaries(pipeline.project_id, [pipeline])[0]
-        views = self._views(self._ordered_steps(pipeline))
+        # The level comes with the pipeline and the steps are read once: the summary and the
+        # overview's order share them (17 database calls before, owner's measurement 2026-11-17).
+        pipeline, level = self._pipeline_at(user_id, pipeline_id, live=False, need="read")
+        all_steps = self._store.steps([pipeline.id])
+        summary = self._summaries(pipeline.project_id, [pipeline], all_steps)[0]
+        views = self._views(display_order(all_steps))
         return PipelineDetail(
             summary, views, self._setup.statuses(include_archived=True), self._setup.step_types(),
-            self.level(user_id, pipeline.project_id) or "read",
-            self._setup.results(include_archived=True),
+            level, self._setup.results(include_archived=True),
         )
 
     def step_page(self, user_id: str, pipeline_id: int, step_id: int) -> StepPage:
