@@ -47,6 +47,7 @@ from irb_watch.db.organizations import SupabaseOrganizationStore
 from irb_watch.db.pipeline_admin import SupabasePipelineSetupStore
 from irb_watch.db.pipelines import SupabasePipelineFiles, SupabasePipelineStore
 from irb_watch.db.project_access import SupabaseProjectAccessStore
+from irb_watch.db.read_cache import cached_session_store, cached_setup_store
 from irb_watch.db.reviews import SupabaseReviewStore
 from irb_watch.db.sessions import SupabaseSessionStore
 from irb_watch.db.sites import SupabaseSiteStore
@@ -130,7 +131,8 @@ def get_organization_service() -> OrganizationService:
 
 def get_pipeline_setup_service() -> PipelineSetupService:
     client = get_supabase_client()
-    return PipelineSetupService(SupabasePipelineSetupStore(client), SupabaseAuditSink(client))
+    # The lists are cached for 60 s and cleared by every admin write (db/read_cache.py).
+    return PipelineSetupService(cached_setup_store(SupabasePipelineSetupStore(client)), SupabaseAuditSink(client))
 
 
 def get_project_access_service() -> ProjectAccessService:
@@ -167,7 +169,7 @@ def _session_service(rules=None) -> SessionService:
     finder = build_session_finder()
     return SessionService(
         SupabaseUserStore(client),
-        SupabaseSessionStore(client, runner=settings.app_env),
+        cached_session_store(SupabaseSessionStore(client, runner=settings.app_env)),
         SupabaseAuditSink(client),
         finder=finder,
         runner=_session_job_runner() if finder is not None else None,

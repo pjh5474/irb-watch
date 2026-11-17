@@ -639,14 +639,20 @@ class PipelineService:
         return self._check(user_id, project_id, need, "project not found")
 
     def _pipeline(self, user_id: str, pipeline_id: int, *, live: bool = True, need: str = "edit") -> Pipeline:
+        return self._pipeline_at(user_id, pipeline_id, live=live, need=need)[0]
+
+    def _pipeline_at(
+        self, user_id: str, pipeline_id: int, *, live: bool = True, need: str = "edit"
+    ) -> tuple[Pipeline, str]:
+        """The pipeline and the user's level on its project, checked once."""
         self._user(user_id)
         pipeline = self._store.get_pipeline(pipeline_id)
         if pipeline is None:
             raise NotFoundError("pipeline not found")
-        self._check(user_id, pipeline.project_id, need, "pipeline not found")
+        level = self._check(user_id, pipeline.project_id, need, "pipeline not found")
         if live and pipeline.deleted_at is not None:
             raise ConflictError("this pipeline is removed; restore it first")
-        return pipeline
+        return pipeline, level
 
     def _step(self, pipeline: Pipeline, step_id: int, *, live: bool = True) -> Step:
         step = next((s for s in self._store.steps([pipeline.id]) if s.id == step_id), None)
@@ -686,11 +692,18 @@ class PipelineService:
 
     # -- pipelines ----------------------------------------------------------------------------
 
-    def _summaries(self, project_id: int, pipelines: list[Pipeline]) -> list[PipelineSummary]:
+    def _summaries(
+        self, project_id: int, pipelines: list[Pipeline], loaded: list[Step] | None = None
+    ) -> list[PipelineSummary]:
+        """`loaded`: the steps of these pipelines, when the caller already read them (the step
+        page), so they are not read twice."""
         in_project = self._store.project_hospital_ids(project_id)
         names = self._store.hospital_names([p.hospital_id for p in pipelines])
         closed = {s.key for s in self._setup.statuses(include_archived=True) if s.closed}
-        steps = [s for s in self._store.steps([p.id for p in pipelines]) if s.deleted_at is None]
+        steps = [
+            s for s in (loaded if loaded is not None else self._store.steps([p.id for p in pipelines]))
+            if s.deleted_at is None
+        ]
         site_ids = sorted({p.site_id for p in pipelines if p.site_id is not None})
         sites = {s.id: s for s in self._sites.sites(site_ids)} if self._sites is not None and site_ids else {}
         out = []
@@ -817,8 +830,9 @@ class PipelineService:
     def step_page(self, user_id: str, pipeline_id: int, step_id: int) -> StepPage:
         """One step for its own page. A removed step or a step of a removed pipeline still
         opens (read-only in the page; files stay downloadable); a stranger gets not found."""
-        pipeline = self._pipeline(user_id, pipeline_id, live=False, need="read")
-        steps = self._ordered_steps(pipeline)
+        pipeline, level = self._pipeline_at(user_id, pipeline_id, live=False, need="read")
+        all_steps = self._store.steps([pipeline.id])  # read once; the summary and the order use it
+        steps = display_order(all_steps)
         step = next((s for s in steps if s.id == step_id), None)
         if step is None:
             raise NotFoundError("step not found")
@@ -835,12 +849,12 @@ class PipelineService:
         follow_ups = [s for s in steps if s.parent_step_id == step.id and s.deleted_at is None]
         target, sessions, suggested, warning, kinds = self._step_sessions(pipeline, step)
         return StepPage(
-            self._summaries(pipeline.project_id, [pipeline])[0],
+            self._summaries(pipeline.project_id, [pipeline], all_steps)[0],
             self._views([step])[0],
             previous_id,
             next_id,
             statuses,
-            self.level(user_id, pipeline.project_id) or "read",
+            level,
             results=results,
             parent=parent,
             follow_ups=follow_ups,
