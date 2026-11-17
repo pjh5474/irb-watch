@@ -7,6 +7,7 @@ session handed over from an earlier board may already have timed out at R-BAY: t
 is read again once with a fresh login.
 """
 
+import logging
 from collections.abc import Callable
 
 from irb_watch.core.detect import Observation
@@ -19,6 +20,8 @@ from irb_watch.crawlers.rbay import MAX_TEXT_IMAGES, RbayAdapter
 from irb_watch.crawlers.rbay_login import RbaySession, RbaySessionPool
 from irb_watch.crawlers.snuh_reader import ScanReading, pick_window
 from irb_watch.parsers.errors import ParseError
+
+log = logging.getLogger(__name__)
 
 
 class RbaySourceReader:
@@ -33,6 +36,7 @@ class RbaySourceReader:
         max_posts: int,
         max_file_bytes: int,
         make_fetcher: Callable[[RbaySession], SafeFetcher],
+        refresh_contacts: Callable[[RbayAdapter], None] | None = None,
     ) -> None:
         self._pool = pool
         self._credentials = credentials
@@ -43,6 +47,8 @@ class RbaySourceReader:
         self._max_posts = max_posts
         self._max_file_bytes = max_file_bytes
         self._make_fetcher = make_fetcher
+        # Reads the hospital's contact cards once per run, in this session (see services/contacts).
+        self._refresh_contacts = refresh_contacts
         self._person_started = False
 
     def person_started(self) -> None:
@@ -70,13 +76,25 @@ class RbaySourceReader:
     def _read_with(self, session: RbaySession, file_sink: FileSink) -> ScanReading:
         adapter = RbayAdapter(self._make_fetcher(session), self._agency, session.menus)
         try:
-            return self._read(adapter, file_sink)
+            reading = self._read(adapter, file_sink)
+            self._contacts(adapter)  # after the board read fine: the session is known to be good
+            return reading
         except LoginExpiredError:
             self._pool.discard(session)
             raise
         finally:
             adapter.close()
             self._pool.release(session)
+
+    def _contacts(self, adapter: RbayAdapter) -> None:
+        """The contact cards. Whatever happens here never fails or changes the board's scan: the
+        callback records its own result, and an error that still escapes is only logged."""
+        if self._refresh_contacts is None:
+            return
+        try:
+            self._refresh_contacts(adapter)
+        except Exception as exc:  # noqa: BLE001 - not a reason to fail the scan or end the session
+            log.warning("contact cards of %s were not read: %s", self._site, type(exc).__name__)
 
     def _read(self, adapter: RbayAdapter, file_sink: FileSink) -> ScanReading:
         declared, summaries = adapter.list_board(self._board)

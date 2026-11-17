@@ -74,10 +74,11 @@ def test_login_user_makes_the_source_members_only_and_removing_it_never_makes_it
 # ---- studies: AI switch and one board for several accounts ------------------------------------
 
 
-def test_ai_is_off_by_default_for_a_members_only_source_and_on_for_a_public_one():
+def test_ai_is_on_by_default_for_a_public_and_a_members_only_source():
+    # Owner, 2026-11-17: on unless an admin turns it off (it used to be off for members-only).
     service = make_sources()
     assert service.create("a", "Public", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=1").ai_enabled
-    assert service.create("a", "Study", URL, login_user="study-1").ai_enabled is False
+    assert service.create("a", "Study", URL, login_user="study-1").ai_enabled is True
 
 
 def test_ai_can_be_chosen_when_creating_and_changed_later():
@@ -90,12 +91,12 @@ def test_ai_can_be_chosen_when_creating_and_changed_later():
     assert again.ai_enabled is True
 
 
-def test_turning_a_public_source_members_only_switches_ai_off_unless_told_otherwise():
+def test_turning_a_public_source_members_only_keeps_its_ai_switch_unless_told_otherwise():
     service = make_sources()
     a = service.create("a", "A", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=1")
     b = service.create("a", "B", "https://hrpp.snuh.org/hrpp/bbs/list.do?key=2")
-    assert service.update("a", a.id, login_user="study-1").ai_enabled is False
-    assert service.update("a", b.id, login_user="study-2", ai_enabled=True).ai_enabled is True
+    assert service.update("a", a.id, login_user="study-1").ai_enabled is True
+    assert service.update("a", b.id, login_user="study-2", ai_enabled=False).ai_enabled is False
 
 
 def test_the_same_board_may_be_registered_for_different_accounts_but_not_twice():

@@ -215,8 +215,8 @@ class SourceService:
         except UnsafeURLError as exc:
             raise ValidationError(f"URL is not allowed: {exc}") from exc
         members_only = "login_user" in config
-        # Study documents may be confidential: AI is off unless an admin asks for it.
-        use_ai = (not members_only) if ai_enabled is None else ai_enabled
+        # AI is on unless an admin turns it off (owner, 2026-11-17; it was off for members-only).
+        use_ai = True if ai_enabled is None else ai_enabled
         hospital, made = self._hospital_for(actor_id, name, adapter, config, hospital_id)
         try:
             source = self._store.create(
@@ -249,6 +249,75 @@ class SourceService:
         )
         return source
 
+    def create_rbay_hospital(
+        self,
+        actor_id: str | None,
+        address: str,
+        hospital_name: str,
+        login_user: str,
+        boards: list[str],
+        ai_enabled: bool | None = None,
+    ) -> tuple[list[Source], int, bool]:
+        """One R-BAY hospital's boards in one step (owner, 2026-11-17): one source per chosen board,
+        all under one hospital, named "<hospital> : <board>". Returns (the new sources, the
+        hospital id, whether this call made the hospital).
+
+        All or nothing for what can be known before writing: a bad address, an unknown board, a
+        missing login, or any chosen board already registered for this login refuses the whole
+        request with each reason and creates nothing. A database failure while writing is the only
+        way to end up with some boards; the error then names those that were created.
+        The hospital is the one other boards of this R-BAY hospital already use, else the one
+        with this name (created if missing)."""
+        agency = rbay_agency_key(f"https://{RBAY_HOST}{urlsplit(address.strip()).path}")
+        if agency is None or (urlsplit(address.strip()).hostname or "").lower() not in RBAY_HOSTS:
+            raise ValidationError(
+                "give the hospital's R-BAY address, https://www.r-bay.co.kr/agency/main/<code>"
+            )
+        name = " ".join(hospital_name.split())
+        if not name:
+            raise ValidationError("the hospital name is empty")
+        wanted = list(dict.fromkeys(b.strip().upper() for b in boards))
+        if not wanted:
+            raise ValidationError("choose at least one board")
+        unknown = [b for b in wanted if b not in RBAY_BOARDS]
+        if unknown:
+            raise ValidationError(f"unknown boards: {', '.join(unknown)}; allowed: {', '.join(RBAY_BOARDS)}")
+        login_user = _checked_login_user(login_user or "")
+        urls = {b: f"{rbay_agency_url(agency)}?board={b}" for b in wanted}
+
+        existing = self._store.list()
+        taken = [
+            b for b, url in urls.items()
+            if any(s.url == url and s.config.get("login_user", "") == login_user for s in existing)
+        ]
+        if taken:
+            raise ConflictError(
+                "already registered for this login: " + ", ".join(f"{b} ({RBAY_BOARDS[b]})" for b in taken)
+                + "; nothing was created"
+            )
+        hospital, made = self._hospital_for(actor_id, name, RBAY_ADAPTER, {"agency": agency}, None)
+        hospital_label = self._hospitals.get(hospital).name
+        created: list[Source] = []
+        try:
+            for board in wanted:
+                created.append(
+                    self.create(
+                        actor_id, f"{hospital_label} : {RBAY_BOARDS[board]}", urls[board], login_user,
+                        ai_enabled, hospital, None,
+                    )
+                )
+        except Exception as exc:
+            if not created:
+                self._drop_new_hospital(actor_id, hospital, made)
+                raise
+            names = ", ".join(s.name for s in created)
+            failed = RBAY_BOARDS[wanted[len(created)]]  # the boards go in order: the next one failed
+            raise ConflictError(
+                f"board {failed} was not created ({exc}); already created: {names}; "
+                "register the rest again after fixing the cause"
+            ) from exc
+        return created, hospital, made
+
     def create_manual(
         self,
         actor_id: str | None,
@@ -273,7 +342,7 @@ class SourceService:
                 "choose the hospital for a members-only source "
                 "(hospital names are visible to every user, so none is made from its name)"
             )
-        use_ai = (not members_only) if ai_enabled is None else ai_enabled
+        use_ai = True if ai_enabled is None else ai_enabled  # on by default (owner, 2026-11-17)
         hospital, made = self._hospital_for(actor_id, name, MANUAL_ADAPTER, {}, hospital_id)
         placeholder = f"{MANUAL_URL_PREFIX}{secrets.token_hex(8)}"
         try:
@@ -343,9 +412,7 @@ class SourceService:
             config = {k: v for k, v in current.config.items() if k != "login_user"}
             if login_user:
                 config["login_user"] = _checked_login_user(login_user)
-                values["requires_login"] = True
-                if not current.requires_login and ai_enabled is None:
-                    values["ai_enabled"] = False  # a public source turned members-only: AI off
+                values["requires_login"] = True  # the AI switch keeps its value (owner, 2026-11-17)
             # Removing the scanning login never clears requires_login: data already
             # scanned from a members-only board must not become public by accident.
             values["config"] = config

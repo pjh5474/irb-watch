@@ -70,6 +70,25 @@ _READ_SPECS = [
     },
     {
         "type": "function",
+        "name": "get_hospital_contacts",
+        "description": (
+            "The IRB office contacts (phone, fax, email) of hospitals, by part of the hospital "
+            "name, or the first few hospitals when no name is given. Each text is a contact "
+            "list as the hospital wrote it. Always give the checked_at date with an answer. "
+            "An empty field means the hospital has none listed on R-BAY. When check_status is "
+            "'failed' the last read failed: the saved texts may be old, say so. task_contacts lists "
+            "the people by task and tab (who to ask about DRB, contracts, the pharmacy, ...); "
+            "task_contacts_status 'none' means the hospital has no such page."
+        ),
+        "parameters": _schema(
+            {
+                "hospital": {"type": "string", "description": "part of the hospital name, max 100 chars"},
+                "limit": {"type": "integer", "description": "1-10, default 5"},
+            }
+        ),
+    },
+    {
+        "type": "function",
         "name": "list_documents",
         "description": (
             "List documents of one source, newest first. Use title_contains to find a "
@@ -184,6 +203,7 @@ class ToolBox:
                 return self._propose(args)
             handler = {
                 "list_sources": self._list_sources,
+                "get_hospital_contacts": self._get_hospital_contacts,
                 "list_documents": self._list_documents,
                 "get_changes": self._get_changes,
                 "get_document": self._get_document,
@@ -231,6 +251,39 @@ class ToolBox:
                 }
                 for s in self._visible()
             ]
+        )
+
+    def _get_hospital_contacts(self, args: dict) -> str:
+        name = args.get("hospital")
+        if name is not None:
+            if not isinstance(name, str):
+                raise ToolArgError("hospital must be text")
+            name = name.strip()[:100] or None
+        limit = _int(args, "limit", 1, 10, 5)
+        rows = self._data.hospital_contacts(name, limit)
+        if not rows:
+            return _json({"hospitals": [], "note": "no hospital matches"})
+        # The texts are page text written by the hospital (untrusted): wrapped as data.
+        return _json(
+            {
+                "hospitals": [
+                    {
+                        "hospital_id": c.hospital_id,
+                        "name": c.hospital_name,
+                        "phone": _wrap(c.phone) if c.phone else "",
+                        "fax": _wrap(c.fax) if c.fax else "",
+                        "email": _wrap(c.email) if c.email else "",
+                        "typed_by_admin": list(c.from_admin),
+                        "check_status": c.check_status,
+                        "checked_at": c.checked_at,
+                        "last_check_problem": c.error_kind,
+                        # People by task, as the hospital's manager page lists them (untrusted text).
+                        "task_contacts": _wrap(_json(list(c.staff))) if c.staff else "",
+                        "task_contacts_status": c.staff_status,
+                    }
+                    for c in rows
+                ]
+            }
         )
 
     def _list_documents(self, args: dict) -> str:

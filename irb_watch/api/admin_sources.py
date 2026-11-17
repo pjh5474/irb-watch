@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from irb_watch.api.deps import (
     get_alert_service,
@@ -98,6 +98,35 @@ def create_source(
             admin.id, body.name, body.url, body.login_user, body.ai_enabled,
             body.hospital_id, body.board_kind,
         )
+    )
+
+
+class RbayHospitalIn(BaseModel):
+    address: str  # https://www.r-bay.co.kr/agency/main/<code>
+    hospital_name: str
+    login_user: str
+    boards: list[str] = Field(default_factory=lambda: ["NOTI", "FORM_BOX", "REGLA"])
+    ai_enabled: bool | None = None  # default: on
+
+
+class RbayHospitalOut(BaseModel):
+    hospital_id: int
+    hospital_made: bool
+    sources: list[SourceOut]
+
+
+@router.post("/rbay-hospital", status_code=201, response_model=RbayHospitalOut)
+def create_rbay_hospital(
+    body: RbayHospitalIn,
+    admin: AuthUser = Depends(require_admin),
+    service: SourceService = Depends(get_source_service),
+) -> RbayHospitalOut:
+    """One R-BAY hospital's boards in one step: one source per board under one hospital."""
+    sources, hospital_id, made = service.create_rbay_hospital(
+        admin.id, body.address, body.hospital_name, body.login_user, body.boards, body.ai_enabled
+    )
+    return RbayHospitalOut(
+        hospital_id=hospital_id, hospital_made=made, sources=[SourceOut.from_source(s) for s in sources]
     )
 
 

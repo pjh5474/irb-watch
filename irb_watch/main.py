@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from irb_watch.api import (
     admin_agent,
     admin_ai,
+    admin_contacts,
     admin_credentials,
     admin_documents,
     admin_guides,
@@ -133,6 +134,7 @@ app.include_router(admin_pipeline.router)
 app.include_router(admin_manual.router)
 app.include_router(admin_sources.router)
 app.include_router(admin_hospitals.router)
+app.include_router(admin_contacts.router)
 app.include_router(admin_scans.router)
 app.include_router(admin_credentials.router)
 app.include_router(admin_documents.router)

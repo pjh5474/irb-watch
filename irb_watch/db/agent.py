@@ -6,13 +6,23 @@ from supabase import Client
 
 from irb_watch.agent.data import (
     ChangeInfo,
+    ContactInfo,
     DocumentBrief,
     DocumentInfo,
     SourceInfo,
     VersionInfo,
 )
 from irb_watch.core.state import FileContent, VersionContent
+from irb_watch.db.contacts import _row as contacts_row
 from irb_watch.services.agent import ChatMessage, Conversation, Limits
+from irb_watch.services.contacts import FIELDS
+from irb_watch.services.contacts import empty as empty_contacts
+
+# No error_detail: the raw reason of a failed check is for admins, never for the model.
+_CONTACT_COLUMNS = (
+    "hospital_id, scanned_phone, scanned_fax, scanned_email, manual_phone, manual_fax, manual_email, "
+    "check_status, checked_at, last_ok_at, error_kind, updated_at, staff, staff_status, staff_error_kind"
+)
 
 DEFAULT_LIMITS = Limits(user_daily_limit=30, admin_daily_limit=100)
 
@@ -189,6 +199,36 @@ class SupabaseAgentData:
 
     def __init__(self, client: Client) -> None:
         self._c = client
+
+    def hospital_contacts(self, name_contains: str | None, limit: int) -> list[ContactInfo]:
+        query = self._c.table("hospitals").select("id, name").order("name")
+        if name_contains:
+            clean = name_contains.replace("%", "").replace("_", "").replace(",", " ").strip()
+            if clean:
+                query = query.ilike("name", f"%{clean}%")
+        hospitals = query.limit(limit).execute().data
+        if not hospitals:
+            return []
+        rows = (
+            self._c.table("hospital_contacts")
+            .select(_CONTACT_COLUMNS)
+            .in_("hospital_id", [h["id"] for h in hospitals])
+            .execute()
+            .data
+        )
+        saved = {r["hospital_id"]: contacts_row(r) for r in rows}
+        out = []
+        for h in hospitals:
+            row = saved.get(h["id"]) or empty_contacts(h["id"])
+            shown = {f: row.shown(f) for f in FIELDS}
+            out.append(
+                ContactInfo(
+                    h["id"], h["name"], shown["phone"][0], shown["fax"][0], shown["email"][0],
+                    tuple(f for f in FIELDS if shown[f][1] == "admin"),
+                    row.check_status, row.checked_at, row.error_kind, row.staff, row.staff_status,
+                )
+            )
+        return out
 
     def visible_sources(self, user_id: str, is_admin: bool) -> list[SourceInfo]:
         rows = (

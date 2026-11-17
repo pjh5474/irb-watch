@@ -29,6 +29,13 @@ from irb_watch.crawlers.errors import (
     LoginExpiredError,
 )
 from irb_watch.crawlers.fetcher import FetchedResponse, SafeFetcher
+from irb_watch.crawlers.rbay_contacts import (
+    Contacts,
+    StaffGroup,
+    has_logout_link,
+    parse_contacts,
+    parse_staff,
+)
 
 BASE_URL = "https://www.r-bay.co.kr"
 HOST = "www.r-bay.co.kr"
@@ -80,6 +87,11 @@ def agency_key(url: str) -> str | None:
 
 def agency_url(key: str) -> str:
     return f"{BASE_URL}/agency/main/{key}"
+
+
+def workmanager_url(key: str) -> str:
+    """The hospital's manager page (people cards by tab); same hospital code as the start page."""
+    return f"{BASE_URL}/agency/workmanager/0/{key}"
 
 
 def parse_gate_menus(html: str) -> dict[str, BoardMenu]:
@@ -290,6 +302,26 @@ class RbayAdapter:
         if len(seen) != declared:
             raise IncompleteScanError(f"board {code}: read {len(seen)} posts, site declares {declared}")
         return declared, list(seen.values())
+
+    def contacts(self) -> Contacts:
+        """The hospital's contact cards (전화, 팩스, 이메일) from its start page: one read."""
+        response = self._fetcher.get(agency_url(self._agency))
+        self._check_session(response)
+        contacts = parse_contacts(response.text)
+        if contacts.card_found:
+            return contacts
+        # R-BAY shows the three cards on every hospital's start page, empty or not (owner,
+        # 2026-11-17), so a page without them is a failed read, never "no contact". A page with no
+        # logout link too is the start page of a signed-out visitor (an ended session).
+        if not has_logout_link(response.text):
+            raise LoginExpiredError("R-BAY start page shows no contact cards and no logout link (session ended?)")
+        raise LayoutChangedError("R-BAY start page has no contact cards")
+
+    def staff(self) -> list[StaffGroup]:
+        """The people cards of the hospital's manager page, grouped by tab (may be empty)."""
+        response = self._fetcher.get(workmanager_url(self._agency))
+        self._check_session(response)
+        return parse_staff(response.text)
 
     def fetch_post(self, summary: PostSummary) -> PostDetail:
         return parse_detail(self.post_page(summary).text, summary)

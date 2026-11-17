@@ -61,7 +61,31 @@ class ChangeInfo:
     priority: str | None
 
 
+@dataclass(frozen=True)
+class ContactInfo:
+    """One hospital's IRB office contacts as the screens show them (a typed text wins)."""
+
+    hospital_id: int
+    hospital_name: str
+    phone: str
+    fax: str
+    email: str
+    from_admin: tuple[str, ...]  # fields an admin typed (the rest were read from R-BAY)
+    check_status: str  # never | ok | failed
+    checked_at: str | None
+    error_kind: str | None  # a short kind only; the raw reason is for admins
+    # The manager page: [{"tab", "entries": [{"title", "name", "email", "tel"}]}] and its status
+    # (never | none | ok | failed; failed means the staff shown is the last good read).
+    staff: tuple[dict, ...] = ()
+    staff_status: str = "never"
+
+
 class AgentData(Protocol):
+    def hospital_contacts(self, name_contains: str | None, limit: int) -> list[ContactInfo]:
+        """Hospitals (by part of the name, or the first ones) with their contacts. Not filtered
+        by a board's AI switch or membership: contacts are readable by every signed-in user."""
+        ...
+
     def visible_sources(self, user_id: str, is_admin: bool) -> list[SourceInfo]:
         """Sources the assistant may use for this user: readable by them AND with AI switched
         on. A source with AI off is hidden here entirely, so its text never reaches the model."""

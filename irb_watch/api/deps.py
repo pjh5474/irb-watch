@@ -30,6 +30,7 @@ from irb_watch.db.agent import SupabaseAgentData, SupabaseAgentStore
 from irb_watch.db.ai_instructions import SupabaseInstructionsStore
 from irb_watch.db.alerts import SupabaseAlertStore
 from irb_watch.db.client import get_supabase_client
+from irb_watch.db.contacts import SupabaseContactStore
 from irb_watch.db.credentials import DatabaseCredentialStore
 from irb_watch.db.digest import SupabaseDigestStore
 from irb_watch.db.docgen import SupabaseDocgenStore, SupabaseTemplateFiles
@@ -65,6 +66,7 @@ from irb_watch.services.ai_instructions import (
 )
 from irb_watch.services.alerts import AlertService
 from irb_watch.services.calendar import CalendarService
+from irb_watch.services.contacts import ContactService, StaffRead, staff_dicts
 from irb_watch.services.digest import DigestService
 from irb_watch.services.docgen import DocgenService
 from irb_watch.services.downloads import DownloadService
@@ -284,6 +286,7 @@ def build_reader(source: Source) -> SourceReader:
             lambda session: _scan_fetcher(
                 cookies=session.jar(), headers=session.headers(), verify=rbay_ssl_context()
             ),
+            _contacts_hook(source),
         )
     if source.adapter != "snuh_hrpp":
         raise ValidationError(f"no adapter named {source.adapter}")
@@ -295,6 +298,38 @@ def build_reader(source: Source) -> SourceReader:
         settings.max_docs_per_url,
         settings.max_file_bytes,
     )
+
+
+def get_contact_service() -> ContactService:
+    client = get_supabase_client()
+    return ContactService(SupabaseContactStore(client), SupabaseAuditSink(client))
+
+
+def _contacts_hook(source: Source):
+    """What an R-BAY reader runs after its board read fine: read the hospital's contact cards
+    once per run (a hospital's boards share one run) and save the result, a failure included."""
+    hospital_id = source.hospital_id
+    if hospital_id is None:
+        return None
+
+    def refresh(adapter) -> None:
+        service = get_contact_service()  # built only when a reader actually reaches this step
+        if not service.should_check(hospital_id):
+            return
+        try:
+            found = adapter.contacts()
+        except Exception as exc:  # noqa: BLE001 - recorded with its kind; the scan goes on
+            service.record_check(hospital_id, None, exc)
+            return
+        staff = StaffRead(present=found.has_staff_page)
+        if found.has_staff_page:  # the page exists only for a hospital whose start page lists it
+            try:
+                staff = StaffRead(True, staff_dicts(adapter.staff()))
+            except Exception as exc:  # noqa: BLE001 - the cards are still saved; the failure is recorded
+                staff = StaffRead(True, error=exc)
+        service.record_check(hospital_id, {"phone": found.phone, "fax": found.fax, "email": found.email}, None, staff)
+
+    return refresh
 
 
 def get_hospital_service() -> HospitalService:

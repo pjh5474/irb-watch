@@ -22,7 +22,8 @@ from irb_watch.api.deps import get_credential_store
 from irb_watch.crawlers.attachments import read_attachment
 from irb_watch.crawlers.credentials import KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
-from irb_watch.crawlers.rbay import BASE_URL, HOST, RbayAdapter, _fields
+from irb_watch.crawlers.rbay import BASE_URL, HOST, RbayAdapter, _fields, agency_url
+from irb_watch.crawlers.rbay_contacts import has_logout_link
 from irb_watch.crawlers.rbay_login import browser_enter, logout, rbay_site_name, stored_login
 from irb_watch.crawlers.tls import rbay_ssl_context
 from irb_watch.services.sources import detect_adapter
@@ -40,6 +41,15 @@ def main(argv: list[str] | None = None) -> int:
         "--images", action="store_true",
         help="with --post: list the images in the post's text and fetch the first one three "
              "times (twice with the session, once without)",
+    )
+    parser.add_argument(
+        "--contacts", action="store_true",
+        help="read the hospital's start page after the login and print its contact cards "
+             "(전화, 팩스, 이메일); no board is read",
+    )
+    parser.add_argument(
+        "--try-staff", action="store_true",
+        help="with --contacts: open the manager page even when the start page has no tile for it",
     )
     args = parser.parse_args(argv)
     if args.images and not args.post:
@@ -62,10 +72,16 @@ def main(argv: list[str] | None = None) -> int:
     ok = True
     adapter = RbayAdapter(make(), config["agency"], session.menus)
     try:
-        declared, posts = adapter.list_board(config["board"])
-        print(f"2. board {config['board']}: {declared} posts declared, {len(posts)} read")
-        chosen = [p for p in posts if p.post_id == args.post] if args.post else posts[:10]
-        if args.post and not chosen:
+        if args.contacts:
+            ok = check_contacts(adapter, args.try_staff)
+            declared, posts, chosen = 0, [], []
+        else:
+            declared, posts = adapter.list_board(config["board"])
+            print(f"2. board {config['board']}: {declared} posts declared, {len(posts)} read")
+            chosen = [p for p in posts if p.post_id == args.post] if args.post else posts[:10]
+        if args.contacts:
+            pass
+        elif args.post and not chosen:
             ok = False
             print(f"3. post {args.post} is not on this board")
         elif args.images:
@@ -87,6 +103,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"5. logout accepted: {accepted}; logged out (no 로그아웃 on /main): {not still_in}")
         ok = ok and accepted and not still_in
     return 0 if ok else 1
+
+
+def check_contacts(adapter: RbayAdapter, try_staff: bool = False) -> bool:
+    """Read-only: the start page's contact cards, as the scan would save them. Prints the three
+    texts (the hospital's own office contacts), or why the page could not be read."""
+    page = adapter._fetcher.get(agency_url(adapter._agency))  # a check script may look inside
+    print(f"1b. start page shows a logout link when signed in: {has_logout_link(page.text)}")
+    contacts = adapter.contacts()
+    print(f"2. start page read; contact cards found: {contacts.card_found}")
+    for label, text in (("phone", contacts.phone), ("fax", contacts.fax), ("email", contacts.email)):
+        print(f"   {label}: {text.replace(chr(10), ' | ') if text else '(empty)'}")
+    print(f"   manager page tile (업무별 담당자) on the start page: {contacts.has_staff_page}")
+    if not contacts.has_staff_page and not try_staff:
+        print("3. no manager page tile in the start page's HTML (hidden or not); not read "
+              "(add --try-staff to open the page anyway)")
+        return True
+    if not contacts.has_staff_page:
+        print("3. no tile in the HTML; opening the manager page anyway (--try-staff)")
+    try:
+        groups = adapter.staff()
+    except Exception as exc:  # noqa: BLE001 - report what R-BAY answers for a hospital with no such page
+        print(f"3. manager page: {type(exc).__name__}: {exc}")
+        return True  # the cards above are the check's result; this only reports the second page
+    print(f"3. manager page read; tabs with cards: {len(groups)}, cards: {sum(len(g.entries) for g in groups)}")
+    for g in groups:
+        print(f"   tab {g.tab or '(no tab)'!r}: " + " | ".join(f"{e.title} / {e.name}" for e in g.entries[:3]))
+    return True
 
 
 def check_download(adapter: RbayAdapter, chosen) -> None:

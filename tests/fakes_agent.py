@@ -103,7 +103,13 @@ class FakeAgentData:
         self.documents: dict[int, DocumentInfo] = {}
         self.versions: dict[tuple[int, int], VersionContent] = {}
         self.changes_rows: list[ChangeInfo] = []
+        self.contacts: list = []  # ContactInfo rows (no access or AI filter, like the real read)
         self.calls: list[tuple] = []
+
+    def hospital_contacts(self, name_contains, limit):
+        self.calls.append(("hospital_contacts", name_contains, limit))
+        rows = [c for c in self.contacts if not name_contains or name_contains.lower() in c.hospital_name.lower()]
+        return rows[:limit]
 
     def add_source(self, source_id, name="Board", requires_login=False, ai_enabled=True, members=()):
         info = SourceInfo(source_id, name, True, "2026-11-09T06:00:00+00:00", "ok", requires_login)

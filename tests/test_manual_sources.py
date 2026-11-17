@@ -85,7 +85,7 @@ def test_create_a_manual_source():
     s = service.create_manual("admin-1", " Hanyang IRB ", members_only=True, hospital_id=hanyang.id)
     assert s.hospital_id == hanyang.id
     assert s.adapter == MANUAL_ADAPTER and s.url.startswith("manual:") and s.name == "Hanyang IRB"
-    assert s.requires_login is True and s.ai_enabled is False  # like a study
+    assert s.requires_login is True and s.ai_enabled is True  # AI on by default (2026-11-17)
     public = service.create_manual("admin-1", "Other", members_only=False)
     assert public.ai_enabled is True and public.url != s.url
     assert audit.entries[-1]["payload"]["adapter"] == MANUAL_ADAPTER
