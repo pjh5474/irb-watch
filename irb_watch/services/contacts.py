@@ -154,6 +154,23 @@ class ContactStore(Protocol):
     def checked_since(self, hospital_id: int, since: str) -> bool:
         """The hospital was checked (ok or failed) at or after `since`."""
         ...
+    def failing(self) -> list[HospitalContacts]:
+        """Every row whose last cards check or last manager-page read failed."""
+        ...
+    def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]: ...
+    def with_active_boards(self, hospital_ids: list[int]) -> set[int]:
+        """Of these hospitals, the ones that have at least one active board (source)."""
+        ...
+
+
+@dataclass(frozen=True)
+class ContactProblem:
+    """A hospital whose contacts could not be read last time (for the daily admin report)."""
+
+    hospital_id: int
+    name: str
+    cards_kind: str | None  # the short kind when the phone/fax/email cards failed
+    staff_kind: str | None  # the short kind when the manager page failed
 
 
 class ContactService:
@@ -199,6 +216,32 @@ class ContactService:
             self._store.save_scan(after_check(stored, self._now(), read, error, staff))
         except Exception as exc:  # noqa: BLE001
             log.warning("could not save contacts of hospital %s: %s", hospital_id, type(exc).__name__)
+
+    def problems(self) -> list[ContactProblem]:
+        """Hospitals whose last contacts check failed (cards, manager page or both), by name. A
+        hospital that was never checked, or has no manager page, is not a problem, and neither is
+        one whose boards are all switched off (nothing scans it, so its last failure would
+        otherwise be reported every day for ever)."""
+        rows = self._store.failing()
+        if not rows:
+            return []
+        ids = [r.hospital_id for r in rows]
+        live = self._store.with_active_boards(ids)
+        rows = [r for r in rows if r.hospital_id in live]
+        if not rows:
+            return []
+        names = self._store.hospital_names(ids)
+        out = [
+            ContactProblem(
+                r.hospital_id,
+                names.get(r.hospital_id) or f"#{r.hospital_id}",
+                (r.error_kind or "other") if r.check_status == "failed" else None,
+                (r.staff_error_kind or "other") if r.staff_status == "failed" else None,
+            )
+            for r in rows
+            if r.check_status == "failed" or r.staff_status == "failed"
+        ]
+        return sorted(out, key=lambda p: (p.name, p.hospital_id))
 
     # -- admin edit --------------------------------------------------------------------------
 

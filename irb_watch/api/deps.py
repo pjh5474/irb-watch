@@ -468,6 +468,8 @@ def get_alert_service() -> AlertService:
         stale_hours=settings.alert_stale_hours,
         timezone=settings.scan_timezone,
         digest=digest,
+        # Failed contact reads, in the daily report; the service is built only when a report runs.
+        contact_problems=lambda: get_contact_service().problems(),
     )
 
 

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from irb_watch.core import health as h
 from irb_watch.mail import templates as t
 from irb_watch.mail.client import Mail, Mailer, MailError
+from irb_watch.services.contacts import ContactProblem
 from irb_watch.services.runner import SCHEDULED, RunReport
 from irb_watch.services.sources import Source
 from irb_watch.services.users import AuditSink
@@ -55,8 +56,10 @@ class AlertService:
         timezone: str = "Asia/Seoul",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         digest: DigestSender | None = None,
+        contact_problems: Callable[[], list[ContactProblem]] | None = None,
     ) -> None:
         self._digest = digest
+        self._contact_problems = contact_problems
         self._store = store
         self._mailer = mailer
         self._audit = audit
@@ -103,9 +106,12 @@ class AlertService:
 
     # -- alarms ---------------------------------------------------------------------------------
 
-    def _admin_url(self, source_id: int | None = None) -> str:
-        path = f"/admin/sources/{source_id}" if source_id is not None else "/admin/sources"
+    def _app_page(self, path: str) -> str:
+        """A page of the app (the mails are Korean only, so always the Korean pages)."""
         return f"{self._app_url}/ko{path}"
+
+    def _admin_url(self, source_id: int | None = None) -> str:
+        return self._app_page(f"/admin/sources/{source_id}" if source_id is not None else "/admin/sources")
 
     def _health(self, source: Source) -> h.Health:
         return h.source_health(
@@ -162,6 +168,7 @@ class AlertService:
             error=source.last_scan_error,
             stale_hours=self._stale_hours,
             admin_url=self._admin_url(source.id),
+            site_url=source.url,
         )
         return self._deliver(
             "alarm",
@@ -174,7 +181,7 @@ class AlertService:
         url = self._admin_url(source.id)
         return self._deliver(
             "recovery",
-            lambda to: t.recovery_mail(to, source.id, source.name, source.requires_login, url),
+            lambda to: t.recovery_mail(to, source.id, source.name, source.requires_login, url, source.url),
             source_id=source.id,
             payload={},
         )
@@ -215,17 +222,35 @@ class AlertService:
                     note=note,
                 )
             )
+        contacts = self._contact_lines()
         sent = self._deliver(
             "daily_report",
-            lambda to: t.report_mail(to, day, lines, self._admin_url()),
+            lambda to: t.report_mail(to, day, lines, self._admin_url(), contacts),
             source_id=None,
-            payload={"day": day, "sources": len(lines)},
+            payload={"day": day, "sources": len(lines), "contact_problems": len(contacts)},
         )
         if not sent:
             try:
                 self._store.release(key)  # a later run today may try again
             except Exception:
                 log.exception("could not release the daily report claim")
+
+    def _contact_lines(self) -> list[t.ContactReportLine]:
+        """The hospitals whose IRB contacts could not be read last time. A read problem leaves
+        this part out of the report (logged); it never stops the report itself."""
+        if self._contact_problems is None:
+            return []
+        try:
+            problems = self._contact_problems()
+        except Exception:
+            log.exception("could not read the contact problems for the daily report")
+            return []
+        return [
+            t.ContactReportLine(
+                p.hospital_id, p.name, p.cards_kind, p.staff_kind, self._app_page(f"/hospitals/{p.hospital_id}")
+            )
+            for p in problems
+        ]
 
     # -- sending ----------------------------------------------------------------------------------
 

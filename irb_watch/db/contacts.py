@@ -76,6 +76,35 @@ class SupabaseContactStore:
         rows = self._c.table("hospitals").select("id").eq("id", hospital_id).limit(1).execute().data
         return bool(rows)
 
+    def failing(self) -> list[HospitalContacts]:
+        rows = (
+            self._c.table("hospital_contacts")
+            .select(_COLUMNS)
+            .or_("check_status.eq.failed,staff_status.eq.failed")
+            .execute()
+            .data
+        )
+        return [_row(r) for r in rows]
+
+    def hospital_names(self, hospital_ids: list[int]) -> dict[int, str]:
+        if not hospital_ids:
+            return {}
+        rows = self._c.table("hospitals").select("id, name").in_("id", sorted(set(hospital_ids))).execute().data
+        return {int(r["id"]): r["name"] for r in rows}
+
+    def with_active_boards(self, hospital_ids: list[int]) -> set[int]:
+        if not hospital_ids:
+            return set()
+        rows = (
+            self._c.table("sources")
+            .select("hospital_id")
+            .in_("hospital_id", sorted(set(hospital_ids)))
+            .eq("is_active", True)
+            .execute()
+            .data
+        )
+        return {int(r["hospital_id"]) for r in rows}
+
     def checked_since(self, hospital_id: int, since: str) -> bool:
         rows = (
             self._c.table("hospital_contacts")

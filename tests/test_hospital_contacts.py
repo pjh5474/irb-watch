@@ -111,6 +111,8 @@ class FakeContactStore:
     def __init__(self, hospitals=(1,)):
         self.rows: dict[int, HospitalContacts] = {}
         self.hospitals = set(hospitals)
+        self.names = {i: f"병원{i}" for i in self.hospitals}
+        self.switched_off: set[int] = set()  # hospitals whose boards are all inactive
         self.fail = False
         self.saved_by = []
 
@@ -135,6 +137,15 @@ class FakeContactStore:
 
     def hospital_exists(self, hospital_id):
         return hospital_id in self.hospitals
+
+    def failing(self):
+        return [r for r in self.rows.values() if r.check_status == "failed" or r.staff_status == "failed"]
+
+    def hospital_names(self, hospital_ids):
+        return {i: self.names[i] for i in hospital_ids if i in self.names}
+
+    def with_active_boards(self, hospital_ids):
+        return {i for i in hospital_ids if i not in self.switched_off}
 
     def checked_since(self, hospital_id, since):
         row = self.rows.get(hospital_id)
@@ -164,6 +175,39 @@ def test_a_failed_check_keeps_every_saved_text_and_records_a_short_kind_and_the_
     assert row.scanned == READ  # not erased
     assert row.check_status == "failed" and row.error_kind == "site_unavailable"
     assert row.error_detail == "timeout after 20 s" and row.last_ok_at == NOW.isoformat()
+
+
+def test_problems_list_failed_cards_and_failed_manager_page_by_hospital_name():
+    service, store, _ = make()
+    store.hospitals |= {2, 3, 4}
+    store.names = {1: "다 병원", 2: "가 병원", 3: "나 병원", 4: "라 병원"}
+    service.record_check(1, None, LayoutChangedError("x"))  # cards failed
+    service.record_check(2, READ, None, StaffRead(present=True, error=SiteUnavailableError("down")))  # manager page failed
+    service.record_check(3, READ, None, StaffRead(present=True, groups=[]))  # fine
+    service.record_check(4, READ, None, StaffRead(present=False))  # no manager page: not a problem
+    got = service.problems()
+    assert [(p.hospital_id, p.name, p.cards_kind, p.staff_kind) for p in got] == [
+        (2, "가 병원", None, "site_unavailable"),
+        (1, "다 병원", "layout_changed", None),
+    ]
+
+
+def test_a_hospital_whose_boards_are_all_switched_off_is_not_reported():
+    service, store, _ = make()
+    store.hospitals |= {2}
+    service.record_check(1, None, LayoutChangedError("x"))
+    service.record_check(2, None, LayoutChangedError("x"))
+    store.switched_off = {2}
+    assert [p.hospital_id for p in service.problems()] == [1]
+    store.switched_off = {1, 2}
+    assert service.problems() == []
+
+
+def test_no_problems_when_nothing_failed_or_nothing_was_checked():
+    service, store, _ = make()
+    assert service.problems() == []
+    service.record_check(1, READ)
+    assert service.problems() == []
 
 
 def test_a_later_good_check_clears_the_failure():

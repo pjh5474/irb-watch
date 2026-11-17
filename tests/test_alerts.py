@@ -5,6 +5,7 @@ import pytest
 
 from irb_watch.mail.client import MailError
 from irb_watch.services.alerts import AlertService
+from irb_watch.services.contacts import ContactProblem
 from irb_watch.services.runner import MANUAL, SCHEDULED, RunReport
 from irb_watch.services.scan import ScanSummary
 from tests.fakes import FakeAudit
@@ -196,13 +197,32 @@ def test_evaluating_one_source_after_a_manual_scan():
     assert len(env.mailer.sent) == 1
 
 
-def test_members_only_sources_are_named_by_number_in_the_alarm():
+def test_the_alarm_names_a_members_only_source_exactly_but_leaves_its_error_text_out():
+    # Owner, 2026-11-17: "회원 전용 출처 #77" was not readable. The error text stays out.
     env = Env([healthy(requires_login=True, name="Secret Study")])
     env.change(1, last_scan_status="failed", last_scan_error="secret text from the page")
     env.run(MANUAL)
     mail = env.mailer.sent[0]
-    assert "Secret Study" not in mail.subject + mail.text + mail.html
+    assert "Secret Study" in mail.subject and "Secret Study" in mail.text and "Secret Study" in mail.html
+    assert "회원 전용 출처" not in mail.subject + mail.text
     assert "secret text" not in mail.text + mail.html
+
+
+def test_the_alarm_and_the_recovery_are_korean_only_with_a_link_to_the_site():
+    env = Env([healthy(1, name="가톨릭 : 공지", url="https://www.r-bay.co.kr/agency/main/ABCDEFGH12?board=NOTI")])
+    env.change(1, last_scan_status="failed")
+    env.run(MANUAL)
+    alarm = env.mailer.sent[0]
+    env.change(1, last_scan_status="ok", last_scan_at=GOOD)
+    env.run(MANUAL)
+    recovery = env.mailer.sent[1]
+    for mail in (alarm, recovery):
+        assert "가톨릭 : 공지" in mail.subject
+        assert "---" not in mail.text  # no English half
+        assert "https://app.example.com/ko/admin/sources/1" in mail.text
+        assert "https://www.r-bay.co.kr/agency/main/ABCDEFGH12?board=NOTI" in mail.text
+        assert 'href="https://www.r-bay.co.kr/agency/main/ABCDEFGH12?board=NOTI"' in mail.html
+        assert "Recovered" not in mail.subject and "Needs attention" not in mail.subject
 
 
 def test_the_link_points_at_the_admin_page_of_the_source_without_a_double_slash():
@@ -256,8 +276,45 @@ def test_the_report_lists_skipped_and_failed_sources_with_a_reason():
         summaries={1: summary(1, "failed", error="site unavailable")},
     )
     text = env.mailer.sent[0].text
-    assert "failed" in text and "site unavailable" in text
-    assert "skipped" in text and "paused after a rejected login" in text
+    assert "실패" in text and "site unavailable" in text
+    assert "건너뜀" in text and "paused after a rejected login" in text
+
+
+def contact_env(problems):
+    env = Env([healthy()])
+    env.service = AlertService(
+        env.store, env.mailer, env.audit, lambda: list(env.sources.values()), env.sources.get,
+        app_url="https://app.example.com/", clock=lambda: NOW, contact_problems=problems,
+    )
+    return env
+
+
+def test_the_daily_report_names_hospitals_whose_contacts_failed_with_a_link():
+    env = contact_env(lambda: [ContactProblem(3, "가톨릭대학교의료원", "layout_changed", "login_rejected")])
+    env.run(SCHEDULED, scanned={1: "ok"}, summaries={1: summary(1)})
+    mail = env.mailer.sent[0]
+    assert "연락처 실패 1" in mail.subject
+    assert "가톨릭대학교의료원" in mail.text and "https://app.example.com/ko/hospitals/3" in mail.text
+    assert "페이지 구조가 바뀌었습니다" in mail.text and "로그인이 거부되었습니다" in mail.text
+    sent = next(e for e in env.audit.entries if e["event_type"] == "mail.sent")
+    assert sent["payload"]["contact_problems"] == 1
+
+
+def test_no_contact_problems_means_no_contact_part_and_no_alarm_mail_of_its_own():
+    env = contact_env(list)
+    env.run(SCHEDULED, scanned={1: "ok"}, summaries={1: summary(1)})
+    assert env.kinds() == ["daily_report"]  # one mail only, never a separate contact alarm
+    assert "연락처" not in env.mailer.sent[0].text
+
+
+def test_a_failed_contact_read_never_stops_the_report():
+    def broken():
+        raise RuntimeError("database down")
+
+    env = contact_env(broken)
+    env.run(SCHEDULED, scanned={1: "ok"}, summaries={1: summary(1)})
+    assert env.kinds() == ["daily_report"]
+    assert "연락처" not in env.mailer.sent[0].text
 
 
 def test_alarm_and_report_can_both_go_out_after_the_scheduled_run():

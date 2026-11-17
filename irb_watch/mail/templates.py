@@ -6,6 +6,10 @@ Rules:
   * a MEMBERS-ONLY source (a study) is shown as "members-only source #<id>" with no name and no
     scan error text: study names may be confidential and a mail reaches a third party. The admin
     page behind the link has the details.
+  * EXCEPTION, the three admin mails (alarm, recovery, daily report; owner, 2026-11-17): they go
+    to admins only, are written in Korean only, and name every source exactly, members-only
+    ones too ("회원 전용 출처 #77" was not readable). The scan error text of a members-only source
+    stays out of them. The user digest and the weekly mail keep the rule above.
 """
 
 import html
@@ -48,12 +52,27 @@ def _reason(reason: str | None, hours: int, *, korean: bool) -> str:
     return table.get(reason or "", reason or "").format(hours=hours)
 
 
-def _page(title: str, paragraphs: list[str], link_text: str, url: str) -> str:
+def admin_label(source_id: int, name: str) -> str:
+    """A source's exact name for the admin mails (members-only ones too)."""
+    return one_line(name, 80) or f"#{source_id}"
+
+
+def web_url(url: str | None) -> str | None:
+    """The address only when it is a plain http(s) address (it goes into a link)."""
+    value = (url or "").strip()
+    return value if re.match(r"^https?://[^\s<>\"']+$", value) else None
+
+
+def _page(title: str, paragraphs: list[str], link_text: str, url: str, extra_links: list[tuple[str, str]] | None = None) -> str:
     body = "".join(f"<p>{html.escape(p)}</p>" for p in paragraphs if p)
+    links = [(link_text, url), *(extra_links or [])]
+    anchors = " · ".join(
+        f'<a href="{html.escape(u, quote=True)}">{html.escape(text)}</a>' for text, u in links
+    )
     return (
         '<div style="font-family:sans-serif;font-size:14px;line-height:1.5;max-width:560px">'
         f"<h2 style=\"font-size:16px\">{html.escape(title)}</h2>{body}"
-        f'<p><a href="{html.escape(url, quote=True)}">{html.escape(link_text)}</a></p>'
+        f"<p>{anchors}</p>"
         "</div>"
     )
 
@@ -68,37 +87,42 @@ class AlertInfo:
     error: str | None  # the last scan's error text, if any (untrusted)
     stale_hours: int
     admin_url: str
+    site_url: str | None = None  # the board's own address, linked next to the admin page
+
+
+def _site_links(site_url: str | None) -> tuple[list[str], list[tuple[str, str]]]:
+    """The text lines and the extra html links for the source's own address (when it is one)."""
+    url = web_url(site_url)
+    return ([f"사이트: {url}"], [("사이트 열기", url)]) if url else ([], [])
 
 
 def alarm_mail(to: tuple[str, ...], a: AlertInfo) -> Mail:
-    ko, en = (source_label(a.source_id, a.name, a.members_only, korean=k) for k in (True, False))
-    severity_ko = "문제" if a.level == h.PROBLEM else "확인 필요"
-    severity_en = "Problem" if a.level == h.PROBLEM else "Needs attention"
-    reason_ko = _reason(a.reason, a.stale_hours, korean=True)
-    reason_en = _reason(a.reason, a.stale_hours, korean=False)
+    """Korean only, the exact source name, links to the admin page and the site."""
+    label = admin_label(a.source_id, a.name)
+    severity = "문제" if a.level == h.PROBLEM else "확인 필요"
+    reason = _reason(a.reason, a.stale_hours, korean=True)
     detail = "" if a.members_only or not a.error else one_line(a.error, MAX_ERROR_CHARS)
 
-    subject = one_line(f"[IRB Watch] {severity_ko} · {ko} / {severity_en}: {en}", 140)
-    lines_ko = [f"{ko}: {severity_ko}", reason_ko]
-    lines_en = [f"{en}: {severity_en}", reason_en]
+    subject = one_line(f"[IRB Watch] {severity} · {label}", 140)
+    lines = [f"{label}: {severity}", reason]
     if detail:
-        lines_ko.append(f"수집 결과: {detail}")
-        lines_en.append(f"Scan result: {detail}")
-    link_ko, link_en = "관리자 화면에서 확인하기", "Open the admin page"
-    text = "\n".join([*lines_ko, a.admin_url, "", "---", "", *lines_en, a.admin_url])
-    page = (
-        _page(f"{ko}: {severity_ko}", lines_ko[1:], link_ko, a.admin_url)
-        + _page(f"{en}: {severity_en}", lines_en[1:], link_en, a.admin_url)
-    )
+        lines.append(f"수집 결과: {detail}")
+    site_text, site_links = _site_links(a.site_url)
+    text = "\n".join([*lines, f"관리자 화면: {a.admin_url}", *site_text])
+    page = _page(lines[0], lines[1:], "관리자 화면에서 확인하기", a.admin_url, site_links)
     return Mail(to, subject, text, page)
 
 
-def recovery_mail(to: tuple[str, ...], source_id: int, name: str, members_only: bool, admin_url: str) -> Mail:
-    ko, en = (source_label(source_id, name, members_only, korean=k) for k in (True, False))
-    subject = one_line(f"[IRB Watch] 복구됨 · {ko} / Recovered: {en}", 140)
-    ko_line, en_line = f"{ko}: 다시 정상적으로 수집되었습니다.", f"{en}: scanning is healthy again."
-    text = "\n".join([ko_line, admin_url, "", "---", "", en_line, admin_url])  # noqa: FLY002
-    page = _page(ko_line, [], "관리자 화면", admin_url) + _page(en_line, [], "Admin page", admin_url)
+def recovery_mail(
+    to: tuple[str, ...], source_id: int, name: str, members_only: bool, admin_url: str, site_url: str | None = None
+) -> Mail:
+    """Korean only, the exact source name, links to the admin page and the site."""
+    label = admin_label(source_id, name)
+    subject = one_line(f"[IRB Watch] 복구됨 · {label}", 140)
+    line = f"{label}: 다시 정상적으로 수집되었습니다."
+    site_text, site_links = _site_links(site_url)
+    text = "\n".join([line, f"관리자 화면: {admin_url}", *site_text])
+    page = _page(line, [], "관리자 화면", admin_url, site_links)
     return Mail(to, subject, text, page)
 
 
@@ -417,38 +441,74 @@ class ReportLine:
     note: str | None = None  # why it was skipped, if it was
 
 
-def report_mail(to: tuple[str, ...], day: str, lines: list[ReportLine], admin_url: str) -> Mail:
+STATUS_KO = {"ok": "정상", "needs_review": "검토 필요", "failed": "실패", "skipped": "건너뜀"}
+CONTACT_KIND_KO = {
+    "login_rejected": "로그인이 거부되었습니다",
+    "site_unavailable": "사이트에 연결하지 못했습니다",
+    "layout_changed": "페이지 구조가 바뀌었습니다",
+    "other": "원인을 알 수 없는 오류입니다",
+}
+
+
+@dataclass(frozen=True)
+class ContactReportLine:
+    """A hospital whose IRB contacts could not be read last time."""
+
+    hospital_id: int
+    name: str
+    cards_kind: str | None  # the phone/fax/email cards failed (short kind)
+    staff_kind: str | None  # the manager page failed (short kind)
+    url: str  # the hospital's page in the app
+
+
+def _contact_line(c: ContactReportLine) -> str:
+    parts = []
+    if c.cards_kind:
+        parts.append(f"전화·팩스·이메일 읽기 실패 ({CONTACT_KIND_KO.get(c.cards_kind, CONTACT_KIND_KO['other'])})")
+    if c.staff_kind:
+        parts.append(f"담당자 목록 읽기 실패 ({CONTACT_KIND_KO.get(c.staff_kind, CONTACT_KIND_KO['other'])})")
+    return f"- {admin_label(c.hospital_id, c.name)}: {' · '.join(parts)}"
+
+
+def report_mail(
+    to: tuple[str, ...], day: str, lines: list[ReportLine], admin_url: str,
+    contacts: list[ContactReportLine] | None = None,
+) -> Mail:
+    """The daily admin report: Korean only, exact source names, and the hospitals whose IRB
+    contacts could not be read (owner, 2026-11-17)."""
+    contacts = contacts or []
     problems = sum(1 for line in lines if line.status != "ok")
     total_new = sum(line.new for line in lines)
     total_updated = sum(line.updated for line in lines)
 
-    def block(korean: bool) -> list[str]:
-        out = []
-        if korean:
-            out.append(f"오늘의 수집 결과 ({day}): 새 문서 {total_new}건, 수정 {total_updated}건, 확인 필요 {problems}곳")
-        else:
-            out.append(f"Scan result for {day}: {total_new} new, {total_updated} updated, {problems} source(s) with a problem")
-        for line in lines:
-            label = source_label(line.source_id, line.name, line.members_only, korean=korean)
-            mark = "OK" if line.status == "ok" else line.status
-            counts = (
-                f"새 {line.new} · 수정 {line.updated} · 삭제 {line.removed}"
-                if korean
-                else f"new {line.new} · updated {line.updated} · removed {line.removed}"
-            )
-            note = f" ({one_line(line.note, 100)})" if line.note and not line.members_only else ""
-            out.append(f"- {label}: {mark} — {counts}{note}")
-        return out
+    out = [f"오늘의 수집 결과 ({day}): 새 문서 {total_new}건, 수정 {total_updated}건, 확인 필요 {problems}곳"]
+    for line in lines:
+        label = admin_label(line.source_id, line.name)
+        mark = STATUS_KO.get(line.status, line.status)
+        counts = f"새 {line.new} · 수정 {line.updated} · 삭제 {line.removed}"
+        note = f" ({one_line(line.note, 100)})" if line.note and not line.members_only else ""
+        out.append(f"- {label}: {mark} — {counts}{note}")
 
-    ko_lines, en_lines = block(True), block(False)
+    contact_lines: list[str] = []
+    if contacts:
+        contact_lines = [f"연락처를 읽지 못한 병원 {len(contacts)}곳 (병원 화면에서 확인하세요)"]
+        contact_lines += [_contact_line(c) for c in contacts]
+
     subject = one_line(
         f"[IRB Watch] 일일 수집 결과 {day}: 새 {total_new} · 수정 {total_updated}"
         + (f" · 확인 필요 {problems}" if problems else "")
-        + " / Daily scan report"
+        + (f" · 연락처 실패 {len(contacts)}" if contacts else "")
     )
-    text = "\n".join([*ko_lines, admin_url, "", "---", "", *en_lines, admin_url])
-    page = (
-        _page(ko_lines[0], ko_lines[1:], "관리자 화면", admin_url)
-        + _page(en_lines[0], en_lines[1:], "Admin page", admin_url)
-    )
+    text_parts = [*out, admin_url]
+    if contact_lines:
+        text_parts += ["", contact_lines[0]]
+        for line, c in zip(contact_lines[1:], contacts, strict=True):
+            text_parts += [line, f"  {c.url}"]  # the link under its own hospital
+    text = "\n".join(text_parts)
+    page = _page(out[0], out[1:], "관리자 화면", admin_url)
+    if contact_lines:
+        page += _page(
+            contact_lines[0], contact_lines[1:], "관리자 화면", admin_url,
+            [(f"병원 화면: {admin_label(c.hospital_id, c.name)}", c.url) for c in contacts],
+        )
     return Mail(to, subject, text, page)
