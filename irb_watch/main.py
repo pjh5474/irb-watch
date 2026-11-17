@@ -39,6 +39,7 @@ from irb_watch.api import (
     work,
 )
 from irb_watch.config import get_settings
+from irb_watch.db.timing import timing_middleware
 from irb_watch.services.errors import ServiceError
 
 
@@ -108,6 +109,8 @@ app = FastAPI(title="IRB Watch", lifespan=lifespan)
 
 # Added before CORS so CORS wraps it: a refused upload still reaches the browser with its reason.
 app.add_middleware(BaseHTTPMiddleware, dispatch=admin_manual.limit_upload_size)
+# Counts each request's database calls: a Server-Timing header and a warning for slow requests.
+app.add_middleware(BaseHTTPMiddleware, dispatch=timing_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().frontend_origin_list,
