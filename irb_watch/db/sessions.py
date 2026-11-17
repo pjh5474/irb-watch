@@ -155,11 +155,10 @@ class SupabaseSessionStore:
 
     # the AI job's input
     def posts_for(self, hospital_id: int, limit: int) -> list[PostBrief]:
-        # Public boards only: proposals are shown to every signed-in user before review,
-        # so dates from a members-only (requires_login) board must not reach them.
+        # Every AI-on board, login boards included (owner, 2026-11-17): meeting dates are
+        # hospital-level facts, and the AI-on flag is the consent to read the board.
         sources = (
-            self._c.table("sources").select("id").eq("hospital_id", hospital_id).eq("ai_enabled", True)
-            .eq("requires_login", False).execute().data
+            self._c.table("sources").select("id").eq("hospital_id", hospital_id).eq("ai_enabled", True).execute().data
         )
         ids = [int(r["id"]) for r in sources]
         if not ids:
