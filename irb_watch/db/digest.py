@@ -39,8 +39,18 @@ class SupabaseDigestStore(SupabaseAlertStore):
         ]
 
     def sources(self) -> list[SourceInfo]:
-        rows = self._c.table("sources").select("id, name, requires_login").execute().data
-        return [SourceInfo(r["id"], r["name"], bool(r["requires_login"])) for r in rows]
+        rows = self._c.table("sources").select("id, name, requires_login, hospital_id").execute().data
+        ids = sorted({r["hospital_id"] for r in rows if r.get("hospital_id") is not None})
+        names: dict[int, str] = {}
+        if ids:
+            names = {
+                int(h["id"]): h["name"]
+                for h in self._c.table("hospitals").select("id, name").in_("id", ids).execute().data
+            }
+        return [
+            SourceInfo(r["id"], r["name"], bool(r["requires_login"]), names.get(r.get("hospital_id"), ""))
+            for r in rows
+        ]
 
     def memberships(self) -> dict[str, set[int]]:
         rows = self._c.table("source_members").select("source_id, user_id").execute().data

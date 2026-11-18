@@ -72,8 +72,11 @@ _READ_SPECS = [
         "type": "function",
         "name": "get_hospital_contacts",
         "description": (
-            "The IRB office contacts (phone, fax, email) of hospitals, by part of the hospital "
-            "name, or the first few hospitals when no name is given. Each text is a contact "
+            "The IRB office contacts (phone, fax, email) of hospitals, by the hospital name "
+            "(a short form or another spelling is fine, e.g. 이대목동병원 for 이화의대부속목동병원), "
+            "or the first few hospitals when no name is given. When nothing matches, the answer "
+            "lists every hospital name: choose the closest and call again, never conclude that "
+            "the contacts do not exist. Each text is a contact "
             "list as the hospital wrote it. Always give the checked_at date with an answer. "
             "An empty field means the hospital has none listed on R-BAY. When check_status is "
             "'failed' the last read failed: the saved texts may be old, say so. task_contacts lists "
@@ -262,7 +265,23 @@ class ToolBox:
         limit = _int(args, "limit", 1, 10, 5)
         rows = self._data.hospital_contacts(name, limit)
         if not rows:
-            return _json({"hospitals": [], "note": "no hospital matches"})
+            # Never answer "no contacts" on a miss: hand back the catalog so the model can pick
+            # the hospital the user meant (short form, other spelling) and ask again.
+            every = [n for _, n in self._data.hospital_names()]
+            names = every[:100]
+            return _json(
+                {
+                    "hospitals": [],
+                    "hospital_count": len(every),
+                    "list_is_cut": len(every) > len(names),
+                    "note": (
+                        "no hospital matches that name. Do not tell the user the contacts are missing: "
+                        "pick the likely hospital from all_hospital_names and call this tool again "
+                        "with its exact name, or ask the user which one they mean."
+                    ),
+                    "all_hospital_names": names,
+                }
+            )
         # The texts are page text written by the hospital (untrusted): wrapped as data.
         return _json(
             {

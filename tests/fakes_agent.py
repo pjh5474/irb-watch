@@ -107,9 +107,16 @@ class FakeAgentData:
         self.calls: list[tuple] = []
 
     def hospital_contacts(self, name_contains, limit):
+        from irb_watch.agent.hospital_match import match
+
         self.calls.append(("hospital_contacts", name_contains, limit))
-        rows = [c for c in self.contacts if not name_contains or name_contains.lower() in c.hospital_name.lower()]
-        return rows[:limit]
+        if not name_contains:
+            return self.contacts[:limit]
+        found = {hid for hid, _ in match(name_contains, [(c.hospital_id, c.hospital_name) for c in self.contacts], limit)}
+        return [c for c in self.contacts if c.hospital_id in found][:limit]
+
+    def hospital_names(self):
+        return [(c.hospital_id, c.hospital_name) for c in self.contacts]
 
     def add_source(self, source_id, name="Board", requires_login=False, ai_enabled=True, members=()):
         info = SourceInfo(source_id, name, True, "2026-11-09T06:00:00+00:00", "ok", requires_login)

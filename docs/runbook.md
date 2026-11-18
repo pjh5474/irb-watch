@@ -103,6 +103,7 @@ Role changes are logged by a database trigger without an actor (the server uses 
 3. Assign readers with `PUT /admin/sources/{id}/members`.
 4. Read-only check without touching the database (one login, list, one post, one download, logout):
    `uv run python -m irb_watch.scripts.live_rbay_check --keyring --user owner --url "<source URL>"` (drop `--keyring` to use the server's credential store).
+   **Contacts only** (one login, the start page's phone/fax/email cards and the manager page, then logout; no board is read, nothing is written): add `--contacts` (and `--try-staff` to open the manager page when the start page shows no tile for it), e.g. `uv run python -m irb_watch.scripts.live_rbay_check --keyring --user owner --contacts --url "https://www.r-bay.co.kr/agency/main/<hospital code>?board=NOTI"`. It prints whether the page shows a logout link, whether the cards were found, and the exception name and text when it fails. To see which hospitals failed and why: the hospital's admin contacts view (`GET /admin/hospitals/{id}/contacts`, `error_kind` and `error_detail`) or the daily report's list.
 5. In a run, the boards of one hospital share one login; it is logged out 90 s after the last board. A rejected password is not sent again within the hour (a changed password is tried at once).
 
 ## Scheduler

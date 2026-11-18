@@ -82,8 +82,13 @@ class ContactInfo:
 
 class AgentData(Protocol):
     def hospital_contacts(self, name_contains: str | None, limit: int) -> list[ContactInfo]:
-        """Hospitals (by part of the name, or the first ones) with their contacts. Not filtered
-        by a board's AI switch or membership: contacts are readable by every signed-in user."""
+        """Hospitals (by a name, short forms and other spellings tolerated, or the first ones)
+        with their contacts. Not filtered by a board's AI switch or membership: contacts are
+        readable by every signed-in user."""
+        ...
+
+    def hospital_names(self) -> list[tuple[int, str]]:
+        """Every hospital (id, name): offered back when a name matched nothing."""
         ...
 
     def visible_sources(self, user_id: str, is_admin: bool) -> list[SourceInfo]:

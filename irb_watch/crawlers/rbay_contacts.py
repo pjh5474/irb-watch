@@ -146,7 +146,11 @@ def parse_staff(html: str) -> list[StaffGroup]:
         )[:MAX_STAFF_ENTRIES]
         if loose:  # cards with no tab wrapper
             groups.append(StaffGroup("", loose))
-    if not groups and (soup.select_one("ul.cts_tabbox") or soup.select_one("[class*=ct_tel_guide]")):
+    # An empty tab list (`<ul class="cts_tabbox"></ul>`, no tab, no view, no card) is a hospital
+    # that filled in no manager: an empty result, not a changed layout (owner, 2026-11-18).
+    tabbox = soup.select_one("ul.cts_tabbox")
+    tabbox_filled = tabbox is not None and bool(tabbox.get_text(strip=True))
+    if not groups and (tabbox_filled or soup.select_one("[class*=ct_tel_guide]")):
         raise LayoutChangedError("manager page: the tab or card structure is there but no card was read")
     return groups
 

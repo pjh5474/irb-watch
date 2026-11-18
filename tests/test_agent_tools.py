@@ -249,6 +249,43 @@ def test_no_matching_hospital_says_so(data):
     assert out["hospitals"] == [] and "no hospital" in out["note"]
 
 
+def test_a_miss_hands_back_the_hospital_names_instead_of_no_contact(data):
+    data.contacts = [_contact(1, "국립중앙의료원"), _contact(2, "이화의대부속목동병원")]
+    out = json.loads(run(box(data), "get_hospital_contacts", hospital="nowhere")[0])
+    assert out["hospitals"] == [] and out["all_hospital_names"] == ["국립중앙의료원", "이화의대부속목동병원"]
+    assert "Do not tell the user" in out["note"]
+
+
+@pytest.mark.parametrize(
+    "asked, found",
+    [
+        ("국립의료원", "국립중앙의료원"),
+        ("이대목동병원", "이화의대부속목동병원"),
+        ("이화의대목동병원", "이화의대부속목동병원"),
+        ("이화의대 목동", "이화의대부속목동병원"),
+        ("서울대병원", "서울대학교병원"),
+        ("서울대학교병원", "서울대학교병원"),
+    ],
+)
+def test_short_forms_and_other_spellings_find_the_hospital(data, asked, found):
+    data.contacts = [
+        _contact(1, "국립중앙의료원"), _contact(2, "이화의대부속목동병원"), _contact(3, "서울대학교병원"),
+        _contact(4, "대구가톨릭대학교의료원"),
+    ]
+    out = json.loads(run(box(data), "get_hospital_contacts", hospital=asked)[0])
+    assert out["hospitals"][0]["name"] == found
+
+
+def test_an_unrelated_name_does_not_match(data):
+    from irb_watch.agent.hospital_match import match
+
+    names = [(1, "국립중앙의료원"), (2, "이화의대부속목동병원"), (3, "대구가톨릭대학교의료원")]
+    assert match("삼성서울병원", names, 5) == []
+    # One shared word (a city) is not a match, and a generic word alone matches nothing.
+    assert match("서울대병원", [(1, "서울성모병원"), (2, "서울아산병원")], 5) == []
+    assert match("병원", names, 5) == [] and match("의료원", names, 5) == []
+
+
 def test_the_contacts_limit_is_checked(data):
     assert run(box(data), "get_hospital_contacts", limit=0)[0].startswith("error:")
     assert run(box(data), "get_hospital_contacts", limit=11)[0].startswith("error:")

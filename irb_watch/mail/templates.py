@@ -41,10 +41,17 @@ def one_line(value: str, limit: int = 120) -> str:
     return _CONTROL.sub(" ", value).strip()[:limit]
 
 
-def source_label(source_id: int, name: str, members_only: bool, *, korean: bool) -> str:
+def source_label(source_id: int, name: str, members_only: bool, *, korean: bool, hospital: str = "") -> str:
+    """A source's label for user mails. The hospital (public) leads when known, also for a
+    members-only source, whose own name stays hidden."""
     if members_only:
-        return f"회원 전용 출처 #{source_id}" if korean else f"Members-only source #{source_id}"
-    return one_line(name, 80) or f"#{source_id}"
+        base = f"회원 전용 출처 #{source_id}" if korean else f"Members-only source #{source_id}"
+    else:
+        base = one_line(name, 80) or f"#{source_id}"
+    hospital = one_line(hospital, 60)
+    if not hospital or hospital in base:
+        return base
+    return f"{hospital} · {base}"
 
 
 def _reason(reason: str | None, hours: int, *, korean: bool) -> str:
@@ -144,6 +151,7 @@ class DigestSource:
     members_only: bool
     count: int  # all changes of this source in the window, also the ones not listed
     items: tuple[DigestItem, ...] = ()  # listed items; always empty for a members-only source
+    hospital: str = ""
 
 
 @dataclass(frozen=True)
@@ -235,7 +243,7 @@ def digest_mail(
         )
         text_lines, html_parts = [head], []
         for s in sources:
-            label = source_label(s.source_id, s.name, s.members_only, korean=korean)
+            label = source_label(s.source_id, s.name, s.members_only, korean=korean, hospital=s.hospital)
             if s.members_only:
                 line = (
                     f"{label}: 볼 수 있는 회원 전용 출처에 변경 {s.count}건. 앱에서 확인하세요."

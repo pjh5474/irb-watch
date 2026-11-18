@@ -67,6 +67,7 @@ class SourceInfo:
     id: int
     name: str
     requires_login: bool
+    hospital_name: str = ""  # hospital names are public, so also shown for a members-only source
 
 
 class DigestStore(Protocol):
@@ -286,7 +287,9 @@ class DigestService:
                     if did in listed_ids
                 )
             digest_sources.append(
-                t.DigestSource(source_id, info.name, info.requires_login, len(of_source), items)
+                t.DigestSource(
+                    source_id, info.name, info.requires_login, len(of_source), items, info.hospital_name
+                )
             )
 
         key = f"digest:{user.id}:{day}"

@@ -96,6 +96,26 @@ def test_members_only_sources_show_a_count_only_never_a_name_or_a_title():
     assert "/documents/" not in mail.text  # no link to a study document either
 
 
+def test_the_hospital_name_leads_each_source_also_a_members_only_one():
+    env = Env([user()], [card(1, 4, "new"), card(2, 6, "updated")], members={U1: {6}})
+    env.store.source_list = [
+        SourceInfo(4, "관련규정", False, "가나병원"),
+        SourceInfo(6, "Secret Study", True, "다라병원"),
+    ]
+    env.run()
+    mail = env.mailer.sent[0]
+    assert "가나병원 · 관련규정" in mail.text and "다라병원 · 회원 전용 출처 #6" in mail.text
+    assert "가나병원 · 관련규정" in mail.html
+    assert "Secret Study" not in mail.text + mail.html  # the study's own name stays hidden
+
+
+def test_a_name_that_already_holds_the_hospital_is_not_doubled():
+    env = Env([user()], [card(1, 4, "new")])
+    env.store.source_list = [SourceInfo(4, "가나병원 공지", False, "가나병원")]
+    env.run()
+    assert "가나병원 · " not in env.mailer.sent[0].text
+
+
 def test_a_user_who_is_not_a_member_sees_nothing_of_a_study():
     env = Env([user()], [card(1, 6, "new")])
     assert env.run()["quiet"] == 1 and env.mailer.sent == []

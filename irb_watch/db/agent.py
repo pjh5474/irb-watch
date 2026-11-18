@@ -12,6 +12,7 @@ from irb_watch.agent.data import (
     SourceInfo,
     VersionInfo,
 )
+from irb_watch.agent.hospital_match import match
 from irb_watch.core.state import FileContent, VersionContent
 from irb_watch.db.contacts import _row as contacts_row
 from irb_watch.services.agent import ChatMessage, Conversation, Limits
@@ -200,13 +201,19 @@ class SupabaseAgentData:
     def __init__(self, client: Client) -> None:
         self._c = client
 
+    def hospital_names(self) -> list[tuple[int, str]]:
+        """Every hospital (id, name), by name. The catalog is small and public."""
+        rows = self._c.table("hospitals").select("id, name").order("name").limit(2000).execute().data
+        return [(int(r["id"]), r["name"]) for r in rows]
+
     def hospital_contacts(self, name_contains: str | None, limit: int) -> list[ContactInfo]:
-        query = self._c.table("hospitals").select("id, name").order("name")
-        if name_contains:
-            clean = name_contains.replace("%", "").replace("_", "").replace(",", " ").strip()
-            if clean:
-                query = query.ilike("name", f"%{clean}%")
-        hospitals = query.limit(limit).execute().data
+        hospitals = [{"id": hid, "name": n} for hid, n in self.hospital_names()]
+        if name_contains and name_contains.strip():
+            # Forgiving match (short forms, other spellings): see agent/hospital_match.py.
+            found = match(name_contains, [(h["id"], h["name"]) for h in hospitals], limit)
+            hospitals = [{"id": hid, "name": n} for hid, n in found]
+        else:
+            hospitals = hospitals[:limit]
         if not hospitals:
             return []
         rows = (

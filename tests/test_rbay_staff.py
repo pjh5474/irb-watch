@@ -48,6 +48,14 @@ def test_a_page_with_no_cards_and_no_structure_is_empty_not_an_error():
     assert parse_staff("<html><body><a>로그아웃</a></body></html>") == []
 
 
+def test_a_hospital_with_no_managers_filled_in_gives_an_empty_list_not_a_failure():
+    html = (
+        '<div class="contents_wrap"><div class="ct_sub_title">업무별 담당자 안내</div>'
+        '<div class="ct_body_wrap">\n<ul class="cts_tabbox">\n</ul>\n</div></div>'
+    )
+    assert parse_staff(html) == []
+
+
 def test_an_empty_tab_structure_is_a_layout_change_never_no_managers():
     html = '<ul class="cts_tabbox"><li><button>IRB</button></li></ul><div class="cts_tab_view cts_tab_view1"></div>'
     with pytest.raises(LayoutChangedError):
