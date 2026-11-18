@@ -35,7 +35,10 @@ class SupabaseDailySearchStore:
         created: dict[int, str] = {
             int(v["id"]): v["created_at"]
             for v in paged(
-                lambda: self._c.table("document_versions").select("id, created_at").gt("created_at", since).order("id")
+                # Not the silent versions of a first scan or of an ALL-SEARCH backlog read: those
+                # are left to the admin's ALL-SEARCH, never read again as "changed".
+                lambda: self._c.table("document_versions").select("id, created_at")
+                .gt("created_at", since).not_.in_("change_type", ["baseline", "resaved"]).order("id")
             )
         }
         docs: list[dict] = []

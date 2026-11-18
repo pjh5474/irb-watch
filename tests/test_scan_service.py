@@ -51,6 +51,67 @@ def h():
     return Harness()
 
 
+# ---- the backlog, quietly (ALL-SEARCH) --------------------------------------------------
+
+
+def backlog(h, *observations, failures=None, unreadable=(), error=None, skip=frozenset(), limit=50):
+    h.reader = FakeReader(
+        ScanReading(observations=list(observations), failures=failures or {}, unreadable_ids=set(unreadable)),
+        error=error,
+    )
+    source = h.service.begin_backlog(1)
+    return h.service.run_backlog_batch(source, skip, limit, lambda: False)
+
+
+def test_a_backlog_batch_saves_posts_without_news_and_leaves_the_source_status_alone(h):
+    h.scan(make_obs("1"), day=0)  # the silent first scan
+    h.repo.sources[1] = h.repo.sources[1].__class__(
+        **{**h.repo.sources[1].__dict__, "last_scan_status": "needs_review", "last_scan_error": "a post failed"}
+    )
+    before = h.repo.sources[1]
+    batch = backlog(h, make_obs("2", title="Old schedule"), make_obs("3", warnings=("a file cannot be read",)))
+    assert (batch.stored, batch.failed, batch.total) == (2, {}, 3) and batch.flagged == 1
+    assert h.events() == []  # no card for 2 and 3: the audit log has no document event at all
+    assert h.audit.entries[-1]["event_type"] == "scan.finished"  # only the first scan's own entry
+    versions = {e: d.versions[-1].change_type for e, d in h.repo.history[1].items()}
+    assert versions == {"1": "baseline", "2": "baseline", "3": "baseline"}
+    after = h.repo.sources[1]
+    assert (after.last_scan_status, after.last_scan_error, after.last_scan_at) == (
+        before.last_scan_status, before.last_scan_error, before.last_scan_at,
+    )
+    assert 1 not in h.repo.locked  # the claim is released
+
+
+def test_a_backlog_batch_tells_the_reader_what_is_stored_and_counts_no_misses(h):
+    h.scan(make_obs("1"), make_obs("2"), day=0)
+    backlog(h, make_obs("3"), skip=frozenset({"9"}), limit=7)
+    stored, limit = h.reader.backlog_calls[0]
+    assert (stored, limit) == (frozenset({"1", "2", "9"}), 7)
+    # Post 1 and 2 were not on this batch's list reading, yet nothing counts them as missing.
+    assert [(d.miss_count, d.status) for d in h.repo.history[1].values()] == [(0, "current")] * 3
+
+
+def test_a_failed_backlog_post_is_reported_and_a_crashing_batch_changes_nothing(h):
+    h.scan(make_obs("1"), day=0)
+    before = h.repo.sources[1]
+    batch = backlog(h, make_obs("2"), failures={"5": "the page layout changed"})
+    assert (batch.stored, batch.failed) == (1, {"5": "the page layout changed"})
+    with pytest.raises(FetchError):
+        backlog(h, error=FetchError("site down"))
+    assert 1 not in h.repo.locked
+    assert h.repo.sources[1].last_scan_at == before.last_scan_at and h.repo.sources[1].last_scan_status == before.last_scan_status
+    assert set(h.repo.history[1]) == {"1", "2"}
+
+
+def test_a_source_never_scanned_is_refused_for_a_backlog(h):
+    with pytest.raises(ConflictError, match="scan this source once first"):
+        h.service.begin_backlog(1)
+    h.scan(make_obs("1"))
+    h.service.begin_backlog(1)
+    with pytest.raises(ConflictError, match="already running"):
+        h.service.begin_backlog(1)
+
+
 # ---- claiming ------------------------------------------------------------------------
 
 

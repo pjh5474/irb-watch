@@ -124,6 +124,18 @@ class ScanSummary:
     paused_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class BacklogBatch:
+    """What one backlog batch did."""
+
+    stored: int  # posts saved
+    failed: dict[str, str]  # post id -> reason (not saved; skipped for the rest of the run)
+    left: int  # unstored posts still on the board's list after this batch (failed ones included)
+    stopped: bool  # a stop was asked
+    flagged: int = 0  # saved posts flagged for review (a file that could not be read)
+    total: int = 0  # posts of the source stored now
+
+
 class ScanService:
     def __init__(
         self,
@@ -227,6 +239,84 @@ class ScanService:
 
     def scan_source(self, source_id: int, actor_id: str | None) -> ScanSummary:
         return self.run_scan(self.begin_scan(source_id), actor_id)
+
+    # -- ALL-SEARCH: the backlog, a batch at a time ------------------------------------
+
+    def begin_backlog(self, source_id: int) -> Source:
+        """Validate and claim a source for a backlog batch (the same claim a scan takes, so no
+        scan and no other batch of this source runs meanwhile). A source never scanned is refused:
+        its first scan is the silent baseline, and a backlog read before it would turn that
+        baseline into news."""
+        source = self._repo.get_source(source_id)
+        if source is None:
+            raise NotFoundError("source not found")
+        if not source.is_active:
+            raise ConflictError("source is inactive")
+        if source.is_manual:
+            raise ValidationError("a manual source has no backlog to read")
+        if source.last_scan_at is None:
+            raise ConflictError("scan this source once first; its first scan is the silent baseline")
+        if not self._repo.claim_scan(source_id, self._clock(), STALE_SCAN_MINUTES):
+            raise ConflictError("a scan of this source is already running")
+        return source
+
+    def run_backlog_batch(
+        self, source: Source, skip_ids: frozenset[str], limit: int, should_stop
+    ) -> "BacklogBatch":
+        """One batch of posts not stored yet, saved QUIETLY: no news card, no AI summary, no digest
+        line, nothing counted as removed, and the source's status, error and last scan time stay
+        as they were (a backlog of old posts with odd files must not raise the source's alarm).
+        The claim from begin_backlog() is always released. Errors propagate with their reason."""
+        now = self._clock()
+        keep_status = source.last_scan_status or OK
+        keep_error = source.last_scan_error
+        keep_at = datetime.fromisoformat(source.last_scan_at) if source.last_scan_at else None
+        committed = False
+        try:
+            batch = self._backlog_batch(source, skip_ids, limit, should_stop, now, keep_status, keep_error)
+            committed = True
+            return batch
+        finally:
+            # commit_scan wrote status and time; put them back (and release the claim on a failure).
+            self._repo.release_scan(
+                source.id, keep_status, keep_error, keep_at if committed else None, KEEP_PAUSE
+            )
+
+    def _backlog_batch(
+        self, source: Source, skip_ids: frozenset[str], limit: int, should_stop, now: datetime,
+        status: str, error: str | None,
+    ) -> "BacklogBatch":
+        file_sink = make_file_sink(self._repo, self._storage)
+        reader = self._reader_factory(source)
+        read = getattr(reader, "read_backlog", None)
+        if read is None:
+            raise ValidationError("this source type cannot be read in batches")
+        mark = getattr(reader, "person_started", None)  # an admin started it: a login may be tried
+        if mark is not None:
+            mark()
+        loaded = self._repo.load_store(source.id)
+        try:
+            reading = read(file_sink, frozenset(loaded.store) | skip_ids, limit, should_stop)
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+        # Silent like a first scan (new posts are BASELINE versions, no events); only unseen
+        # posts were opened, so nothing stored changes; an incomplete scan counts no misses.
+        result = detect_changes(
+            loaded.store,
+            ScanInput(
+                observations=reading.observations, now=now, is_first_scan=True, complete=False,
+                failures=reading.failures, unreadable_ids=frozenset(reading.unreadable_ids),
+            ),
+        )
+        seen = {o.external_id for o in reading.observations}
+        self._repo.commit_scan(source.id, loaded, seen, now, [], status, error)
+        return BacklogBatch(
+            stored=len(seen), failed=dict(reading.failures), left=reading.outside_window,
+            stopped=should_stop(), flagged=len(result.needs_review) - len(reading.failures),
+            total=len(loaded.store),
+        )
 
     # -- the scan itself -------------------------------------------------------------
 

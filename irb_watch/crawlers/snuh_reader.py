@@ -8,6 +8,7 @@ sink (storage), extract text. Two kinds of trouble, handled differently:
     stays tracked, the file is tracked by hash, and a warning with the reason is attached.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -51,6 +52,22 @@ def pick_window(
     return chosen
 
 
+def pick_backlog(summaries: list, skip_ids: frozenset[str], limit: int, reading: "ScanReading") -> list:
+    """The posts a backlog batch opens: the newest `limit` posts that are not stored yet (and not
+    in `skip_ids`, which holds the ones that failed earlier in this run). Secret posts, stored posts
+    and the rest are marked unreadable on `reading`: neither seen nor missing."""
+    todo = []
+    for summary in summaries:
+        if summary.is_secret or summary.post_id in skip_ids:
+            reading.unreadable_ids.add(summary.post_id)
+        else:
+            todo.append(summary)
+    chosen, rest = newest(todo, limit)
+    reading.unreadable_ids.update(s.post_id for s in rest)
+    reading.outside_window = len(rest)  # how many unstored posts are still left after this batch
+    return chosen
+
+
 def iso_date(site_date: str) -> str | None:
     """'2026.09.03' -> '2026-09-03'; None if the site shows something else."""
     try:
@@ -81,6 +98,27 @@ class SnuhSourceReader:
             except (LoginExpiredError, SiteUnavailableError):
                 # The session died or the site is down: fail the whole scan once, with one
                 # reason, instead of flagging every remaining post.
+                raise
+            except (CrawlError, ParseError) as exc:
+                reading.failures[summary.post_id] = str(exc)
+        return reading
+
+    def read_backlog(
+        self, file_sink: FileSink, stored_ids: frozenset[str], limit: int, should_stop: Callable[[], bool]
+    ) -> ScanReading:
+        """A batch of the board's posts that are not stored yet (ALL-SEARCH): the newest `limit`.
+        `should_stop` is checked before each post; on a stop the posts not opened yet are left
+        unread (neither seen nor missing) and what was read is returned."""
+        declared_total, summaries = self._adapter.list_board(self._board_key)
+        reading = ScanReading(declared_total=declared_total)
+        chosen = pick_backlog(summaries, stored_ids, limit, reading)
+        for i, summary in enumerate(chosen):
+            if should_stop():
+                reading.unreadable_ids.update(s.post_id for s in chosen[i:])
+                break
+            try:
+                reading.observations.append(self._observe(summary, file_sink))
+            except (LoginExpiredError, SiteUnavailableError):
                 raise
             except (CrawlError, ParseError) as exc:
                 reading.failures[summary.post_id] = str(exc)

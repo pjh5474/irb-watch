@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from irb_watch.api import (
     admin_agent,
     admin_ai,
+    admin_all_search,
     admin_contacts,
     admin_credentials,
     admin_documents,
@@ -61,6 +62,10 @@ async def lifespan(_: FastAPI):
         deps.get_session_service().fail_unfinished()
     except Exception:
         logging.getLogger(__name__).exception("open session jobs could not be checked at start")
+    try:  # and for ALL-SEARCH (the posts a read stored are kept)
+        deps.get_all_search_service().fail_unfinished()
+    except Exception:
+        logging.getLogger(__name__).exception("open all-search jobs could not be checked at start")
     if settings.scheduler_enabled:
         from irb_watch.scheduler import ScanScheduler
 
@@ -71,6 +76,7 @@ async def lifespan(_: FastAPI):
         site_service = deps.get_site_service()
         job_service = deps.get_draft_job_service()
         session_service = deps.get_session_service()
+        all_search_service = deps.get_all_search_service()
         task_service = deps.get_task_service()
 
         def purge_old() -> None:
@@ -83,6 +89,7 @@ async def lifespan(_: FastAPI):
             site_service.apply_due_pi()  # scheduled PI changes whose day has come
             job_service.purge_old()
             session_service.purge_old()  # finished session searches after 30 days
+            all_search_service.purge_old()  # finished ALL-SEARCH jobs after 30 days
             task_service.purge_old()  # removed project tasks after 30 days
 
         scheduler = ScanScheduler(
@@ -157,6 +164,7 @@ app.include_router(projects.router)
 app.include_router(sites.router)
 app.include_router(sessions.router)
 app.include_router(sessions.admin_router)
+app.include_router(admin_all_search.router)
 app.include_router(tasks.router)
 app.include_router(calendar.router)
 app.include_router(unsubscribe.router)

@@ -18,7 +18,7 @@ from irb_watch.crawlers.errors import CrawlError, LoginExpiredError, SiteUnavail
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.rbay import MAX_TEXT_IMAGES, RbayAdapter
 from irb_watch.crawlers.rbay_login import RbaySession, RbaySessionPool
-from irb_watch.crawlers.snuh_reader import ScanReading, pick_window
+from irb_watch.crawlers.snuh_reader import ScanReading, pick_backlog, pick_window
 from irb_watch.parsers.errors import ParseError
 
 log = logging.getLogger(__name__)
@@ -64,20 +64,36 @@ class RbaySourceReader:
         )
 
     def read(self, file_sink: FileSink) -> ScanReading:
+        return self._with_session(lambda adapter: self._read(adapter, file_sink))
+
+    def read_backlog(
+        self, file_sink: FileSink, stored_ids: frozenset[str], limit: int, should_stop: Callable[[], bool]
+    ) -> ScanReading:
+        """A batch of the board's posts that are not stored yet (ALL-SEARCH): the newest `limit`.
+        Same login rules as a scan (the hospital's pooled session); the contact cards are left
+        alone. `should_stop` is checked before each post; the ones not opened stay unread."""
+        return self._with_session(
+            lambda adapter: self._read_backlog(adapter, file_sink, stored_ids, limit, should_stop), contacts=False
+        )
+
+    def _with_session(self, work: Callable[[RbayAdapter], ScanReading], contacts: bool = True) -> ScanReading:
         lease = self._acquire()
         try:
-            return self._read_with(lease.session, file_sink)
+            return self._read_with(lease.session, work, contacts)
         except LoginExpiredError:
             if lease.fresh:
                 raise  # a session from this very login stopped working: report it
             # Handed over from an earlier board and already ended at R-BAY: log in once more.
-            return self._read_with(self._acquire().session, file_sink)
+            return self._read_with(self._acquire().session, work, contacts)
 
-    def _read_with(self, session: RbaySession, file_sink: FileSink) -> ScanReading:
+    def _read_with(
+        self, session: RbaySession, work: Callable[[RbayAdapter], ScanReading], contacts: bool = True
+    ) -> ScanReading:
         adapter = RbayAdapter(self._make_fetcher(session), self._agency, session.menus)
         try:
-            reading = self._read(adapter, file_sink)
-            self._contacts(adapter)  # after the board read fine: the session is known to be good
+            reading = work(adapter)
+            if contacts:
+                self._contacts(adapter)  # after the board read fine: the session is known to be good
             return reading
         except LoginExpiredError:
             self._pool.discard(session)
@@ -100,6 +116,25 @@ class RbaySourceReader:
         declared, summaries = adapter.list_board(self._board)
         reading = ScanReading(declared_total=declared)
         for summary in pick_window(summaries, self._max_posts, reading):
+            try:
+                reading.observations.append(self._observe(adapter, summary, file_sink))
+            except (LoginExpiredError, SiteUnavailableError):
+                raise
+            except (CrawlError, ParseError) as exc:
+                reading.failures[summary.post_id] = str(exc)
+        return reading
+
+    def _read_backlog(
+        self, adapter: RbayAdapter, file_sink: FileSink, stored_ids: frozenset[str], limit: int,
+        should_stop: Callable[[], bool],
+    ) -> ScanReading:
+        declared, summaries = adapter.list_board(self._board)
+        reading = ScanReading(declared_total=declared)
+        chosen = pick_backlog(summaries, stored_ids, limit, reading)
+        for i, summary in enumerate(chosen):
+            if should_stop():
+                reading.unreadable_ids.update(s.post_id for s in chosen[i:])
+                break
             try:
                 reading.observations.append(self._observe(adapter, summary, file_sink))
             except (LoginExpiredError, SiteUnavailableError):

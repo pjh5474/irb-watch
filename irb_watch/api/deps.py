@@ -50,6 +50,7 @@ from irb_watch.db.pipelines import SupabasePipelineFiles, SupabasePipelineStore
 from irb_watch.db.project_access import SupabaseProjectAccessStore
 from irb_watch.db.read_cache import cached_session_store, cached_setup_store
 from irb_watch.db.reviews import SupabaseReviewStore
+from irb_watch.db.session_all import SupabaseAllSearchStore
 from irb_watch.db.session_daily import SupabaseDailySearchStore
 from irb_watch.db.sessions import SupabaseSessionStore
 from irb_watch.db.sites import SupabaseSiteStore
@@ -83,6 +84,7 @@ from irb_watch.services.project_access import ProjectAccessService
 from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
+from irb_watch.services.session_all import AllSearchService
 from irb_watch.services.session_daily import DailySessionSearch
 from irb_watch.services.sessions import SessionService
 from irb_watch.services.sites import SiteService
@@ -472,6 +474,30 @@ def get_alert_service() -> AlertService:
         digest=digest,
         # Failed contact reads, in the daily report; the service is built only when a report runs.
         contact_problems=lambda: get_contact_service().problems(),
+    )
+
+
+@lru_cache
+def _all_search_runner() -> ThreadRunner:
+    """One worker for every ALL-SEARCH job: an hour-long read must not hold a draft or session
+    worker, and two reads never log in to R-BAY at once."""
+    return ThreadRunner(workers=1, name="all-search")
+
+
+def get_all_search_service() -> AllSearchService:
+    """ALL-SEARCH (services/session_all.py): the backlog read and the AI search over it."""
+    client = get_supabase_client()
+    settings = get_settings()
+    hospitals = SupabaseHospitalStore(client)
+    return AllSearchService(
+        SupabaseUserStore(client),
+        SupabaseAllSearchStore(client, runner=settings.app_env),
+        get_scan_service(),
+        _session_service(),
+        SupabaseAuditSink(client),
+        _all_search_runner(),
+        scan_running=lambda: get_runner().is_running(),
+        hospital_exists=lambda hospital_id: hospitals.get(hospital_id) is not None,
     )
 
 

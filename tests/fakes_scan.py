@@ -246,6 +246,13 @@ class FakeReader:
     def close(self):
         self.closed = True
 
+    def read_backlog(self, file_sink, stored_ids, limit, should_stop):
+        self.backlog_calls = getattr(self, "backlog_calls", [])
+        self.backlog_calls.append((frozenset(stored_ids), limit))
+        if self.error is not None:
+            raise self.error
+        return self.reading
+
 
 SCAN_NOW = datetime(2026, 11, 6, tzinfo=UTC)
 
