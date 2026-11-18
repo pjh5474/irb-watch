@@ -772,6 +772,48 @@ def test_picking_a_meeting_sets_the_due_date_to_its_cutoff_unless_the_user_typed
     assert got.due_on == on(15)
 
 
+def test_picking_a_meeting_also_sets_the_decision_date_to_the_meeting_day(env):
+    pipeline = env.pipeline()
+    step = env.first_step(pipeline)
+    a, b = env.session(meets=20, cutoff=10), env.session(meets=30, cutoff=None)
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": a.id})
+    assert (got.due_on, got.decided_on) == (on(10), on(20))
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": b.id})
+    assert got.decided_on == on(30)  # it was the earlier meeting's day: follows
+    # Unpicking takes the meeting's own day away with it.
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": None})
+    assert got.decided_on is None
+    env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": b.id})
+    env.pipelines.update_step("owner", pipeline.id, step.id, {"decided_on": on(31)})  # typed by hand
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": a.id})
+    assert got.decided_on == on(31)  # kept
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": None})
+    assert got.decided_on == on(31)  # a typed date stays when the meeting is unpicked
+    # custom_dates: null counts as not sent
+    env.pipelines.update_step("owner", pipeline.id, step.id, {"custom_dates": None})
+
+
+def test_a_step_keeps_up_to_ten_own_dates_with_names(env):
+    pipeline = env.pipeline()
+    step = env.first_step(pipeline)
+    got = env.pipelines.update_step(
+        "owner", pipeline.id, step.id,
+        {"custom_dates": [{"id": "", "label": "  Sponsor   deadline ", "day": on(9)}, {"label": "Site visit", "day": None}]},
+    )
+    assert [(d["label"], d["day"]) for d in got.custom_dates] == [("Sponsor deadline", on(9)), ("Site visit", None)]
+    assert all(d["id"] for d in got.custom_dates) and len({d["id"] for d in got.custom_dates}) == 2
+    with pytest.raises(ValidationError):
+        env.pipelines.update_step("owner", pipeline.id, step.id, {"custom_dates": [{"label": " ", "day": None}]})
+    with pytest.raises(ValidationError):
+        env.pipelines.update_step("owner", pipeline.id, step.id, {"custom_dates": [{"label": "x", "day": "soon"}]})
+    with pytest.raises(ValidationError):
+        env.pipelines.update_step(
+            "owner", pipeline.id, step.id, {"custom_dates": [{"label": f"d{i}", "day": None} for i in range(11)]}
+        )
+    cleared = env.pipelines.update_step("owner", pipeline.id, step.id, {"custom_dates": []})
+    assert cleared.custom_dates == ()
+
+
 def test_the_source_of_a_date_is_shown_to_every_user_but_never_for_a_study_or_hand_made_board(env):
     from irb_watch.services.sessions import SourceRef, hospital_board
 

@@ -24,6 +24,8 @@ from irb_watch.services.draft_jobs import job_step as _job_step
 from irb_watch.services.errors import ValidationError
 from irb_watch.services.pipeline_admin import StepResult, StepStatus, StepType
 from irb_watch.services.pipelines import (
+    MAX_CUSTOM_DATES,
+    MAX_DATE_LABEL,
     MAX_DOC_NAME,
     MAX_DOC_NOTE,
     MAX_DOCUMENTS,
@@ -125,6 +127,14 @@ class DocumentOut(BaseModel):
         )
 
 
+class CustomDateIO(BaseModel):
+    """One of a step's own dates; the service cleans the whole list and makes missing ids."""
+
+    id: str = Field("", max_length=24)
+    label: str = Field(max_length=MAX_DATE_LABEL + 60)  # the service gives the exact message at 60
+    day: str | None = Field(None, max_length=10)
+
+
 class StepOut(BaseModel):
     id: int
     step_type_id: int | None
@@ -145,6 +155,7 @@ class StepOut(BaseModel):
     result_key: str | None = None
     target_session_id: int | None = None  # CAL-1: the IRB meeting it aims for
     copied_from_step_id: int | None = None  # phase C2: copied from a sibling site's step
+    custom_dates: list[CustomDateIO] = []  # the user's own dates
 
     @classmethod
     def of(cls, s: Step, type_name: str | None = None) -> "StepOut":
@@ -155,6 +166,7 @@ class StepOut(BaseModel):
             parent_step_id=s.parent_step_id, sequence_no=s.sequence_no, label=s.label,
             subject=s.subject, result_key=s.result_key, target_session_id=s.target_session_id,
             copied_from_step_id=s.copied_from_step_id,
+            custom_dates=[CustomDateIO(**d) for d in s.custom_dates],
         )
 
 
@@ -373,6 +385,7 @@ class StepPatch(BaseModel):
     due_on: str | None = Field(None, max_length=10)
     submitted_on: str | None = Field(None, max_length=10)
     decided_on: str | None = Field(None, max_length=10)
+    custom_dates: list[CustomDateIO] | None = Field(None, max_length=MAX_CUSTOM_DATES + 10)  # the whole list; send [] to clear
     note: str | None = Field(None, max_length=MAX_NOTE + 100)
 
 
@@ -674,6 +687,8 @@ def update_step(
 ) -> StepOut:
     # Only the fields sent count; a date sent as null clears it.
     changes = {k: getattr(body, k) for k in body.model_fields_set}
+    if changes.get("custom_dates") is not None:
+        changes["custom_dates"] = [d.model_dump() for d in changes["custom_dates"]]
     return StepOut.of(service.update_step(user.id, pipeline_id, step_id, changes))
 
 

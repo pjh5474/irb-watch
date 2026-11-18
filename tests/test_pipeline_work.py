@@ -33,6 +33,7 @@ def ws(step_id=1, due=None, status="preparing", closed=False, submitted=None, de
         hospital_id=4, hospital_name="SNUH", step_id=step_id, step_name=kw.get("name", f"Step {step_id}"),
         status_key=status, status_label=status, closed=closed, due_on=due, submitted_on=submitted,
         decided_on=decided, required=2 if missing else 0, required_missing=missing,
+        target_session_id=kw.get("target"), result_key=kw.get("result"),
     )
 
 
@@ -83,10 +84,15 @@ def test_work_lists():
         ws(7, on(30), missing=1),  # missing documents
         ws(8, None, status="submitted", missing=1),  # submitted: waiting, not missing
         ws(9, on(-1), status="approved", closed=True, missing=1),  # closed: nowhere
+        # A decision date next to a picked meeting is the plan, also once the day has passed:
+        # waiting until the result is recorded.
+        ws(10, None, status="submitted", submitted="2026-11-03", decided=on(20), target=5),
+        ws(11, None, status="submitted", submitted="2026-11-04", decided=on(-3), target=5),
+        ws(12, None, status="submitted", submitted="2026-11-05", decided=on(-3), target=5, result="approved"),  # answered
     ]
     lists = work_lists(steps, TODAY)
     assert [s.step_id for s in lists.due] == [1, 2]
-    assert [s.step_id for s in lists.waiting] == [5, 4, 8]
+    assert [s.step_id for s in lists.waiting] == [5, 4, 10, 11, 8]
     assert [s.step_id for s in lists.missing] == [7]
 
 

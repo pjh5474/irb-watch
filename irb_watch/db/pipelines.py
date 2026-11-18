@@ -27,7 +27,7 @@ BUCKET = "pipeline-files"
 _STEP_COLUMNS = (
     "id, pipeline_id, step_type_id, name, position, status_key, due_on, submitted_on, decided_on, "
     "note, deleted_at, updated_at, parent_step_id, sequence_no, subject, result_key, target_session_id, "
-    "copied_from_step_id"
+    "copied_from_step_id, custom_dates"
 )
 _VERSION_COLUMNS = (
     "id, document_id, version_no, filename, storage_path, sha256, size_bytes, has_text, text_note, created_at"
@@ -53,6 +53,7 @@ def _step(r: dict) -> Step:
         subject=r.get("subject") or "", result_key=r.get("result_key"),
         target_session_id=int(r["target_session_id"]) if r.get("target_session_id") is not None else None,
         copied_from_step_id=int(r["copied_from_step_id"]) if r.get("copied_from_step_id") is not None else None,
+        custom_dates=tuple(r.get("custom_dates") or ()),
     )
 
 

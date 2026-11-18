@@ -118,11 +118,20 @@ def _in(day: str | None, start: str, end: str) -> bool:
     return day is not None and start <= day <= end
 
 
-def step_items(steps: list[WorkStep], start: str, end: str) -> list[Item]:
+def step_items(
+    steps: list[WorkStep], start: str, end: str, meeting_days: dict[int, str] | None = None
+) -> list[Item]:
+    """meeting_days: session id -> its day, for the meetings listed in the range."""
+    meeting_days = meeting_days or {}
     out = []
     for w in steps:
         for kind, day in (("step_due", w.due_on), ("step_submitted", w.submitted_on), ("step_decided", w.decided_on)):
             if not _in(day, start, end):
+                continue
+            # A decision date equal to the picked meeting's day is that meeting's day, which the
+            # meeting's own line already shows (with this step among its targets): not listed
+            # twice. Any other decision date stays.
+            if kind == "step_decided" and w.target_session_id is not None and meeting_days.get(w.target_session_id) == day:
                 continue
             # A submitted or closed step's due date stays visible (the page greys it).
             out.append(Item(
@@ -218,7 +227,7 @@ class CalendarService:
                 targets.setdefault(w.target_session_id, []).append(w.step_id)
         step_sites = {w.step_id: w.site_id for w in steps}
         items = (
-            step_items(steps, s, e)
+            step_items(steps, s, e, {x.id: x.meets_on for x in sessions})
             + session_items(sessions, s, e, names, {k.key: k.label for k in kinds}, targets)
             + task_items(tasks, projects, sites, names, step_sites)
         )

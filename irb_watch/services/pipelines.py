@@ -78,6 +78,8 @@ MAX_DRAFT_FILES = 15  # the user's own files in one AI draft
 MAX_TEXT_CHARS = 2_000_000
 MAX_SUBJECT = 200
 MAX_SEQUENCE = 999
+MAX_CUSTOM_DATES = 10
+MAX_DATE_LABEL = 60
 SUBMITTED = "submitted"
 DONE = "done"  # the closed status offered after an approved result (migration step_structure)
 ANSWERING = "revisions_requested"  # the work state offered after a result that needs an answer
@@ -123,6 +125,8 @@ class Step:
     result_key: str | None = None  # the IRB's answer (step_results); None: none yet
     target_session_id: int | None = None  # the IRB meeting it aims for (CAL-1)
     copied_from_step_id: int | None = None  # phase C2: the sibling site's step it was copied from
+    # The user's own dates: [{"id", "label", "day"}] (migration step_custom_dates)
+    custom_dates: tuple[dict, ...] = ()
 
     @property
     def label(self) -> str:
@@ -327,6 +331,7 @@ class WorkStep:
     site_label: str = ""  # "01 · PI 김○○" (phase B2a; empty for an unnamed site)
     site_id: int | None = None  # CAL-1: the calendar filters by site
     target_session_id: int | None = None  # CAL-1: the meeting it aims for
+    result_key: str | None = None  # the IRB's answer, if recorded
 
 
 class SessionTargets(Protocol):
@@ -508,6 +513,27 @@ def _date(value: str | None, what: str) -> str | None:
         return date.fromisoformat(value).isoformat()
     except ValueError as exc:
         raise ValidationError(f"the {what} must look like 2026-11-30") from exc
+
+
+def _custom_dates(value: object) -> tuple[dict, ...]:
+    """The step's own dates as sent (the whole list): each has a label and a day (the day may be
+    empty). Ids are kept, or made here; the list is cleaned so nothing else is stored."""
+    if not isinstance(value, list | tuple):
+        raise ValidationError("the own dates must be a list")
+    if len(value) > MAX_CUSTOM_DATES:
+        raise ValidationError(f"a step may have at most {MAX_CUSTOM_DATES} own dates")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValidationError("each own date needs a label and a day")
+        label = _clean(str(item.get("label") or ""), MAX_DATE_LABEL, "date name")
+        day = _date(item.get("day"), f"date of {label}")
+        raw_id = "".join(ch for ch in str(item.get("id") or "") if ch.isalnum() or ch in "-_")[:24]
+        key = raw_id if raw_id and raw_id not in seen else secrets.token_hex(4)
+        seen.add(key)
+        out.append({"id": key, "label": label, "day": day})
+    return tuple(out)
 
 
 def safe_filename(filename: str) -> str:
@@ -968,9 +994,10 @@ class PipelineService:
         if first is None:
             raise ConflictError("no open step status is set; ask an admin")
         meeting_ok = False
+        meeting_day: str | None = None
         if step.target_session_id is not None and self._sessions is not None:
             try:
-                self._sessions.check_target(step.target_session_id, pipeline.hospital_id)
+                meeting_day = self._sessions.check_target(step.target_session_id, pipeline.hospital_id).meets_on
                 meeting_ok = True
             except (ValidationError, NotFoundError):
                 meeting_ok = False
@@ -978,7 +1005,7 @@ class PipelineService:
             step, [d for d in docs if d.step_id == step.id], siblings, others,
             [d for d in docs if d.step_id != step.id],
             numbered=bool(stype and stype.numbered), closed={s.key for s in statuses if s.closed},
-            first_status=first, meeting_ok=meeting_ok,
+            first_status=first, meeting_ok=meeting_ok, meeting_day=meeting_day,
         )
         return step, targets
 
@@ -1012,6 +1039,20 @@ class PipelineService:
         except StepCopyError as exc:
             raise ConflictError(f"{exc}; nothing was copied, reload and try again") from exc
         made = {int(r["pipeline_id"]): int(r["step_id"]) for r in done}
+        # The copy function carries the meeting but not its day: set the day (IRB 심의일) here, only
+        # where the step has none. Not part of the all-or-nothing write; a miss is logged and the
+        # user can pick the meeting again.
+        for t in doing:
+            day = (t.plan or {}).get("step", {}).get("decided_on")
+            sid = made.get(t.pipeline_id)
+            if not day or sid is None:
+                continue
+            try:
+                current = self._store.get_step(sid)
+                if current is not None and not current.decided_on:
+                    self._store.update_step(sid, {"decided_on": day, "updated_at": self._now()})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("the meeting day of copied step %s could not be set: %s", sid, type(exc).__name__)
         return [replace(t, step_id=made.get(t.pipeline_id, t.step_id)) if t.action != SKIP else t for t in chosen]
 
     def _hospital_sessions(self, pipeline: Pipeline) -> tuple[list[Session], Session | None, list[SessionKind]] | None:
@@ -1026,13 +1067,16 @@ class PipelineService:
             log.warning("the sessions of pipeline %s could not be read: %s", pipeline.id, type(exc).__name__)
             return None
 
-    def _due_follows_target(self, step: Step) -> bool:
-        """The step's due date may be replaced by a newly picked meeting's deadline: it is empty,
-        or it equals the deadline of the meeting the step aimed for until now."""
-        if not step.due_on:
+    def _follows_target(self, step: Step, field_name: str) -> bool:
+        """A step date (due_on, decided_on) may be replaced by a newly picked meeting's date: it is
+        empty, or it equals the date the meeting the step aimed for until now gave it."""
+        current = getattr(step, field_name)
+        if not current:
             return True
         previous, failed = self._target_session(step)
-        return not failed and previous is not None and step.due_on == previous.deadline
+        if failed or previous is None:
+            return False
+        return current == (previous.deadline if field_name == "due_on" else previous.meets_on)
 
     def _target_session(self, step: Step) -> tuple[Session | None, bool]:
         """The step's target meeting and whether the read failed."""
@@ -1123,7 +1167,7 @@ class PipelineService:
                     bool(status and status.closed), s.due_on, s.submitted_on, s.decided_on,
                     len(view.checklist) if view else 0, view.required_missing if view else 0,
                     owner, labels.get(p.site_id, "") if p.site_id is not None else "",
-                    p.site_id, s.target_session_id,
+                    p.site_id, s.target_session_id, s.result_key,
                 )
             )
         return out
@@ -1573,11 +1617,20 @@ class PipelineService:
                 # send one and it is empty or was filled from the earlier target (owner 2026-11-18);
                 # a date the user typed is kept.
                 # A due date sent back unchanged (a form that sends every field) counts as not sent.
-                sent = "due_on" in changes and (changes["due_on"] or None) != (step.due_on or None)
-                if not sent and self._due_follows_target(step):
-                    changes = {k: v for k, v in changes.items() if k != "due_on"}  # the echoed value
-                    values["due_on"] = picked.deadline
+                # The decision date (IRB 심의일) follows the meeting's day by the same rule.
+                for field_name, day in (("due_on", picked.deadline), ("decided_on", picked.meets_on)):
+                    sent = field_name in changes and (changes[field_name] or None) != (getattr(step, field_name) or None)
+                    if not sent and self._follows_target(step, field_name):
+                        changes = {k: v for k, v in changes.items() if k != field_name}  # the echoed value
+                        values[field_name] = day
+            elif "decided_on" not in changes and step.decided_on:
+                # Unpicking: a decision date that was the meeting's day goes with it.
+                previous, failed = self._target_session(step)
+                if not failed and previous is not None and step.decided_on == previous.meets_on:
+                    values["decided_on"] = None
             values["target_session_id"] = target
+        if changes.get("custom_dates") is not None:
+            values["custom_dates"] = _custom_dates(changes["custom_dates"])
         if "note" in changes:
             note = (changes["note"] or "").strip()
             if len(note) > MAX_NOTE:
@@ -1599,9 +1652,11 @@ class PipelineService:
         if not values:
             return step
         updated = self._update_step(step.id, {**values, "updated_at": self._now()})
-        payload = {k: {"from": getattr(step, k), "to": v} for k, v in values.items() if k != "note"}
+        payload = {k: {"from": getattr(step, k), "to": v} for k, v in values.items() if k not in ("note", "custom_dates")}
         if "note" in values:
             payload["note"] = True
+        if "custom_dates" in values:  # the names stay out of the audit trail: only how many
+            payload["custom_dates"] = {"from": len(step.custom_dates), "to": len(values["custom_dates"])}
         self._event(pipeline.id, step.id, user_id, "step.updated", payload)
         return updated
 

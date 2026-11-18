@@ -74,7 +74,9 @@ def untouched(
         step.deleted_at is None and step.parent_step_id is None
         and (copy_ok or step.copied_from_step_id is None)
         and step.status_key != SUBMITTED and step.status_key not in closed
-        and not step.submitted_on and not step.decided_on and step.result_key is None
+        # A decision date next to a picked meeting is that meeting's day, not work.
+        and not step.submitted_on and not (step.decided_on and step.target_session_id is None)
+        and step.result_key is None
         and not any(s.parent_step_id == step.id and s.deleted_at is None for s in steps)
         and not any(d.versions for d in docs if d.step_id == step.id)
     )
@@ -180,11 +182,15 @@ def plan_copy(
     closed: set[str],
     first_status: str,
     meeting_ok: bool,
+    meeting_day: str | None = None,
 ) -> list[CopyTarget]:
     """What copying `source` does at each sibling site. `steps` holds every step of the
     siblings' pipelines; `docs` the slots of the steps that could be filled."""
     layout = [d for d in slot_order(source_docs) if d.deleted_at is None]
     meeting = source.target_session_id if meeting_ok else None
+    # The meeting's day (IRB 심의일) goes with the meeting only when the step's date IS that
+    # day (it followed the pick); a typed or actual decision date never does.
+    planned = meeting_day if meeting is not None and source.decided_on == meeting_day else None
     out: list[CopyTarget] = []
     for site, pipeline in sorted(siblings, key=lambda x: (x[0].site_no or "~", x[0].pi_name.lower(), x[0].id)):
         if pipeline is None:
@@ -213,6 +219,7 @@ def plan_copy(
             values = {
                 k: v for k, v in (
                     ("subject", source.subject or None), ("due_on", source.due_on), ("target_session_id", meeting),
+                    ("decided_on", planned),
                 ) if v is not None
             }
             plan = {
@@ -242,7 +249,7 @@ def plan_copy(
             "step": {
                 "name": source.name, "step_type_id": source.step_type_id, "status_key": first_status,
                 "sequence_no": number, "subject": source.subject, "due_on": source.due_on,
-                "target_session_id": meeting,
+                "target_session_id": meeting, "decided_on": planned,
             },
             "slot_inserts": [_insert(d) for d in layout],
         }

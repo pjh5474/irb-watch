@@ -46,7 +46,13 @@ def work_lists(steps: list[WorkStep], today: date) -> WorkLists:
         key=lambda s: (s.due_on, s.project_name or "", s.step_id),
     )
     waiting = sorted(
-        (s for s in steps if s.status_key == SUBMITTED and not s.closed and s.decided_on is None),
+        # A decision date next to a picked meeting is the planned meeting day, not an answer: the
+        # step waits until the IRB's result is recorded or the step is closed.
+        (
+            s for s in steps
+            if s.status_key == SUBMITTED and not s.closed and s.result_key is None
+            and (s.decided_on is None or s.target_session_id is not None)
+        ),
         key=lambda s: (s.submitted_on is None, s.submitted_on or "", s.step_id),
     )
     missing = sorted(

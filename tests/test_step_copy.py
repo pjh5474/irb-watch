@@ -33,7 +33,9 @@ class FakeSessions:
     def check_target(self, session_id, hospital_id):
         if session_id not in self.valid:
             raise ValidationError("this session is cancelled; pick another one")
-        return object()
+        from types import SimpleNamespace
+
+        return SimpleNamespace(meets_on="2026-12-10")
 
     def upcoming_for(self, hospital_id):
         return [], None
@@ -239,15 +241,26 @@ def test_the_target_meeting_comes_along_only_while_it_is_valid():
     env = CopyEnv()
     env.service._sessions = FakeSessions({50})
     src = env.step(env.pa, INITIAL)
-    env.pstore.step_rows[src.id] = replace(src, target_session_id=50)
+    env.pstore.step_rows[src.id] = replace(src, target_session_id=50, decided_on="2026-12-10")  # the meeting's day
     env.service.copy_step("owner", env.pa.id, src.id, [env.b.id])
-    assert env.step(env.pb, INITIAL).target_session_id == 50
+    copy = env.step(env.pb, INITIAL)
+    assert (copy.target_session_id, copy.decided_on) == (50, "2026-12-10")
     env.service._sessions = FakeSessions(set())  # cancelled meanwhile
     free = env.service.add_step("owner", env.pa.id, "협의", None)
     env.pstore.step_rows[free.id] = replace(env.pstore.step_rows[free.id], target_session_id=50)
     out = env.service.copy_step("owner", env.pa.id, free.id, [env.b.id])
     assert out[0].notes == ("meeting_not_copied",)
     assert env.pstore.get_step(out[0].step_id).target_session_id is None
+
+
+def test_a_decision_date_that_is_not_the_meeting_day_does_not_go_along():
+    env = CopyEnv()
+    env.service._sessions = FakeSessions({50})
+    src = env.step(env.pa, INITIAL)
+    env.pstore.step_rows[src.id] = replace(src, target_session_id=50, decided_on="2026-12-15")  # typed or real
+    env.service.copy_step("owner", env.pa.id, src.id, [env.b.id])
+    copy = env.step(env.pb, INITIAL)
+    assert (copy.target_session_id, copy.decided_on) == (50, None)
 
 
 def slot(sid, name, kind=None, section="submission", position=1, status="needed", step=1):
