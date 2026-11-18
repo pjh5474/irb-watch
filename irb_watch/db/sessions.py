@@ -16,6 +16,8 @@ from irb_watch.services.sessions import (
     SessionJobTakenError,
     SessionKind,
     SessionTakenError,
+    SourceRef,
+    hospital_board,
 )
 
 UNIQUE_VIOLATION = "23505"
@@ -153,14 +155,43 @@ class SupabaseSessionStore:
         s = self._c.table("sources").select("hospital_id").eq("id", d[0]["source_id"]).limit(1).execute().data
         return int(s[0]["hospital_id"]) if s and s[0].get("hospital_id") is not None else None
 
+    def version_source(self, version_id: int) -> SourceRef | None:
+        v = self._c.table("document_versions").select("document_id").eq("id", version_id).limit(1).execute().data
+        if not v:
+            return None
+        d = (
+            self._c.table("documents").select("title, posted_on, source_id")
+            .eq("id", v[0]["document_id"]).limit(1).execute().data
+        )
+        if not d:
+            return None
+        s = (
+            self._c.table("sources").select("name, adapter, requires_login, hospital_id")
+            .eq("id", d[0]["source_id"]).limit(1).execute().data
+        )
+        if not s:
+            return None
+        hospital_id = int(s[0]["hospital_id"]) if s[0].get("hospital_id") is not None else None
+        name = None
+        shareable = hospital_board(s[0])
+        if shareable and hospital_id is not None:
+            h = self._c.table("hospitals").select("name").eq("id", hospital_id).limit(1).execute().data
+            name = h[0]["name"] if h else None
+        return SourceRef(
+            d[0].get("title") or "", d[0].get("posted_on"), s[0].get("name") or "", hospital_id, shareable, name
+        )
+
     # the AI job's input
     def posts_for(self, hospital_id: int, limit: int) -> list[PostBrief]:
-        # Every AI-on board, login boards included (owner, 2026-11-17): meeting dates are
-        # hospital-level facts, and the AI-on flag is the consent to read the board.
+        # The hospital's own boards only (R-BAY e-IRB, login boards included, and public boards):
+        # meeting dates are hospital-level facts, and the AI-on flag is the consent to read the
+        # board. A study (members-only non-R-BAY) or hand-made source is never read here, because
+        # its dates and quotes are shown to every user (owner decision 2026-11-18).
         sources = (
-            self._c.table("sources").select("id").eq("hospital_id", hospital_id).eq("ai_enabled", True).execute().data
+            self._c.table("sources").select("id, adapter, requires_login")
+            .eq("hospital_id", hospital_id).eq("ai_enabled", True).execute().data
         )
-        ids = [int(r["id"]) for r in sources]
+        ids = [int(r["id"]) for r in sources if hospital_board(r)]
         if not ids:
             return []
         rows = (

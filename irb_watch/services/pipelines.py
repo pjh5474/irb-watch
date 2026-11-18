@@ -1026,6 +1026,14 @@ class PipelineService:
             log.warning("the sessions of pipeline %s could not be read: %s", pipeline.id, type(exc).__name__)
             return None
 
+    def _due_follows_target(self, step: Step) -> bool:
+        """The step's due date may be replaced by a newly picked meeting's deadline: it is empty,
+        or it equals the deadline of the meeting the step aimed for until now."""
+        if not step.due_on:
+            return True
+        previous, failed = self._target_session(step)
+        return not failed and previous is not None and step.due_on == previous.deadline
+
     def _target_session(self, step: Step) -> tuple[Session | None, bool]:
         """The step's target meeting and whether the read failed."""
         if self._sessions is None or step.target_session_id is None:
@@ -1560,7 +1568,15 @@ class PipelineService:
             if target is not None:
                 if self._sessions is None:
                     raise ConflictError("IRB sessions are not set up on this server")
-                self._sessions.check_target(int(target), pipeline.hospital_id)
+                picked = self._sessions.check_target(int(target), pipeline.hospital_id)
+                # The due date follows the meeting's cutoff (else its day) when the user did not
+                # send one and it is empty or was filled from the earlier target (owner 2026-11-18);
+                # a date the user typed is kept.
+                # A due date sent back unchanged (a form that sends every field) counts as not sent.
+                sent = "due_on" in changes and (changes["due_on"] or None) != (step.due_on or None)
+                if not sent and self._due_follows_target(step):
+                    changes = {k: v for k, v in changes.items() if k != "due_on"}  # the echoed value
+                    values["due_on"] = picked.deadline
             values["target_session_id"] = target
         if "note" in changes:
             note = (changes["note"] or "").strip()

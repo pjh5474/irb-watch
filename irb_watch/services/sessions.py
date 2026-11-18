@@ -147,6 +147,28 @@ class PostBrief:
     posted_on: str | None
 
 
+@dataclass(frozen=True)
+class SourceRef:
+    """Where an AI-found date came from, as every signed-in user may see it: the post's title
+    and day, the board's name and the hospital. `shareable` is False for a board that is not a
+    hospital's own e-IRB or public board (a study or a hand-made source): nothing of it is shown."""
+
+    title: str
+    posted_on: str | None
+    board: str
+    hospital_id: int | None
+    shareable: bool
+    hospital_name: str | None = None
+
+
+def hospital_board(source: dict) -> bool:
+    """Whether a source row (adapter, requires_login) is the hospital's own board: an R-BAY e-IRB
+    board (members-only, as all of them are) or a public board. A members-only board of another
+    adapter is a study, and a manual source is hand-made: neither feeds the shared dates."""
+    adapter = source.get("adapter")
+    return adapter == "rbay" or (adapter == "snuh_hrpp" and not source.get("requires_login"))
+
+
 class SessionTakenError(Exception):
     """Raised by the store when a live session of that hospital, kind and day exists."""
 
@@ -179,9 +201,13 @@ class SessionStore(Protocol):
     def version_hospital(self, version_id: int) -> int | None:
         """The hospital of the board a stored document version is on."""
         ...
+    def version_source(self, version_id: int) -> SourceRef | None:
+        """The post a stored document version belongs to (for the source page)."""
+        ...
     # the AI job
     def posts_for(self, hospital_id: int, limit: int) -> list[PostBrief]:
-        """Newest posts of the hospital's AI-on boards, login boards included."""
+        """Newest posts of the hospital's AI-on boards that are the hospital's own e-IRB (R-BAY)
+        or public boards, login boards of R-BAY included. Study and hand-made sources never."""
         ...
     def version_content(self, version_id: int) -> VersionContent | None: ...
     def create_job(self, hospital_id: int, user_id: str) -> SessionJob:
@@ -346,6 +372,19 @@ class SessionService:
             return self._is_admin(user_id)
         except ForbiddenError:
             return False
+
+    def source_of(self, user_id: str, session_id: int) -> tuple[Session, SourceRef]:
+        """Any signed-in user: the post an AI-found session was read from (title, day, board and
+        the AI's short quote; never the text or the files). NotFoundError for a session the user
+        cannot see, one with no stored post, or a post of a study or hand-made source."""
+        self._is_admin(user_id)  # an active account
+        session = self._store.get(session_id)
+        if session is None or not session.visible or session.evidence_version_id is None:
+            raise NotFoundError("no source for this session")
+        ref = self._store.version_source(session.evidence_version_id)
+        if ref is None or not ref.shareable:
+            raise NotFoundError("no source for this session")
+        return session, ref
 
     def _hospital(self, hospital_id: int) -> None:
         if not self._hospital_exists(hospital_id):

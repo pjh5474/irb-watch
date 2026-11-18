@@ -665,6 +665,58 @@ def test_the_digest_mail_carries_cutoff_and_task_lines_marked():
     assert mailer.sent == []
 
 
+# -- pick: due date and source (owner 2026-11-18) -------------------------------------------------
+
+
+def test_picking_a_meeting_sets_the_due_date_to_its_cutoff_unless_the_user_typed_one(env):
+    pipeline = env.pipeline()
+    step = env.first_step(pipeline)
+    a, b = env.session(meets=20, cutoff=10), env.session(meets=30, cutoff=None)
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": a.id})
+    assert got.due_on == on(10)  # empty: filled with the cutoff
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": b.id})
+    assert got.due_on == on(30)  # it was the earlier meeting's deadline: follows (no cutoff: the day)
+    env.pipelines.update_step("owner", pipeline.id, step.id, {"due_on": on(5)})  # the user typed one
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": a.id})
+    assert got.due_on == on(5)  # kept
+    got = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": b.id, "due_on": on(7)})
+    assert got.due_on == on(7)  # sent with the pick: the user's value wins
+    cleared = env.pipelines.update_step("owner", pipeline.id, step.id, {"target_session_id": None})
+    assert cleared.due_on == on(7)  # clearing the meeting leaves the date
+    # A form that sends every field: an unchanged empty or old due date does not block the follow rule.
+    fresh = env.first_step(env.pipeline(EWHA))
+    c = env.session(hospital=EWHA, meets=25, cutoff=15)
+    pid = fresh.pipeline_id
+    got = env.pipelines.update_step("owner", pid, fresh.id, {"target_session_id": c.id, "due_on": None})
+    assert got.due_on == on(15)
+
+
+def test_the_source_of_a_date_is_shown_to_every_user_but_never_for_a_study_or_hand_made_board(env):
+    from irb_watch.services.sessions import SourceRef, hospital_board
+
+    s = env.session()
+    env.store.update(s.id, {"evidence_version_id": 71, "evidence_quote": "정기심의 12월 10일"})
+    env.store.version_sources[71] = SourceRef("2026년 심의일정", "2026-11-01", "병원 : 공지", SNUH, True, "가나병원")
+    session, ref = env.sessions.source_of("stranger", s.id)  # any active user, project or not
+    assert (ref.title, ref.board, ref.hospital_name, session.evidence_quote) == (
+        "2026년 심의일정", "병원 : 공지", "가나병원", "정기심의 12월 10일",
+    )
+    env.store.version_sources[71] = SourceRef("study doc", None, "Study", SNUH, False)
+    with pytest.raises(NotFoundError):
+        env.sessions.source_of("owner", s.id)
+    other = env.session(meets=12)
+    with pytest.raises(NotFoundError):
+        env.sessions.source_of("owner", other.id)  # no stored post
+    env.sessions.remove("boss", s.id)
+    with pytest.raises(NotFoundError):
+        env.sessions.source_of("owner", s.id)
+    # Which sources count as a hospital's own board.
+    assert hospital_board({"adapter": "rbay", "requires_login": True})
+    assert hospital_board({"adapter": "snuh_hrpp", "requires_login": False})
+    assert not hospital_board({"adapter": "snuh_hrpp", "requires_login": True})  # a study
+    assert not hospital_board({"adapter": "manual", "requires_login": False})
+
+
 # -- the API ------------------------------------------------------------------------------------
 
 
@@ -697,6 +749,17 @@ def test_api_routes(env):
         as_admin = next(s for s in client.get(f"/hospitals/{SNUH}/sessions", headers=boss).json() if s["id"] == sid)
         assert (as_user["evidence_quote"], as_user["evidence_version_id"]) == (None, None)
         assert (as_admin["evidence_quote"], as_admin["evidence_version_id"]) == ("from a study board", 70)
+        # The source page: a study or hand-made board gives 404; a hospital's own board gives the
+        # title, day, board and quote to any signed-in user, and never a document id.
+        assert client.get(f"/sessions/{sid}/source", headers=owner).status_code == 404
+        from irb_watch.services.sessions import SourceRef
+
+        env.store.version_sources[70] = SourceRef("공지 제목", "2026-11-01", "병원 : 공지", SNUH, True, "가나병원")
+        src = client.get(f"/sessions/{sid}/source", headers=owner).json()
+        assert src == {
+            "session_id": sid, "hospital_id": SNUH, "hospital_name": "가나병원", "board": "병원 : 공지",
+            "title": "공지 제목", "posted_on": "2026-11-01", "quote": "from a study board", "origin": "user",
+        }
         t1 = client.post("/projects/1/tasks", headers=owner, json={"title": "Call", "due_on": on(2)})
         assert t1.status_code == 201
         assert client.patch(f"/tasks/{t1.json()['id']}", headers=owner, json={"done": True}).json()["done"] is True

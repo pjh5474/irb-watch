@@ -95,7 +95,7 @@ SETUP_WRITES = frozenset({
 })
 
 SESSION_CACHE = ReadCache()
-SESSION_READS = frozenset({"kinds"})
+SESSION_READS = frozenset({"kinds"})  # version_source is read uncached (see SESSION_PASS in the test)
 SESSION_WRITES = frozenset({"add_kind", "update_kind"})
 
 

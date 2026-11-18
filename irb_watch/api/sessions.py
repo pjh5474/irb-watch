@@ -181,6 +181,33 @@ def hospital_sessions(
     return sessions_out(rows, user.id, access, evidence=service.sees_evidence(user.id))
 
 
+class SourceOut(BaseModel):
+    session_id: int
+    hospital_id: int | None
+    hospital_name: str | None
+    board: str  # the board's name
+    title: str  # the post's title: untrusted page text, show as plain text
+    posted_on: str | None
+    quote: str | None  # the AI's short quote from the post: untrusted, plain text
+    origin: str  # ai | admin | user
+
+
+@router.get("/sessions/{session_id}/source", response_model=SourceOut)
+def session_source(
+    session_id: int,
+    user: AuthUser = Depends(current_user),
+    service: Service = Depends(get_session_service),
+):
+    """Why a date was suggested: the post it was read from (title, day, board) and the AI's short
+    quote, for every signed-in user. Never the post's text or files; the post's own page keeps its
+    normal access. 404 when there is no stored post, or it is on a study or hand-made source."""
+    session, ref = service.source_of(user.id, session_id)
+    return SourceOut(
+        session_id=session.id, hospital_id=ref.hospital_id or session.hospital_id, hospital_name=ref.hospital_name,
+        board=ref.board, title=ref.title, posted_on=ref.posted_on, quote=session.evidence_quote, origin=session.origin,
+    )
+
+
 @router.post("/hospitals/{hospital_id}/sessions", status_code=201, response_model=SessionOut)
 def propose(
     hospital_id: int, body: SessionIn, user: AuthUser = Depends(current_user), service: Service = Depends(get_session_service)

@@ -16,6 +16,7 @@ from irb_watch.services.sessions import (
     SessionJobTakenError,
     SessionKind,
     SessionTakenError,
+    SourceRef,
 )
 from irb_watch.services.tasks import Task, TaskLinkError
 
@@ -36,6 +37,7 @@ class FakeSessionStore:
         self.posts: dict[int, list[PostBrief]] = {}  # hospital -> posts of AI-on boards
         self.contents: dict[int, VersionContent] = {}  # version id -> content
         self.version_hospitals: dict[int, int] = {}
+        self.version_sources: dict[int, SourceRef] = {}
         self._ids = itertools.count(100)
         self.fail_between = False
 
@@ -100,6 +102,9 @@ class FakeSessionStore:
 
     def version_hospital(self, version_id):
         return self.version_hospitals.get(version_id)
+
+    def version_source(self, version_id):
+        return self.version_sources.get(version_id)
 
     # the AI job's input
     def posts_for(self, hospital_id, limit):
