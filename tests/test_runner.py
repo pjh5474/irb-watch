@@ -110,6 +110,22 @@ def test_sites_run_in_parallel_but_boards_of_one_site_run_one_by_one():
     assert scans.order.index(1) < scans.order.index(2) < scans.order.index(3)
 
 
+def test_the_after_scan_hook_runs_after_scheduled_runs_never_after_manual_ones_and_never_fails_a_run():
+    seen = []
+    runner, _, _, _ = make_runner([src(1)])
+    runner._after_scan = lambda report: seen.append(report.trigger)
+    runner.run_all("scheduled")
+    runner.run_all("catch_up")
+    runner.run_all("manual")
+    assert seen == ["scheduled", "catch_up"]
+
+    def boom(report):
+        raise RuntimeError("the AI is down")
+
+    runner._after_scan = boom
+    assert runner.run_all("scheduled").scanned  # the run still reports its scans
+
+
 def test_scan_selected_runs_only_those_and_keeps_one_site_sequential():
     sources = [src(1), src(2), src(3), src(4, host="other.example.org"), src(5, is_active=False)]
     runner, scans, audit, _ = make_runner(sources)

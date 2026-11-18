@@ -50,6 +50,7 @@ from irb_watch.db.pipelines import SupabasePipelineFiles, SupabasePipelineStore
 from irb_watch.db.project_access import SupabaseProjectAccessStore
 from irb_watch.db.read_cache import cached_session_store, cached_setup_store
 from irb_watch.db.reviews import SupabaseReviewStore
+from irb_watch.db.session_daily import SupabaseDailySearchStore
 from irb_watch.db.sessions import SupabaseSessionStore
 from irb_watch.db.sites import SupabaseSiteStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
@@ -82,6 +83,7 @@ from irb_watch.services.project_access import ProjectAccessService
 from irb_watch.services.reviews import ReviewService
 from irb_watch.services.runner import ScanRunner
 from irb_watch.services.scan import ScanService, SourceReader
+from irb_watch.services.session_daily import DailySessionSearch
 from irb_watch.services.sessions import SessionService
 from irb_watch.services.sites import SiteService
 from irb_watch.services.source_login import cookies_for_source, login_site
@@ -474,6 +476,13 @@ def get_alert_service() -> AlertService:
 
 
 @lru_cache
+def get_daily_session_search() -> DailySessionSearch:
+    """The daily AI search for IRB dates after a scan run; off without the AI key and model."""
+    client = get_supabase_client()
+    return DailySessionSearch(_session_service(), SupabaseDailySearchStore(client), SupabaseAuditSink(client))
+
+
+@lru_cache
 def get_runner() -> ScanRunner:
     """One runner per process, so the daily run and "run all now" never overlap."""
     client = get_supabase_client()
@@ -485,6 +494,7 @@ def get_runner() -> ScanRunner:
         SupabaseAuditSink(client),
         lambda source_id, due: retry_hook[0](source_id, due),
         alerts=get_alert_service(),
+        after_scan=lambda report: get_daily_session_search().after_run(report),
     )
 
 

@@ -169,6 +169,10 @@ def hospital_board(source: dict) -> bool:
     return adapter == "rbay" or (adapter == "snuh_hrpp" and not source.get("requires_login"))
 
 
+class NoReadableTextError(ServiceError):
+    """The posts given had no text to read (scanned or hash-only files): nothing was sent."""
+
+
 class SessionTakenError(Exception):
     """Raised by the store when a live session of that hospital, kind and day exists."""
 
@@ -739,9 +743,18 @@ class SessionService:
         return texts, sent
 
     def _find(self, job: SessionJob, admin_id: str, posts: list[PostBrief]) -> dict:
+        return self.propose_from_posts(job.hospital_id, posts, admin_id, job.id)
+
+    def propose_from_posts(
+        self, hospital_id: int, posts: list[PostBrief], proposer_id: str | None, job_id: str | None
+    ) -> dict:
+        """Read these posts with the AI and write NEW proposals only (never an edit or a cancel of
+        a session that exists; a day already listed, also a rejected one, is skipped). Used by the
+        admin's job and by the daily search after the scan (no person, no job row). Raises
+        ServiceError with a readable reason."""
         texts, sent = self._texts(posts)
         if not texts:
-            raise ServiceError("the stored posts of this hospital have no readable text; nothing was sent")
+            raise NoReadableTextError("the stored posts of this hospital have no readable text; nothing was sent")
         kinds = {k.key: k.label for k in self.kinds()}
         today = self.today()
         try:
@@ -756,14 +769,14 @@ class SessionService:
                 skipped += 1
                 continue
             key = (values["kind_key"], values["meets_on"])
-            if key in seen or self._store.same_day(job.hospital_id, *key):
+            if key in seen or self._store.same_day(hospital_id, *key):
                 skipped += 1  # listed already, or an admin rejected it before
                 continue
             seen.add(key)
             try:
                 self._store.create({
-                    **values, "hospital_id": job.hospital_id, "state": PROPOSED, "origin": "ai",
-                    "proposed_by": admin_id, "proposed_at": self._now(), "job_id": job.id,
+                    **values, "hospital_id": hospital_id, "state": PROPOSED, "origin": "ai",
+                    "proposed_by": proposer_id, "proposed_at": self._now(), "job_id": job_id,
                 })
             except SessionTakenError:
                 skipped += 1

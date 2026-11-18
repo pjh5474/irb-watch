@@ -183,6 +183,32 @@ class FakeFinder:
         return list(self.found)
 
 
+class FakeDailyStore:
+    """services.session_daily.DailySearchStore in memory."""
+
+    def __init__(self) -> None:
+        self.notice: dict[int, int] = {}  # source id -> hospital id (active notice boards, AI on)
+        self.posts: list[tuple[int, PostBrief, str]] = []  # (source id, post, saved at)
+        self.states: dict[int, object] = {}
+
+    def notice_sources(self, source_ids):
+        out: dict[int, list[int]] = {}
+        for sid in source_ids:
+            if sid in self.notice:
+                out.setdefault(self.notice[sid], []).append(sid)
+        return out
+
+    def changed_posts(self, source_ids, since, limit):
+        rows = sorted((r for r in self.posts if r[0] in source_ids and r[2] > since), key=lambda r: r[2], reverse=True)
+        return [p for _, p, _ in rows][:limit]
+
+    def state(self, hospital_id):
+        return self.states.get(hospital_id)
+
+    def save_state(self, state):
+        self.states[state.hospital_id] = state
+
+
 class HeldRunner:
     """Keeps the work until run() is called (a job stays queued in between)."""
 

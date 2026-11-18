@@ -41,7 +41,14 @@ from irb_watch.services.sessions import (
 )
 from irb_watch.services.tasks import TaskService
 from tests.fakes import FakeAudit, FakeStore
-from tests.fakes_calendar import FakeFinder, FakeSessionStore, FakeTaskStore, Found, HeldRunner
+from tests.fakes_calendar import (
+    FakeDailyStore,
+    FakeFinder,
+    FakeSessionStore,
+    FakeTaskStore,
+    Found,
+    HeldRunner,
+)
 from tests.fakes_mail import FakeDigestStore, FakeMailer
 from tests.fakes_pipeline import FakePipelineSetupStore
 from tests.fakes_pipelines import FakePipelineFiles, FakePipelineStore
@@ -663,6 +670,80 @@ def test_the_digest_mail_carries_cutoff_and_task_lines_marked():
     mailer.sent.clear()
     service.send_all()
     assert mailer.sent == []
+
+
+# -- the daily AI search after a scan (slice 2) -----------------------------------------------------
+
+
+def daily_env(found=None, error=None):
+    from types import SimpleNamespace
+
+    from irb_watch.services.session_daily import DailySessionSearch
+
+    e = ai_env(found, error)
+    daily = FakeDailyStore()
+    daily.notice = {50: SNUH}
+    for post, version, title, text, day in ((1, 11, "공지: 심의 일정", "12월 정기심의", "2026-11-01"),):
+        daily.posts.append((50, PostBrief(post, version, title, day), "2026-11-20T00:30:00+00:00"))
+    search = DailySessionSearch(e.sessions, daily, e.audit, clock=lambda: NOW)
+    report = SimpleNamespace(scanned={50: "ok"}, summaries={})
+    return e, daily, search, report
+
+
+def test_the_daily_search_writes_new_proposals_without_a_person_and_moves_the_cursor():
+    e, daily, search, report = daily_env([Found(1, on(20), cutoff_on=on(13)), Found(1, on(40))])
+    counts = search.after_run(report)
+    assert counts == {"hospitals": 1, "searched": 1, "failed": 0, "nothing_new": 0, "proposed": 2}
+    rows = list(e.store.rows.values())
+    assert {(s.origin, s.state, s.proposed_by, s.job_id, s.reviewed_by) for s in rows} == {("ai", "proposed", None, None, None)}
+    state = daily.states[SNUH]
+    assert (state.last_status, state.last_error, state.last_ok_at, state.last_proposed) == ("ok", None, NOW.isoformat(), 2)
+    assert e.store.job_rows == {}  # no job row: no person owns it
+    events = [x["event_type"] for x in e.audit.entries]
+    assert "session.daily_find_started" in events and "session.daily_find_finished" in events
+    # Nothing new on the next run: no second AI call and no duplicate proposal.
+    calls = len(e.finder.calls)
+    assert search.after_run(report)["nothing_new"] == 1
+    assert len(e.finder.calls) == calls and len(e.store.rows) == 2
+
+
+def test_a_failed_daily_search_keeps_its_reason_and_the_cursor_so_the_posts_are_read_again():
+    from irb_watch.ai.session_finder import FinderError
+
+    e, daily, search, report = daily_env(error=FinderError("the AI ran out of room"))
+    counts = search.after_run(report)
+    assert (counts["failed"], counts["proposed"]) == (1, 0)
+    state = daily.states[SNUH]
+    assert (state.last_status, state.last_error, state.last_ok_at) == ("failed", "the AI ran out of room", None)
+    e.finder.error = None  # fixed: the same posts are read again, nothing was lost
+    e.finder.found = [Found(1, on(20))]
+    assert search.after_run(report)["proposed"] == 1
+    assert daily.states[SNUH].last_status == "ok" and daily.states[SNUH].last_error is None
+
+
+def test_the_daily_search_skips_baseline_and_failed_scans_other_boards_and_a_server_without_ai():
+    from types import SimpleNamespace
+
+    from irb_watch.services.session_daily import DailySessionSearch
+
+    e, daily, search, report = daily_env([Found(1, on(20))])
+    # A silent first scan: its backlog is not read; the cursor starts now (ALL-SEARCH reads the backlog).
+    first = search.after_run(SimpleNamespace(scanned={50: "ok"}, summaries={50: SimpleNamespace(baseline=True)}))
+    assert (first["searched"], first["proposed"]) == (0, 0) and daily.states[SNUH].last_ok_at == NOW.isoformat()
+    del daily.states[SNUH]
+    assert search.after_run(SimpleNamespace(scanned={50: "failed"}, summaries={}))["hospitals"] == 0
+    assert search.after_run(SimpleNamespace(scanned={99: "ok"}, summaries={}))["hospitals"] == 0  # not a notice board
+    assert e.finder.calls == [] and e.store.rows == {}
+    off = DailySessionSearch(Env().sessions, daily, e.audit, clock=lambda: NOW)  # no finder set up
+    assert off.after_run(report)["hospitals"] == 0
+
+
+def test_posts_with_no_readable_text_are_not_a_failure():
+    e, daily, search, report = daily_env([Found(1, on(20))])
+    e.store.contents.pop(11)  # the stored version cannot be read
+    counts = search.after_run(report)
+    assert (counts["failed"], counts["searched"]) == (0, 1)
+    assert daily.states[SNUH].last_status == "ok" and e.finder.calls == []
 
 
 # -- pick: due date and source (owner 2026-11-18) -------------------------------------------------

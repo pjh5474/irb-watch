@@ -72,8 +72,10 @@ class ScanRunner:
         schedule_retry: Callable[[int, datetime], None],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         alerts: AlertHooks | None = None,
+        after_scan: Callable[["RunReport"], object] | None = None,
     ) -> None:
         self._alerts = alerts
+        self._after_scan = after_scan  # the daily AI date search; it never raises into a run
         self._list_sources = list_sources
         self._get_source = get_source
         self._scans = scans
@@ -185,13 +187,18 @@ class ScanRunner:
         return report
 
     def _after_run(self, report: RunReport) -> None:
-        """Mail admins about problems and the daily result. A mail problem never fails a run."""
-        if self._alerts is None:
-            return
-        try:
-            self._alerts.after_run(report)
-        except Exception:
-            log.exception("sending the alerts after a run failed")
+        """Mail admins about problems and the daily result, then search the scanned hospitals'
+        notices for IRB dates (slow: model calls, so after the mails). Neither may fail a run."""
+        if self._alerts is not None:
+            try:
+                self._alerts.after_run(report)
+            except Exception:
+                log.exception("sending the alerts after a run failed")
+        if self._after_scan is not None and report.trigger != MANUAL:
+            try:
+                self._after_scan(report)
+            except Exception:
+                log.exception("the daily IRB date search after a run failed")
 
     # -- decisions ---------------------------------------------------------------------
 
