@@ -782,6 +782,17 @@ def test_the_source_of_a_date_is_shown_to_every_user_but_never_for_a_study_or_ha
     assert (ref.title, ref.board, ref.hospital_name, session.evidence_quote) == (
         "2026년 심의일정", "병원 : 공지", "가나병원", "정기심의 12월 10일",
     )
+    # The post's page id goes only to those who can open it (a members-only board).
+    env.store.version_sources[71] = SourceRef(
+        "t", None, "B", SNUH, True, "가나병원", document_id=383, source_id=9, members_only=True
+    )
+    assert env.sessions.source_of("stranger", s.id)[1].document_id is None
+    env.store.source_members.add(("stranger", 9))
+    assert env.sessions.source_of("stranger", s.id)[1].document_id == 383
+    env.store.version_sources[71] = SourceRef(
+        "t", None, "B", SNUH, True, "가나병원", document_id=384, source_id=9, members_only=False
+    )
+    assert env.sessions.source_of("owner", s.id)[1].document_id == 384  # a public board: open to all
     env.store.version_sources[71] = SourceRef("study doc", None, "Study", SNUH, False)
     with pytest.raises(NotFoundError):
         env.sessions.source_of("owner", s.id)
@@ -835,11 +846,12 @@ def test_api_routes(env):
         assert client.get(f"/sessions/{sid}/source", headers=owner).status_code == 404
         from irb_watch.services.sessions import SourceRef
 
-        env.store.version_sources[70] = SourceRef("공지 제목", "2026-11-01", "병원 : 공지", SNUH, True, "가나병원")
+        env.store.version_sources[70] = SourceRef("공지 제목", "2026-11-01", "병원 : 공지", SNUH, True, "가나병원", 383)
         src = client.get(f"/sessions/{sid}/source", headers=owner).json()
         assert src == {
             "session_id": sid, "hospital_id": SNUH, "hospital_name": "가나병원", "board": "병원 : 공지",
             "title": "공지 제목", "posted_on": "2026-11-01", "quote": "from a study board", "origin": "user",
+            "document_id": 383,
         }
         t1 = client.post("/projects/1/tasks", headers=owner, json={"title": "Call", "due_on": on(2)})
         assert t1.status_code == 201

@@ -178,8 +178,18 @@ class SupabaseSessionStore:
             h = self._c.table("hospitals").select("name").eq("id", hospital_id).limit(1).execute().data
             name = h[0]["name"] if h else None
         return SourceRef(
-            d[0].get("title") or "", d[0].get("posted_on"), s[0].get("name") or "", hospital_id, shareable, name
+            title=d[0].get("title") or "", posted_on=d[0].get("posted_on"), board=s[0].get("name") or "",
+            hospital_id=hospital_id, shareable=shareable, hospital_name=name,
+            document_id=int(v[0]["document_id"]), source_id=int(d[0]["source_id"]),
+            members_only=bool(s[0].get("requires_login")),
         )
+
+    def is_source_member(self, user_id: str, source_id: int) -> bool:
+        rows = (
+            self._c.table("source_members").select("user_id").eq("user_id", user_id).eq("source_id", source_id)
+            .limit(1).execute().data
+        )
+        return bool(rows)
 
     # the AI job's input
     def posts_for(self, hospital_id: int, limit: int) -> list[PostBrief]:

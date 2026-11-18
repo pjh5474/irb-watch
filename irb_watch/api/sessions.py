@@ -190,6 +190,7 @@ class SourceOut(BaseModel):
     posted_on: str | None
     quote: str | None  # the AI's short quote from the post: untrusted, plain text
     origin: str  # ai | admin | user
+    document_id: int | None = None  # open /documents/{id}: the post's own page, with its normal access
 
 
 @router.get("/sessions/{session_id}/source", response_model=SourceOut)
@@ -205,6 +206,7 @@ def session_source(
     return SourceOut(
         session_id=session.id, hospital_id=ref.hospital_id or session.hospital_id, hospital_name=ref.hospital_name,
         board=ref.board, title=ref.title, posted_on=ref.posted_on, quote=session.evidence_quote, origin=session.origin,
+        document_id=ref.document_id,
     )
 
 

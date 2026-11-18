@@ -155,7 +155,7 @@ SETUP_PASS = {
     "get_step_type", "live_steps_of_type", "live_guide_ids", "form_template_ready", "hospital_exists", "document_kinds",
 }
 SESSION_PASS = {
-    "get", "sessions", "between", "same_day", "proposals", "create", "update", "version_hospital", "version_source", "posts_for",
+    "get", "sessions", "between", "same_day", "proposals", "create", "update", "version_hospital", "version_source", "is_source_member", "posts_for",
     "version_content", "create_job", "get_job", "jobs", "open_jobs_of_user", "update_job", "delete_job",
     "fail_open_jobs", "purge_jobs",
 }

@@ -17,7 +17,7 @@ Owner decisions (2026-11-15; docs/decisions.md "IRB calendar, CAL-1", pipeline-d
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -159,6 +159,9 @@ class SourceRef:
     hospital_id: int | None
     shareable: bool
     hospital_name: str | None = None
+    document_id: int | None = None  # the post's own page (/documents/{id}); its access stays the post's
+    source_id: int | None = None
+    members_only: bool = False  # the post's page opens only for admins and the source's members
 
 
 def hospital_board(source: dict) -> bool:
@@ -207,6 +210,10 @@ class SessionStore(Protocol):
         ...
     def version_source(self, version_id: int) -> SourceRef | None:
         """The post a stored document version belongs to (for the source page)."""
+        ...
+
+    def is_source_member(self, user_id: str, source_id: int) -> bool:
+        """Whether an admin assigned the user to this members-only source."""
         ...
     # the AI job
     def posts_for(self, hospital_id: int, limit: int) -> list[PostBrief]:
@@ -388,6 +395,11 @@ class SessionService:
         ref = self._store.version_source(session.evidence_version_id)
         if ref is None or not ref.shareable:
             raise NotFoundError("no source for this session")
+        # The post's own page keeps its board's access: an id nobody could open is not sent.
+        if ref.members_only and not self._is_admin(user_id) and not (
+            ref.source_id is not None and self._store.is_source_member(user_id, ref.source_id)
+        ):
+            ref = replace(ref, document_id=None)
         return session, ref
 
     def _hospital(self, hospital_id: int) -> None:

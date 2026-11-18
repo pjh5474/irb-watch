@@ -38,6 +38,7 @@ class FakeSessionStore:
         self.contents: dict[int, VersionContent] = {}  # version id -> content
         self.version_hospitals: dict[int, int] = {}
         self.version_sources: dict[int, SourceRef] = {}
+        self.source_members: set[tuple[str, int]] = set()
         self._ids = itertools.count(100)
         self.fail_between = False
 
@@ -105,6 +106,9 @@ class FakeSessionStore:
 
     def version_source(self, version_id):
         return self.version_sources.get(version_id)
+
+    def is_source_member(self, user_id, source_id):
+        return (user_id, source_id) in self.source_members
 
     # the AI job's input
     def posts_for(self, hospital_id, limit):
