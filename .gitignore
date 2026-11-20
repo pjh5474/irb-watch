@@ -8,6 +8,8 @@ __pycache__/
 .ssm-path
 .claude/settings.local.json
 data/
+# Output of irb_watch/scripts/rbay_form_probe.py (a hospital form's fields)
+rbay_probe_out/
 *.db
 .pytest_cache/
 .ruff_cache/
