@@ -457,14 +457,17 @@ def test_a_replaced_file_keeps_the_admin_s_review_only_for_the_same_fields(env):
             FieldEdit("c:body/1", "구분"),
         ],  # everything else dropped
     )
-    new = service.replace_template_file("admin-1", t.id, upload(form_bytes("과제명")))
+    # Built once: a .docx is a zip whose entries carry the save time, so two builds can differ in
+    # their bytes (and hash) when a clock tick falls between them (this test failed once in CI).
+    replacement = form_bytes("과제명")
+    new = service.replace_template_file("admin-1", t.id, upload(replacement))
     k = keys(new.fields)
     assert k["m:IRB번호"].label == "IRB 승인번호" and k["m:IRB번호"].hint == "숫자만"
     assert k["a:body/3"].label == "연구 기간(시작~끝)"  # same place, same detected label
     assert "m:과제명" in k and "m:연구제목" not in k  # a new marker starts as detected
     assert "a:body/4#u0" not in k and "a:body/6/r0/c1" not in k  # dropped before: stays dropped
     with pytest.raises(ConflictError, match="same file"):
-        service.replace_template_file("admin-1", t.id, upload(form_bytes("과제명")))
+        service.replace_template_file("admin-1", t.id, upload(replacement))
 
 
 def test_a_field_that_moved_does_not_inherit_another_field_s_label(env):
