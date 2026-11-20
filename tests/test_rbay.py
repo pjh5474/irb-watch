@@ -53,7 +53,7 @@ GATE = (FIX / "gate.html").read_text(encoding="utf-8")
 LIST = (FIX / "list_REGLA.html").read_text(encoding="utf-8")
 DETAIL = (FIX / "detail_1842962.html").read_text(encoding="utf-8")
 AGENCY = "emNyaVJpcTBZT0RnUmVvL2d6Qlordz09"
-REGLA = BoardMenu("REGLA", "N", "2604000000")
+REGLA = BoardMenu("REGLA", "N", "2604000000", "관련규정")
 PDF_KEY = "aeef8f7775d19902fcff2da70cf41f58294474d8083663cbd1e07efb2f5039e8"
 ZIP_KEY = "bbbb8f7775d19902fcff2da70cf41f58294474d8083663cbd1e07efb2f5039e8"
 SITE = f"rbay-{AGENCY}"
@@ -69,6 +69,8 @@ def summary(post_id="1842962"):
 def test_gate_menu_gives_each_board_its_path_and_menu_id():
     menus = parse_gate_menus(GATE)
     assert menus["REGLA"] == REGLA
+    assert menus["REGLA"].name == "관련규정"
+    assert menus["IRB_LIST"].name == "IRB위원 리스트"
     assert menus["NOTI"].list_path == "/mng/board/NOTI/NT/selectBoardList"
     assert menus["FORM_BOX"].menu_id == "2605000000"
     assert "selectPjtList" not in str(menus)  # study pages are not boards
@@ -283,7 +285,7 @@ def test_an_ended_session_is_a_login_problem_not_a_layout_change():
 def test_only_allowed_boards_are_opened():
     requests = []
     with pytest.raises(FetchError, match="allowed"):
-        adapter(requests).list_board("IRB_LIST")
+        adapter(requests).list_board("LAWS")
     assert requests == []
 
 
@@ -680,7 +682,7 @@ def test_post_follows_a_redirect_as_a_get_and_tls_checks_stay_on():
     "url, message",
     [
         (f"https://www.r-bay.co.kr/agency/main/{AGENCY}", "board"),
-        (f"https://www.r-bay.co.kr/agency/main/{AGENCY}?board=IRB_LIST", "board"),
+        (f"https://www.r-bay.co.kr/agency/main/{AGENCY}?board=LAWS", "board"),
         ("https://www.r-bay.co.kr/mng/gate?board=REGLA", "hospital's address"),
     ],
 )

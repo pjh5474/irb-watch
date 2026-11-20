@@ -22,7 +22,7 @@ from irb_watch.api.deps import get_credential_store
 from irb_watch.crawlers.attachments import read_attachment
 from irb_watch.crawlers.credentials import KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
-from irb_watch.crawlers.rbay import BASE_URL, HOST, RbayAdapter, _fields, agency_url
+from irb_watch.crawlers.rbay import BASE_URL, HOST, RbayAdapter, _fields, agency_url, parse_list
 from irb_watch.crawlers.rbay_contacts import has_logout_link
 from irb_watch.crawlers.rbay_login import browser_enter, logout, rbay_site_name, stored_login
 from irb_watch.crawlers.tls import rbay_ssl_context
@@ -46,6 +46,11 @@ def main(argv: list[str] | None = None) -> int:
         "--contacts", action="store_true",
         help="read the hospital's start page after the login and print its contact cards "
              "(전화, 팩스, 이메일); no board is read",
+    )
+    parser.add_argument(
+        "--menus", action="store_true",
+        help="print every board in the e-IRB menu (code, path part, label) and, for each, read the "
+             "first list page (read only) and say whether the list layout matches the adapter",
     )
     parser.add_argument(
         "--try-staff", action="store_true",
@@ -72,14 +77,17 @@ def main(argv: list[str] | None = None) -> int:
     ok = True
     adapter = RbayAdapter(make(), config["agency"], session.menus)
     try:
-        if args.contacts:
+        if args.menus:
+            ok = check_menus(adapter, session.menus)
+            declared, posts, chosen = 0, [], []
+        elif args.contacts:
             ok = check_contacts(adapter, args.try_staff)
             declared, posts, chosen = 0, [], []
         else:
             declared, posts = adapter.list_board(config["board"])
             print(f"2. board {config['board']}: {declared} posts declared, {len(posts)} read")
             chosen = [p for p in posts if p.post_id == args.post] if args.post else posts[:10]
-        if args.contacts:
+        if args.contacts or args.menus:
             pass
         elif args.post and not chosen:
             ok = False
@@ -103,6 +111,32 @@ def main(argv: list[str] | None = None) -> int:
         print(f"5. logout accepted: {accepted}; logged out (no 로그아웃 on /main): {not still_in}")
         ok = ok and accepted and not still_in
     return 0 if ok else 1
+
+
+def check_menus(adapter: RbayAdapter, menus) -> bool:
+    """Read-only: each board of the menu, its first list page (the same POST a scan sends, page 1
+    only), and whether parse_list accepts it. Prints codes, labels, counts and column heads; no
+    post is opened. A board that fails to parse is reported, not fatal."""
+    print(f"2. {len(menus)} boards in the menu:")
+    for code, menu in menus.items():
+        try:
+            response = adapter._page(  # a check script may look inside
+                menu.list_path, {"selMnuId": menu.menu_id, "currentPage": "1", "rowsPerPage": "20"}
+            )
+        except Exception as exc:  # noqa: BLE001 - report and go on
+            print(f"   {code} ({menu.name or '?'}) div={menu.div}: list not read: {type(exc).__name__}: {exc}")
+            continue
+        heads = [
+            " ".join(th.get_text().split())
+            for th in BeautifulSoup(response.text, "html.parser").select("div.list_table table thead th")
+        ]
+        try:
+            declared, posts, _ = parse_list(response.text, menu, adapter._agency)
+            verdict = f"layout OK, {declared} posts declared, {len(posts)} on page 1"
+        except Exception as exc:  # noqa: BLE001
+            verdict = f"layout NOT accepted: {type(exc).__name__}: {exc}"
+        print(f"   {code} ({menu.name or '?'}) div={menu.div}: {verdict}; columns: {heads or 'none found'}")
+    return True
 
 
 def check_contacts(adapter: RbayAdapter, try_staff: bool = False) -> bool:

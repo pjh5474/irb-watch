@@ -225,7 +225,9 @@ def test_admin_hospital_api(api):
     board = sources.create("admin", "김포우리병원 : 공지", rbay(AGENCY, "NOTI"), "owner")
     assert board.hospital_id == hid  # joins the hospital with the same name
     listed = client.get("/admin/hospitals", headers=ADMIN).json()
-    assert listed["board_kinds"] == ["notice", "forms", "regulations", "other"]
+    assert listed["board_kinds"] == [
+        "notice", "forms", "regulations", "committee_members", "news", "faq", "other",
+    ]
     [h] = listed["hospitals"]
     assert h["boards"] == [
         {

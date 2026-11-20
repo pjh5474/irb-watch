@@ -18,7 +18,7 @@ from irb_watch.services.users import AuditSink
 
 log = logging.getLogger(__name__)
 
-BOARD_KINDS = ("notice", "forms", "regulations", "other")
+BOARD_KINDS = ("notice", "forms", "regulations", "committee_members", "news", "faq", "other")
 MAX_NAME_CHARS = 100
 MAX_NOTE_CHARS = 1000
 

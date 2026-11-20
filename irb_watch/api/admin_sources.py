@@ -5,12 +5,14 @@ from pydantic import BaseModel, Field
 
 from irb_watch.api.deps import (
     get_alert_service,
+    get_board_sync_service,
     get_scan_service,
     get_source_service,
     require_admin,
 )
 from irb_watch.auth.jwt import AuthUser
 from irb_watch.services.alerts import AlertService
+from irb_watch.services.board_sync import BoardSyncService
 from irb_watch.services.scan import ScanService
 from irb_watch.services.source_login import login_site
 from irb_watch.services.sources import Source, SourceService
@@ -40,7 +42,7 @@ class SourceOut(BaseModel):
     # snuh-<board key>, or rbay-<hospital code> (one login per R-BAY hospital).
     login_site: str | None = None
     hospital_id: int | None = None  # the hospital this board belongs to
-    board_kind: str = "other"  # notice | forms | regulations | other
+    board_kind: str = "other"  # notice | forms | regulations | committee_members | news | faq | other
 
     @classmethod
     def from_source(cls, s: Source) -> "SourceOut":
@@ -127,6 +129,56 @@ def create_rbay_hospital(
     )
     return RbayHospitalOut(
         hospital_id=hospital_id, hospital_made=made, sources=[SourceOut.from_source(s) for s in sources]
+    )
+
+
+class SyncBoardsIn(BaseModel):
+    hospital_id: int
+    dry_run: bool = True  # default: only show what would be made
+
+
+class SyncGroupOut(BaseModel):
+    agency: str
+    login_user: str
+    error: str | None  # set: the menu could not be read and nothing was changed
+    menu: dict[str, str]  # every board of the e-IRB menu: code -> label
+    already: list[str]
+    to_create: list[str]
+    not_in_menu: list[str]
+    unknown: list[str]
+    created: list[SourceOut]
+    failed: dict[str, str]
+
+
+class SyncBoardsOut(BaseModel):
+    hospital_id: int
+    hospital_name: str
+    dry_run: bool
+    groups: list[SyncGroupOut]
+
+
+@router.post("/rbay-sync", response_model=SyncBoardsOut)
+def sync_rbay_boards(
+    body: SyncBoardsIn,
+    admin: AuthUser = Depends(require_admin),
+    service: BoardSyncService = Depends(get_board_sync_service),
+) -> SyncBoardsOut:
+    """Add the boards this R-BAY hospital has (IRB committee list, news, other, FAQ, ...) but the
+    server does not read yet. One login per call, so call it once per hospital. Default is a dry
+    run; send dry_run=false to create the sources (the first scan of each is a silent baseline)."""
+    r = service.sync(admin.id, body.hospital_id, body.dry_run)
+    return SyncBoardsOut(
+        hospital_id=r.hospital_id,
+        hospital_name=r.hospital_name,
+        dry_run=r.dry_run,
+        groups=[
+            SyncGroupOut(
+                agency=g.agency, login_user=g.login_user, error=g.error, menu=g.menu, already=g.already,
+                to_create=g.to_create, not_in_menu=g.not_in_menu, unknown=g.unknown,
+                created=[SourceOut.from_source(s) for s in g.created], failed=g.failed,
+            )
+            for g in r.groups
+        ],
     )
 
 

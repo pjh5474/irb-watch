@@ -67,6 +67,7 @@ from irb_watch.services.ai_instructions import (
     summary_preview,
 )
 from irb_watch.services.alerts import AlertService
+from irb_watch.services.board_sync import BoardSyncService
 from irb_watch.services.calendar import CalendarService
 from irb_watch.services.contacts import ContactService, StaffRead, staff_dicts
 from irb_watch.services.digest import DigestService
@@ -346,6 +347,20 @@ def get_source_service() -> SourceService:
     return SourceService(
         SupabaseSourceStore(client), SupabaseAuditSink(client), hospitals=get_hospital_service()
     )
+
+
+def _read_rbay_menu(user: str, agency: str, site: str) -> dict[str, str]:
+    """The boards of a hospital's e-IRB menu (code -> label), read in a pooled session. An admin
+    started this, so a remembered rejected login is tried once more."""
+    lease = RBAY_POOL.acquire(user, agency, site, get_credential_store(), person_started=True)
+    try:
+        return {code: menu.name for code, menu in lease.session.menus.items()}
+    finally:
+        RBAY_POOL.release(lease.session)
+
+
+def get_board_sync_service() -> BoardSyncService:
+    return BoardSyncService(get_source_service(), get_hospital_service(), _read_rbay_menu)
 
 
 def get_member_service() -> MemberService:

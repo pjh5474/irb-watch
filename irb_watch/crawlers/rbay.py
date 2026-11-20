@@ -41,11 +41,18 @@ BASE_URL = "https://www.r-bay.co.kr"
 HOST = "www.r-bay.co.kr"
 HOSTS = (HOST, "r-bay.co.kr")  # hospitals link both; sources are always stored with www
 AGENCY_PATH = re.compile(r"^/agency/main/([A-Za-z0-9_\-=]{8,128})$")
-# Boards the owner chose (2026-11-10). Others (LAWS, ETC, NEWS, FAQ, ...) can be added later;
-# board codes outside this list are refused so the adapter never opens an unknown page.
-BOARDS = {"REGLA": "관련규정", "FORM_BOX": "양식함", "NOTI": "공지"}
+# Boards the owner chose (2026-11-10; IRB_LIST, NEWS, ETC, FAQ added 2026-11-20, codes read from
+# a live menu). Others (LAWS, QnA, PHARM_LIST, ...) can be added later; board codes outside this
+# list are refused so the adapter never opens an unknown page. A hospital may lack any of them.
+BOARDS = {
+    "REGLA": "관련규정", "FORM_BOX": "양식함", "NOTI": "공지",
+    "IRB_LIST": "IRB위원 리스트", "NEWS": "뉴스", "ETC": "기타", "FAQ": "FAQ",
+}
 # The board kind (sources.board_kind) each board starts with.
-BOARD_KINDS = {"REGLA": "regulations", "FORM_BOX": "forms", "NOTI": "notice"}
+BOARD_KINDS = {
+    "REGLA": "regulations", "FORM_BOX": "forms", "NOTI": "notice",
+    "IRB_LIST": "committee_members", "NEWS": "news", "ETC": "other", "FAQ": "faq",
+}
 ROWS_PER_PAGE = 200  # the largest page size the site offers
 CHECK_MAX_BYTES = 64_000  # the file check answers a few dozen bytes of JSON
 MAX_PAGES = 20
@@ -66,6 +73,7 @@ class BoardMenu:
     code: str  # e.g. REGLA
     div: str  # e.g. N (part of the path)
     menu_id: str  # selMnuId, differs per hospital
+    name: str = ""  # the menu's own label (data-mnu-nm), e.g. 관련규정; for reports only
 
     @property
     def list_path(self) -> str:
@@ -102,7 +110,8 @@ def parse_gate_menus(html: str) -> dict[str, BoardMenu]:
         match = _BOARD_LINK.match(el.get("data-link", ""))
         menu_id = el.get("data-mnu-id", "")
         if match and menu_id.isdigit() and match.group(1) not in menus:
-            menus[match.group(1)] = BoardMenu(match.group(1), match.group(2), menu_id)
+            label = collapse_whitespace(el.get("data-mnu-nm", "") or el.get_text())
+            menus[match.group(1)] = BoardMenu(match.group(1), match.group(2), menu_id, label)
     if not menus:
         raise LayoutChangedError("e-IRB start page: no board menu found")
     return menus
