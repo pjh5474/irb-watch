@@ -22,6 +22,7 @@ from irb_watch.config import get_settings
 from irb_watch.crawlers.credentials import CredentialStore, KeyringCredentialStore
 from irb_watch.crawlers.fetcher import SafeFetcher
 from irb_watch.crawlers.rbay_login import POOL as RBAY_POOL
+from irb_watch.crawlers.rbay_login import browser_check_login
 from irb_watch.crawlers.rbay_reader import RbaySourceReader
 from irb_watch.crawlers.snuh import SnuhAdapter
 from irb_watch.crawlers.snuh_reader import SnuhSourceReader
@@ -56,6 +57,7 @@ from irb_watch.db.sessions import SupabaseSessionStore
 from irb_watch.db.sites import SupabaseSiteStore
 from irb_watch.db.supabase_users import SupabaseAuditSink, SupabaseAuthAdmin, SupabaseUserStore
 from irb_watch.db.tasks import SupabaseTaskStore
+from irb_watch.db.user_credentials import SupabaseUserLoginStore
 from irb_watch.db.weekly import SupabaseWeeklyStore
 from irb_watch.mail.client import ResendMailer
 from irb_watch.services.agent import AgentService
@@ -94,6 +96,8 @@ from irb_watch.services.sources import RBAY_ADAPTER, Source, SourceService
 from irb_watch.services.summaries import SummaryService
 from irb_watch.services.tasks import TaskService
 from irb_watch.services.token_login import FailureLimiter, TokenLoginService
+from irb_watch.services.user_logins import UserLoginService
+from irb_watch.services.user_rbay import UserRbaySessions
 from irb_watch.services.users import UserService, UserStore
 from irb_watch.services.weekly import WeeklyStatsService
 
@@ -241,6 +245,23 @@ def get_draft_job_service() -> DraftJobService:
 
 def get_audit_sink() -> SupabaseAuditSink:
     return SupabaseAuditSink(get_supabase_client())
+
+
+@lru_cache
+def _login_test_runner() -> ThreadRunner:
+    """Its own small pool: a login test (a headless browser, 5-20 s) never holds a draft worker."""
+    return ThreadRunner(workers=2, name="rbay-login-test")
+
+
+def get_user_login_service() -> UserLoginService:
+    """A person's own R-BAY login (user_site_credentials). Separate from the platform's logins."""
+    store = SupabaseUserLoginStore(get_supabase_client(), get_settings().credentials_key)
+    return UserLoginService(store, get_audit_sink(), browser_check_login, _login_test_runner())
+
+
+def get_user_rbay_sessions() -> UserRbaySessions:
+    """For IRB jobs a person starts: a session on R-BAY as that person, logged out afterwards."""
+    return UserRbaySessions(get_user_login_service())
 
 
 def get_credential_store() -> CredentialStore:

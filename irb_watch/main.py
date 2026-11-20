@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -31,6 +32,7 @@ from irb_watch.api import (
     documents,
     files,
     health,
+    me_rbay_login,
     pipelines,
     projects,
     sessions,
@@ -62,6 +64,10 @@ async def lifespan(_: FastAPI):
         deps.get_session_service().fail_unfinished()
     except Exception:
         logging.getLogger(__name__).exception("open session jobs could not be checked at start")
+    try:  # and for the users' R-BAY login tests
+        deps.get_user_login_service().fail_unfinished()
+    except Exception:
+        logging.getLogger(__name__).exception("open R-BAY login tests could not be checked at start")
     try:  # and for ALL-SEARCH (the posts a read stored are kept)
         deps.get_all_search_service().fail_unfinished()
     except Exception:
@@ -126,6 +132,15 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's default 422 echoes each bad value back ("input"). That would send a password
+    (e.g. one that is too long) straight back in the body, so the values are left out: the
+    answer names the field and the problem only."""
+    detail = [{"type": e.get("type"), "loc": e.get("loc"), "msg": e.get("msg")} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
 @app.exception_handler(ServiceError)
 async def service_error_handler(_: Request, exc: ServiceError) -> JSONResponse:
     return JSONResponse(
@@ -158,6 +173,7 @@ app.include_router(admin_templates.router)
 app.include_router(admin_ai.router)
 app.include_router(documents.router)
 app.include_router(files.router)
+app.include_router(me_rbay_login.router)
 app.include_router(pipelines.router)
 app.include_router(work.router)
 app.include_router(projects.router)

@@ -121,6 +121,70 @@ def _first_line(exc: Exception) -> str:
     return (str(exc).splitlines() or [type(exc).__name__])[0][:200]
 
 
+def _submit_login(page, credentials: Credentials, dialogs: list[str], timeout_ms: int) -> None:
+    """Fill and send the main login form. Returns when R-BAY left /login; raises LoginRejectedError
+    when the site said no (its pop-up text is the reason), SiteUnavailableError when it said nothing."""
+    page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded")
+    if page.locator("#loginId").count() == 0 or page.locator("#loginPwd").count() == 0:
+        raise LayoutChangedError("the R-BAY login form changed (ID or password box not found)")
+    page.fill("#loginId", credentials.login_id)
+    page.fill("#loginPwd", credentials.password)
+    page.click("#btnLogin")
+    # Success leaves /login. A refusal is an in-page notice (#usrLoginRsltText, seen live 2026-11-20:
+    # "아이디 비밀번호가 일치 하지 않습니다. 로그인에 5회 실패하면 ... 로그인이 제한됩니다"), which is
+    # the immediate answer. A browser dialog is only a last-resort reason, used after the wait (as
+    # before): a good login may show a notice dialog just before it redirects, and that must never
+    # read as a refusal.
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if "/login" not in page.url:
+            return
+        try:
+            notice = page.locator("#usrLoginRsltText")
+            text = " ".join(notice.first.inner_text().split())[:200] if notice.count() and notice.first.is_visible() else ""
+        except PlaywrightError:
+            text = ""  # the page is navigating away (a good login): look again, do not fail
+        if text:
+            raise LoginRejectedError(f"R-BAY login rejected: {text}")
+        page.wait_for_timeout(250)
+    if dialogs:  # no redirect and no notice, but a dialog told us something: that is the reason
+        raise LoginRejectedError(f"R-BAY login rejected: {dialogs[-1]}")
+    raise SiteUnavailableError(f"R-BAY did not finish the login within {timeout_ms // 1000} s (no answer given)")
+
+
+def browser_check_login(credentials: Credentials, timeout_ms: int = 20_000) -> None:
+    """Log in on the R-BAY main site only (no hospital) and log out again with the site's own
+    logout (POST /logout, what its linkLogout() sends; found live 2026-11-20). Raises the same
+    errors as browser_enter for the login part. A logout that cannot be confirmed is logged: the
+    session then ends by R-BAY's idle timeout."""
+    validate_url(f"{BASE_URL}/login")
+    dialogs: list[str] = []
+
+    def on_dialog(dialog) -> None:
+        dialogs.append(dialog.message.strip()[:200])
+        dialog.dismiss()
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_default_timeout(timeout_ms)
+            page.on("dialog", on_dialog)
+            try:
+                _submit_login(page, credentials, dialogs, timeout_ms)
+            except PlaywrightError as exc:
+                raise SiteUnavailableError(f"R-BAY could not be reached by the browser: {_first_line(exc)}") from None
+            # The password is proven from here on: nothing in the logout may turn it into a failure.
+            try:  # a notice pop-up may cover the link, so call the page's own function
+                with page.expect_response(lambda r: r.url.endswith("/logout"), timeout=10_000):
+                    page.evaluate("() => linkLogout()")
+            except Exception:  # noqa: BLE001  (the login is proven; any logout trouble is only logged)
+                log.warning("R-BAY main-site logout could not be confirmed; it ends by idle timeout")
+        finally:
+            browser.close()
+
+
 def browser_enter(agency: str, credentials: Credentials, timeout_ms: int = 20_000) -> RbaySession:
     """Log in and enter one hospital's e-IRB. See the module notes for which error means what."""
     login_url, start_url = f"{BASE_URL}/login", agency_url(agency)
@@ -139,20 +203,7 @@ def browser_enter(agency: str, credentials: Credentials, timeout_ms: int = 20_00
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             page.on("dialog", on_dialog)
-            page.goto(login_url, wait_until="domcontentloaded")
-            if page.locator("#loginId").count() == 0 or page.locator("#loginPwd").count() == 0:
-                raise LayoutChangedError("the R-BAY login form changed (ID or password box not found)")
-            page.fill("#loginId", credentials.login_id)
-            page.fill("#loginPwd", credentials.password)
-            page.click("#btnLogin")
-            try:
-                page.wait_for_url(lambda u: "/login" not in u, timeout=timeout_ms)
-            except PlaywrightTimeout:
-                if dialogs:  # the site told us why: that is a real answer about the password
-                    raise LoginRejectedError(f"R-BAY login rejected: {dialogs[-1]}") from None
-                raise SiteUnavailableError(
-                    f"R-BAY did not finish the login within {timeout_ms // 1000} s (no answer given)"
-                ) from None
+            _submit_login(page, credentials, dialogs, timeout_ms)
 
             page.goto(start_url, wait_until="domcontentloaded")
             enter = page.locator("a:has-text('입장하기')")
