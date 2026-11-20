@@ -547,13 +547,16 @@ def enter_form(page: Page, recorder: Recorder, project_type: str, affiliation: s
     label.click(timeout=3000)
     recorder.accept_next = True
     try:
-        page.locator("#btnNewAplGoReg").click(timeout=3000)
+        # no_wait_after: the click itself must not wait for the navigation its confirm starts
+        page.locator("#btnNewAplGoReg").click(timeout=15_000, no_wait_after=True)
         page.wait_for_url("**/mergeTempAplRegMod", timeout=15_000)
     except (PlaywrightError, PlaywrightTimeout) as exc:
         where = urlsplit(page.url).path
+        confirmed = not recorder.accept_next  # the handler clears it when it accepts the confirm
         raise ProbeError(
             f"the form did not open after 신청서 작성하기 (page: {where}; {type(exc).__name__}: {str(exc)[:120]}; "
-            f"dialogs: {recorder.dialogs[-2:]})"
+            f"confirm {'accepted' if confirmed else 'never appeared'}; dialogs: {recorder.dialogs[-2:]})"
+            + ("; R-BAY may already have created a draft, check before running again" if confirmed else "")
         ) from None
     finally:
         recorder.accept_next = False
